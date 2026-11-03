@@ -1,0 +1,4610 @@
+# DiffTomo
+
+A PyTorch library for **differentiable tomographic and medical image reconstruction**, bringing together classical and deep learning methods in one place.
+
+DiffTomo is designed to cover multiple imaging modalities, including CT, MRI and PET, with differentiable forward and backward operators that can sit directly inside neural network pipelines. At the moment the library contains CT functions only. MRI and PET reconstruction are planned.
+
+## Features
+
+### Currently available (CT)
+
+- **Differentiable projectors** implemented as CUDA kernels with autograd support
+  - Parallel-beam: forward projection, backprojection and filtered backprojection (FBP)
+  - Fan-beam: forward projection, backprojection and filtered backprojection (FBP)
+- **FBP filters:** `ram-lak`, `shepp-logan`, `cosine`, `hamming`, `hann`
+- **Iterative reconstruction:** SIRT, TV regularization, TGV regularization
+- **Data:** Shepp-Logan phantom and sample datasets (carved cheese, walnut)
+- **Pretrained models:** loading support for a small set of models
+
+### Planned
+
+- MRI reconstruction
+- PET reconstruction
+- More classical and deep learning methods across modalities
+
+## Requirements
+
+- Python 3.10+
+- PyTorch with CUDA support
+- An NVIDIA GPU and a CUDA toolkit (`nvcc`) matching your PyTorch build
+- `ninja` (the CUDA extension is compiled just in time)
+
+## Documentation
+
+For guidelines and how to use the library, see the [docs](docs/).
+
+## Installation
+
+```bash
+git clone https://github.com/yourusername/difftomo.git
+cd difftomo
+pip install -e .
+```
+
+## Repository layout
+
+```
+difftomo/         # library source
+  CT/             # projectors and iterative methods
+  data/           # phantoms and datasets
+docs/             # documentation and examples
+test/             # tests
+```
+
+## Roadmap
+
+- [ ] ART and SART
+- [ ] Helsinki CT dataset and more pretrained models
+- [ ] A learned, transformer attention-based iterative filter that replaces the fixed FBP filter, to study how the filter affects reconstruction quality
+- [ ] MRI reconstruction functions
+- [ ] PET reconstruction functions
+
+### difftomo/__init__.py
+```
+
+```
+
+### difftomo/utils.py
+```
+from pathlib import Path
+import zipfile
+import requests
+from scipy.io import loadmat
+from tqdm import tqdm
+import h5py
+import numpy as np
+from concurrent.futures import ThreadPoolExecutor
+
+
+def load_mat(path):
+    path = Path(path)
+
+    try:
+        return loadmat(path)
+
+    except NotImplementedError:
+        with h5py.File(path, "r") as f:
+            return {
+                key: np.array(f[key]) for key in f.keys() if not key.startswith("#")
+            }
+
+
+def download_chunk(byte_range, url, destination, timeout=60):
+    start, end = byte_range
+
+    headers = {"Range": f"bytes={start}-{end}"}
+
+    with requests.get(
+        url,
+        headers=headers,
+        stream=True,
+        allow_redirects=True,
+        timeout=timeout,
+    ) as response:
+        if response.status_code != 206:
+            raise RuntimeError(
+                f"Expected HTTP 206 for range {start}-{end}, got {response.status_code}"
+            )
+
+        with destination.open("r+b") as f:
+            f.seek(start)
+
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+
+
+def download_file(
+    url,
+    destination,
+    workers=8,
+    chunk_size=4 * 1024 * 1024,
+    timeout=60,
+):
+    destination = Path(destination)
+
+    if destination.exists():
+        return 1
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    # Get the total file size
+    response = requests.head(
+        url,
+        allow_redirects=True,
+        timeout=timeout,
+    )
+
+    response.raise_for_status()
+
+    content_length = response.headers.get("Content-Length")
+
+    if content_length is None:
+        # Fall back to normal streaming download
+        with requests.get(
+            url,
+            stream=True,
+            allow_redirects=True,
+            timeout=timeout,
+        ) as response:
+            response.raise_for_status()
+
+            with destination.open("wb") as f:
+                for chunk in tqdm(
+                    response.iter_content(chunk_size=chunk_size),
+                    desc=destination.name,
+                    unit="B",
+                    unit_scale=True,
+                ):
+                    if chunk:
+                        f.write(chunk)
+
+        return 1
+
+    total_size = int(content_length)
+
+    ranges = [
+        (start, min(start + chunk_size - 1, total_size - 1))
+        for start in range(0, total_size, chunk_size)
+    ]
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        list(
+            tqdm(
+                executor.map(
+                    lambda byte_range: download_chunk(
+                        byte_range,
+                        url,
+                        destination,
+                        timeout,
+                    ),
+                    ranges,
+                ),
+                total=len(ranges),
+                desc=destination.name,
+                unit="chunk",
+            )
+        )
+
+    return 1
+
+
+def extract_zip(path, destination):
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(path) as zip_ref:
+        zip_ref.extractall(destination)
+        return 1
+
+    return 0
+```
+
+### difftomo/CT/__init__.py
+```
+
+```
+
+### difftomo/CT/_extensions.py
+```
+from pathlib import Path
+import os
+import importlib.abc
+from torch.utils.cpp_extension import load
+
+
+os.environ.setdefault("CC", "/usr/bin/gcc-12")
+os.environ.setdefault("CXX", "/usr/bin/g++-12")
+
+_PROJECTOR_DIR = Path(__file__).parent
+
+difftomo_cuda = load(
+    name="difftomo_cuda",
+    sources=[
+        str("CT" / _PROJECTOR_DIR / "Cpp_files" / "bindings_cuda.cpp"),
+        str("CT" / _PROJECTOR_DIR / "Cuda_files" / "SiddonAlgorithm.cu"),
+    ],
+    verbose=True,
+)
+
+difftomo_cpu = load(
+    name="difftomo_cpu",
+    sources=[
+        str("CT" / _PROJECTOR_DIR / "Cpp_files" / "bindings_cpu.cpp"),
+        str("CT" / _PROJECTOR_DIR / "Cpp_files" / "SiddonAlgorithm.cpp"),
+        str("CT" / _PROJECTOR_DIR / "Cpp_files" / "ARTAlgo.cpp"),
+    ],
+    extra_include_paths=[str(_PROJECTOR_DIR)],
+    verbose=True,
+)
+
+forward_siddon = difftomo_cuda.forward_siddon
+backward_siddon = difftomo_cuda.backward_siddon
+
+forward_siddon_cpu = difftomo_cpu.forward_siddon_cpu
+backward_siddon_cpu = difftomo_cpu.backward_siddon_cpu
+ARTReconstruction = difftomo_cpu.ARTRecon
+```
+
+### difftomo/data/__init__.py
+```
+from .walnut import WalnutDataset
+from .carved_cheese import CarvedCheeseDataset
+from .phantom import SheppLogan
+
+__all__ = ["WalnutDataset", "CarvedCheeseDataset", "SheppLogan"]
+```
+
+### difftomo/data/carved_cheese.py
+```
+from ..utils import download_file, load_mat
+from pathlib import Path
+import torch
+import numpy as np
+from scipy.sparse import csc_matrix
+import h5py
+
+
+class CarvedCheeseDataset:
+    def __init__(self, res=256, projections=45, view="Full"):
+        self.resolution = res
+        self.projections = projections
+        self.view = view
+
+        self.destination = Path("CarvedCheese")
+
+        self.url_base = "https://zenodo.org/records/1254210/files"
+
+        # File required for this particular configuration
+        self.data_filename = f"Data{self.view}_{self.resolution}x{self.projections}.mat"
+
+        self.url_list = [
+            f"{self.url_base}/{self.data_filename}?download=1",
+            f"{self.url_base}/FullSizeSinograms.mat?download=1",
+            f"{self.url_base}/GroundTruthReconstruction.mat?download=1",
+        ]
+
+        self.downloaded = self._download_folder(
+            self.url_list,
+            self.destination,
+        )
+
+        self.sinogram = self._extract_sinogram(
+            self.resolution,
+            self.projections,
+            self.view,
+        )
+
+        self.matrix = self._extract_system_matrix(
+            self.resolution,
+            self.projections,
+            self.view,
+        )
+
+        self.gt = self._extract_gt()
+
+    def _download_folder(self, url_list, destination):
+        destination.mkdir(parents=True, exist_ok=True)
+
+        for url in url_list:
+            filename = Path(url.split("?")[0]).name
+            output_path = destination / filename
+
+            if output_path.exists():
+                print(f"{filename} already exists. Skipping download.")
+                continue
+
+            print(f"Downloading {filename}...")
+            download_file(url, output_path)
+
+        return 1
+
+    def _extract_sinogram(self, res, projections, view):
+        path = self.destination / f"Data{view}_{res}x{projections}.mat"
+        return torch.tensor(load_mat(path)["m"])
+
+    def extract_measured_sinograms(self, projections=15, view="Full"):
+        path = self.destination / "FullSizeSinograms.mat"
+        return torch.tensor(load_mat(path)[f"sinogram{projections}{view}View"])
+
+    def _extract_norm(self, view, res, projections):
+        path = self.destination / f"Data{view}_{res}x{projections}.mat"
+        return torch.tensor(load_mat(path)["normA"])
+
+    def _extract_system_matrix(self, res, projections, view):
+        filename = f"Data{view}_{res}x{projections}.mat"
+        path = Path(self.destination) / filename
+
+        with h5py.File(path, "r") as f:
+            A = f["A"]
+
+            data = np.array(A["data"]).squeeze()
+            ir = np.array(A["ir"]).squeeze().astype(np.int64)
+            jc = np.array(A["jc"]).squeeze().astype(np.int64)
+
+            return csc_matrix((data, ir, jc))
+
+    def _extract_gt(self):
+        path = self.destination / "GroundTruthReconstruction.mat"
+        return torch.tensor(load_mat(path)["FBP360"])
+```
+
+### difftomo/data/phantom.py
+```
+import numpy as np
+import torch
+from pathlib import Path
+
+
+class SheppLogan:
+    def __init__(self):
+        self.path = (
+            Path(__file__).resolve().parents[2]
+            / "difftomo"
+            / "data"
+            / "image"
+            / "shepp_logan.npy"
+        )
+        self.data = torch.tensor(np.load(self.path))
+```
+
+### difftomo/data/walnut.py
+```
+from ..utils import download_file, extract_zip
+from pathlib import Path
+from scipy.io import loadmat
+import torch
+import numpy as np
+
+
+class WalnutDataset:
+    def __init__(self, res=82):
+        self.path = f"Walnut_dataset/Data{res}.mat"
+        self.gt_path = "Walnut_dataset/GroundTruthReconstruction.mat"
+        self.og_path = "Walnut_dataset/FullSizeSinograms.mat"
+        self.url, self.destination = (
+            "https://zenodo.org/api/records/1254206/files-archive",
+            "Walnut_dataset",
+        )
+        self.downloaded = download_file(self.url, "files_archive")
+        self.unzipped = extract_zip(Path("files_archive"), Path(self.destination))
+        self.system_matrix = self._extract_system_matrix(self.path)
+        self.sino_res = self._extract_sinogram(self.path)
+        self.sino120 = self._get_og_data(self.og_path)
+        self.sino1200 = self._get_og_data(self.og_path)
+        self.gt = self._get_gt_data(self.gt_path)
+
+    def _extract_system_matrix(self, path):
+        data = loadmat(path)
+        data = data["A"]
+        data = data.tocoo()
+
+        indices = torch.tensor(np.array([data.row, data.col]), dtype=torch.long)
+        values = torch.tensor(np.array(data.data), dtype=torch.float32)
+
+        return torch.sparse_coo_tensor(indices, values, size=data.shape)
+
+    def _extract_sinogram(self, path):
+        data = loadmat(path)
+        data = data["m"]
+
+        return torch.tensor(data)
+
+    def _get_gt_data(self, path):
+        data = loadmat(path)
+        data = data["FBP1200"]
+
+        return torch.from_numpy(data.astype(np.float32))
+
+    def _get_og_data(self, path):
+        data = loadmat(path)
+        data = data["sinogram1200"]
+        return torch.from_numpy(data.astype(np.float32))
+```
+
+### difftomo/CT/Cpp_files/ARTAlgo.cpp
+```
+#include "header_files/Algorithms.h"
+#include <algorithm>
+#include <thread>
+#include <torch/extension.h>
+#include <vector>
+
+using std::max;
+using std::min;
+
+float aTa_norm(int projections, int detector_bins, float detector_spacing,
+               int height, int width, int ray_index, float coverage,
+               float distance, char type) {
+
+  int projection_index = ray_index / detector_bins;
+  int detector_index = ray_index % detector_bins;
+
+  float bx = -(height / 2.0f);
+  float by = -(width / 2.0f);
+  float u = detector_spacing * (detector_index - detector_bins / 2.0f);
+
+  // thread starts executing here so calculate ray for this detector index and
+  // projection index
+  float p1[2];
+  float p2[2];
+  float angle;
+
+  if (type == 'p') {
+    angle = projection_index * coverage / projections;
+
+    p1[0] = distance * cosf(angle) - u * sinf(angle);
+    p1[1] = distance * sinf(angle) + u * cosf(angle);
+
+    p2[0] = -distance * cosf(angle) - u * sinf(angle);
+    p2[1] = -distance * sinf(angle) + u * cosf(angle);
+  }
+
+  else if (type == 'f') {
+    angle = projection_index * coverage / projections;
+
+    p1[0] = distance * sinf(angle);
+    p1[1] = distance * cosf(angle);
+
+    p2[0] = -distance * sinf(angle) + u * cosf(angle);
+    p2[1] = -distance * cosf(angle) - u * sinf(angle);
+  }
+
+  float dx = p2[0] - p1[0];
+  float dy = p2[1] - p1[1];
+  float d_conv = sqrtf(dx * dx + dy * dy);
+
+  // Parametric boundaries for x and y planes
+  float ax_min = (std::abs(dx) > 1e-6f)
+                     ? min((bx - p1[0]) / dx, (bx + height - p1[0]) / dx)
+                     : -1e9f;
+  float ax_max = (std::abs(dx) > 1e-6f)
+                     ? max((bx - p1[0]) / dx, (bx + height - p1[0]) / dx)
+                     : 1e9f;
+
+  float ay_min = (std::abs(dy) > 1e-6f)
+                     ? min((by - p1[1]) / dy, (by + width - p1[1]) / dy)
+                     : -1e9f;
+  float ay_max = (std::abs(dy) > 1e-6f)
+                     ? max((by - p1[1]) / dy, (by + width - p1[1]) / dy)
+                     : 1e9f;
+
+  float alpha_min = max(0.0f, max(ax_min, ay_min));
+  float alpha_max = min(1.0f, min(ax_max, ay_max));
+
+  float d_ax = (std::abs(dx) > 1e-6f) ? 1.0f / std::abs(dx) : 1e9f;
+  float d_ay = (std::abs(dy) > 1e-6f) ? 1.0f / std::abs(dy) : 1e9f;
+
+  // Initial alpha values
+  float ax_next = 1e9f;
+  if (std::abs(dx) > 1e-6f) {
+    float rx_entry = p1[0] + alpha_min * dx - bx;
+    int next_i = (dx > 0) ? (int)floorf(rx_entry) + 1 : (int)floorf(rx_entry);
+    ax_next = (bx + (float)next_i - p1[0]) / dx;
+    if (ax_next <= alpha_min)
+      ax_next += d_ax;
+  }
+
+  float ay_next = 1e9f;
+  if (std::abs(dy) > 1e-6f) {
+    float ry_entry = p1[1] + alpha_min * dy - by;
+    int next_j = (dy > 0) ? (int)floorf(ry_entry) + 1 : (int)floorf(ry_entry);
+    ay_next = (by + (float)next_j - p1[1]) / dy;
+    if (ay_next <= alpha_min)
+      ay_next += d_ay;
+  }
+
+  float alpha_curr = alpha_min;
+  float sum = 0.0f;
+
+  // Ray marching loop
+  while (alpha_curr < alpha_max - 1e-6f) {
+    float alpha_next = min(alpha_max, min(ax_next, ay_next));
+    float mid_alpha = (alpha_curr + alpha_next) * 0.5f;
+
+    int img_i = (int)floorf(p1[0] + mid_alpha * dx - bx);
+    int img_j = (int)floorf(p1[1] + mid_alpha * dy - by);
+
+    if (img_i >= 0 && img_i < height && img_j >= 0 && img_j < width) {
+      float length = (alpha_next - alpha_curr) * d_conv;
+      sum += length * length;
+    }
+
+    if (ax_next < ay_next) {
+      ax_next += d_ax;
+    } else {
+      ay_next += d_ay;
+    }
+    alpha_curr = alpha_next;
+  }
+
+  return sum;
+}
+
+float aTx_k(float *image, int projections, int detector_bins,
+            float detector_spacing, int batches, int channels, int height,
+            int width, int batch_index, int channel_index, int ray_index,
+            float coverage, float distance, char type) {
+
+  int projection_index = ray_index / detector_bins;
+  int detector_index = ray_index % detector_bins;
+  float bx = -(height / 2.0f);
+  float by = -(width / 2.0f);
+  float u = detector_spacing * (detector_index - detector_bins / 2.0f);
+
+  // thread starts executing here so calculate ray for this detector index and
+  // projection index
+  float p1[2];
+  float p2[2];
+  float angle;
+
+  if (type == 'p') {
+    angle = projection_index * coverage / projections;
+
+    p1[0] = distance * cosf(angle) - u * sinf(angle);
+    p1[1] = distance * sinf(angle) + u * cosf(angle);
+
+    p2[0] = -distance * cosf(angle) - u * sinf(angle);
+    p2[1] = -distance * sinf(angle) + u * cosf(angle);
+  }
+
+  else if (type == 'f') {
+    angle = projection_index * coverage / projections;
+
+    p1[0] = distance * sinf(angle);
+    p1[1] = distance * cosf(angle);
+
+    p2[0] = -distance * sinf(angle) + u * cosf(angle);
+    p2[1] = -distance * cosf(angle) - u * sinf(angle);
+  }
+
+  float dx = p2[0] - p1[0];
+  float dy = p2[1] - p1[1];
+  float d_conv = sqrtf(dx * dx + dy * dy);
+
+  // Parametric boundaries for x and y planes
+  float ax_min = (std::abs(dx) > 1e-6f)
+                     ? min((bx - p1[0]) / dx, (bx + height - p1[0]) / dx)
+                     : -1e9f;
+  float ax_max = (std::abs(dx) > 1e-6f)
+                     ? max((bx - p1[0]) / dx, (bx + height - p1[0]) / dx)
+                     : 1e9f;
+
+  float ay_min = (std::abs(dy) > 1e-6f)
+                     ? min((by - p1[1]) / dy, (by + width - p1[1]) / dy)
+                     : -1e9f;
+  float ay_max = (std::abs(dy) > 1e-6f)
+                     ? max((by - p1[1]) / dy, (by + width - p1[1]) / dy)
+                     : 1e9f;
+
+  float alpha_min = max(0.0f, max(ax_min, ay_min));
+  float alpha_max = min(1.0f, min(ax_max, ay_max));
+
+  float d_ax = (std::abs(dx) > 1e-6f) ? 1.0f / std::abs(dx) : 1e9f;
+  float d_ay = (std::abs(dy) > 1e-6f) ? 1.0f / std::abs(dy) : 1e9f;
+
+  // Initial alpha values
+  float ax_next = 1e9f;
+  if (std::abs(dx) > 1e-6f) {
+    float rx_entry = p1[0] + alpha_min * dx - bx;
+    int next_i = (dx > 0) ? (int)floorf(rx_entry) + 1 : (int)floorf(rx_entry);
+    ax_next = (bx + (float)next_i - p1[0]) / dx;
+    if (ax_next <= alpha_min)
+      ax_next += d_ax;
+  }
+
+  float ay_next = 1e9f;
+  if (std::abs(dy) > 1e-6f) {
+    float ry_entry = p1[1] + alpha_min * dy - by;
+    int next_j = (dy > 0) ? (int)floorf(ry_entry) + 1 : (int)floorf(ry_entry);
+    ay_next = (by + (float)next_j - p1[1]) / dy;
+    if (ay_next <= alpha_min)
+      ay_next += d_ay;
+  }
+
+  float alpha_curr = alpha_min;
+  float sum = 0.0f;
+
+  // Ray marching loop
+  while (alpha_curr < alpha_max - 1e-6f) {
+    float alpha_next = min(alpha_max, min(ax_next, ay_next));
+    float mid_alpha = (alpha_curr + alpha_next) * 0.5f;
+
+    int img_i = (int)floorf(p1[0] + mid_alpha * dx - bx);
+    int img_j = (int)floorf(p1[1] + mid_alpha * dy - by);
+
+    if (img_i >= 0 && img_i < height && img_j >= 0 && img_j < width) {
+      float length = (alpha_next - alpha_curr) * d_conv;
+      sum += length *
+             image[batch_index * channels * height * width +
+                   channel_index * height * width + img_i * width + img_j];
+    }
+
+    if (ax_next < ay_next) {
+      ax_next += d_ax;
+    } else {
+      ay_next += d_ay;
+    }
+    alpha_curr = alpha_next;
+  }
+
+  return sum;
+}
+
+void y_ai(float val, float *output, int projections, int detector_bins,
+          float detector_spacing, int channels, int height, int width,
+          int batch_index, int channel_index, int ray_index, float coverage,
+          float distance, char type) {
+  int projection_index = ray_index / detector_bins;
+  int detector_index = ray_index % detector_bins;
+
+  // ray origin
+  float bx = -(height / 2.0f);
+  float by = -(width / 2.0f);
+  float u = detector_spacing * (detector_index - detector_bins / 2.0f);
+
+  // thread starts executing here so calculate ray for this detector index and
+  // projection index
+  float p1[2];
+  float p2[2];
+  float angle;
+
+  if (type == 'p') {
+    angle = projection_index * coverage / projections;
+
+    p1[0] = distance * cosf(angle) - u * sinf(angle);
+    p1[1] = distance * sinf(angle) + u * cosf(angle);
+
+    p2[0] = -distance * cosf(angle) - u * sinf(angle);
+    p2[1] = -distance * sinf(angle) + u * cosf(angle);
+  }
+
+  else if (type == 'f') {
+    angle = projection_index * coverage / projections;
+
+    p1[0] = distance * sinf(angle);
+    p1[1] = distance * cosf(angle);
+
+    p2[0] = -distance * sinf(angle) + u * cosf(angle);
+    p2[1] = -distance * cosf(angle) - u * sinf(angle);
+  }
+
+  float dx = p2[0] - p1[0];
+  float dy = p2[1] - p1[1];
+  float d_conv = sqrtf(dx * dx + dy * dy);
+  float d_ax = (std::abs(dx) > 1e-6f) ? 1.0f / std::abs(dx) : 1e9f;
+  float d_ay = (std::abs(dy) > 1e-6f) ? 1.0f / std::abs(dy) : 1e9f;
+
+  float ax_min = (std::abs(dx) > 1e-6f)
+                     ? min((bx - p1[0]) / dx, (bx + height - p1[0]) / dx)
+                     : -1e9f;
+  float ax_max = (std::abs(dx) > 1e-6f)
+                     ? max((bx - p1[0]) / dx, (bx + height - p1[0]) / dx)
+                     : 1e9f;
+
+  float ay_min = (std::abs(dy) > 1e-6f)
+                     ? min((by - p1[1]) / dy, (by + width - p1[1]) / dy)
+                     : -1e9f;
+  float ay_max = (std::abs(dy) > 1e-6f)
+                     ? max((by - p1[1]) / dy, (by + width - p1[1]) / dy)
+                     : 1e9f;
+
+  float alpha_min = max(0.0f, max(ax_min, ay_min));
+  float alpha_max = min(1.0f, min(ax_max, ay_max));
+
+  float ax_next = 1e9f;
+  if (std::abs(dx) > 1e-6f) {
+    float rx_entry = p1[0] + alpha_min * dx - bx;
+    int next_i = (dx > 0) ? (int)floorf(rx_entry) + 1 : (int)floorf(rx_entry);
+    ax_next = (bx + (float)next_i - p1[0]) / dx;
+    if (ax_next <= alpha_min)
+      ax_next += d_ax;
+  }
+  float ay_next = 1e9f;
+  if (std::abs(dy) > 1e-6f) {
+    float ry_entry = p1[1] + alpha_min * dy - by;
+    int next_j = (dy > 0) ? (int)floorf(ry_entry) + 1 : (int)floorf(ry_entry);
+    ay_next = (by + (float)next_j - p1[1]) / dy;
+    if (ay_next <= alpha_min)
+      ay_next += d_ay;
+  }
+
+  float sum = 0.0f;
+  float alpha_curr = alpha_min;
+
+  // --- ray march: scatter instead of gather ---
+  while (alpha_curr < alpha_max - 1e-6f) {
+    float alpha_next = min(alpha_max, min(ax_next, ay_next));
+    float mid_alpha = (alpha_curr + alpha_next) * 0.5f;
+
+    int img_i = (int)floorf(p1[0] + mid_alpha * dx - bx);
+    int img_j = (int)floorf(p1[1] + mid_alpha * dy - by);
+
+    if (img_i >= 0 && img_i < height && img_j >= 0 && img_j < width) {
+      float length = (alpha_next - alpha_curr) * d_conv;
+      output[batch_index * channels * height * width +
+             channel_index * height * width + img_i * width + img_j] +=
+          length * val;
+    }
+
+    if (ax_next < ay_next)
+      ax_next += d_ax;
+    else
+      ay_next += d_ay;
+    alpha_curr = alpha_next;
+  }
+
+  return;
+}
+
+torch::Tensor ARTReconstruction(torch::Tensor sinogram,
+                                const std::vector<int64_t> &image_shape,
+                                int projections, int detector_bins,
+                                int iterations, float relaxation_parameter,
+                                float detector_spacing, float coverage,
+                                float distance, char type)
+
+{
+  int batches = sinogram.size(0);
+  int channels = sinogram.size(1);
+  int height = image_shape[0];
+  int width = image_shape[1];
+  float eps = 1e-6f;
+  float norm, lam_n, residual;
+  auto output_k = torch::zeros({batches, channels, height, width},
+                               torch::TensorOptions().dtype(torch::kFloat32));
+
+  float *sinogram_ptr = sinogram.data_ptr<float>();
+  int n_rays = projections * detector_bins;
+  std::vector<float> norms(n_rays);
+  for (int r = 0; r < n_rays; ++r)
+    norms[r] = aTa_norm(projections, detector_bins, detector_spacing, height,
+                        width, r, coverage, distance, type);
+
+  for (int iter = 0; iter < iterations; ++iter) {
+    for (int i = 0; i < batches * channels * projections * detector_bins; ++i) {
+      int batch_index = i / (channels * projections * detector_bins);
+      int channel_index = (i / (projections * detector_bins)) % channels;
+      int ray_index = i % (projections * detector_bins);
+      norm = norms[ray_index];
+      if (norm < eps) {
+        continue;
+      }
+      lam_n = relaxation_parameter / norm;
+      float aTx =
+          aTx_k(output_k.data_ptr<float>(), projections, detector_bins,
+                detector_spacing, batches, channels, height, width, batch_index,
+                channel_index, ray_index, coverage, distance, type);
+      float scale = lam_n * (sinogram_ptr[i] - aTx);
+      y_ai(scale, output_k.data_ptr<float>(), projections, detector_bins,
+           detector_spacing, channels, height, width, batch_index,
+           channel_index, ray_index, coverage, distance, type);
+    }
+  }
+
+  return output_k;
+}
+```
+
+### difftomo/CT/Cpp_files/SiddonAlgorithm.cpp
+```
+#include "header_files/Algorithms.h"
+#include <algorithm>
+#include <omp.h>
+#include <thread>
+#include <torch/extension.h>
+#include <vector>
+
+using std::max;
+using std::min;
+
+std::mutex image_mutex;
+
+void update_pixel(float *image, int pixel_index, float contribution) {
+  std::lock_guard<std::mutex> lock(image_mutex);
+  image[pixel_index] += contribution;
+}
+
+void forward_siddon(float *image, float *output, int batches, int channels,
+                    int height, int width, int projections, int detector_bins,
+                    float detector_spacing, float coverage, float distance,
+                    char type) {
+
+  int thread_index = omp_get_thread_num();
+  int num_threads = omp_get_num_threads();
+
+  for (int offset = thread_index;
+       offset < batches * channels * projections * detector_bins;
+       offset += num_threads) {
+
+    int batch_index = offset / (channels * projections * detector_bins);
+    int channel_index =
+        (offset - batch_index * channels * projections * detector_bins) /
+        (projections * detector_bins);
+    int projection_index =
+        (offset - batch_index * channels * projections * detector_bins -
+         channel_index * projections * detector_bins) /
+        detector_bins;
+    int detector_index = offset -
+                         batch_index * channels * projections * detector_bins -
+                         channel_index * projections * detector_bins -
+                         projection_index * detector_bins;
+
+    if (projection_index >= projections || detector_index >= detector_bins) {
+      return;
+    }
+
+    float bx = -(height / 2.0f);
+    float by = -(width / 2.0f);
+    float u = detector_spacing * (detector_index - detector_bins / 2.0f);
+
+    float p1[2];
+    float p2[2];
+    float angle;
+
+    if (type == 'p') {
+      angle = projection_index * coverage / projections;
+
+      p1[0] = distance * cosf(angle) - u * sinf(angle);
+      p1[1] = distance * sinf(angle) + u * cosf(angle);
+
+      p2[0] = -distance * cosf(angle) - u * sinf(angle);
+      p2[1] = -distance * sinf(angle) + u * cosf(angle);
+    }
+
+    else if (type == 'f') {
+      angle = projection_index * coverage / projections;
+
+      p1[0] = distance * sinf(angle);
+      p1[1] = distance * cosf(angle);
+
+      p2[0] = -distance * sinf(angle) + u * cosf(angle);
+      p2[1] = -distance * cosf(angle) - u * sinf(angle);
+    }
+
+    float dx = p2[0] - p1[0];
+    float dy = p2[1] - p1[1];
+    float d_conv = sqrtf(dx * dx + dy * dy);
+
+    // Parametric boundaries for x and y planes
+    float ax_min = (std::abs(dx) > 1e-6f)
+                       ? min((bx - p1[0]) / dx, (bx + height - p1[0]) / dx)
+                       : -1e9f;
+    float ax_max = (std::abs(dx) > 1e-6f)
+                       ? max((bx - p1[0]) / dx, (bx + height - p1[0]) / dx)
+                       : 1e9f;
+
+    float ay_min = (std::abs(dy) > 1e-6f)
+                       ? min((by - p1[1]) / dy, (by + width - p1[1]) / dy)
+                       : -1e9f;
+    float ay_max = (std::abs(dy) > 1e-6f)
+                       ? max((by - p1[1]) / dy, (by + width - p1[1]) / dy)
+                       : 1e9f;
+
+    float alpha_min = max(0.0f, max(ax_min, ay_min));
+    float alpha_max = min(1.0f, min(ax_max, ay_max));
+
+    float d_ax = (std::abs(dx) > 1e-6f) ? 1.0f / std::abs(dx) : 1e9f;
+    float d_ay = (std::abs(dy) > 1e-6f) ? 1.0f / std::abs(dy) : 1e9f;
+
+    // Initial alpha values
+    float ax_next = 1e9f;
+    if (std::abs(dx) > 1e-6f) {
+      float rx_entry = p1[0] + alpha_min * dx - bx;
+      int next_i = (dx > 0) ? (int)floorf(rx_entry) + 1 : (int)floorf(rx_entry);
+      ax_next = (bx + (float)next_i - p1[0]) / dx;
+      if (ax_next <= alpha_min)
+        ax_next += d_ax;
+    }
+
+    float ay_next = 1e9f;
+    if (std::abs(dy) > 1e-6f) {
+      float ry_entry = p1[1] + alpha_min * dy - by;
+      int next_j = (dy > 0) ? (int)floorf(ry_entry) + 1 : (int)floorf(ry_entry);
+      ay_next = (by + (float)next_j - p1[1]) / dy;
+      if (ay_next <= alpha_min)
+        ay_next += d_ay;
+    }
+
+    float alpha_curr = alpha_min;
+    float sum = 0.0f;
+
+    // Ray marching loop
+    while (alpha_curr < alpha_max - 1e-6f) {
+      float alpha_next = min(alpha_max, min(ax_next, ay_next));
+      float mid_alpha = (alpha_curr + alpha_next) * 0.5f;
+
+      int img_i = (int)floorf(p1[0] + mid_alpha * dx - bx);
+      int img_j = (int)floorf(p1[1] + mid_alpha * dy - by);
+
+      if (img_i >= 0 && img_i < height && img_j >= 0 && img_j < width) {
+        float length = (alpha_next - alpha_curr) * d_conv;
+        sum += length * image[img_i * width + img_j];
+      }
+
+      if (ax_next < ay_next) {
+        ax_next += d_ax;
+      } else {
+        ay_next += d_ay;
+      }
+      alpha_curr = alpha_next;
+    }
+
+    output[batch_index * channels * projections * detector_bins +
+           channel_index * projections * detector_bins +
+           projection_index * detector_bins + detector_index] = sum;
+  }
+
+  return;
+}
+
+void backward_siddon(float *sinogram, float *output, int batches, int channels,
+                     int height, int width, int projections, int detector_bins,
+                     float detector_spacing, float coverage, float distance,
+                     char type) {
+
+  int thread_index = omp_get_thread_num();
+  int num_threads = omp_get_num_threads();
+
+  for (int offset = thread_index;
+       offset < batches * channels * projections * detector_bins;
+       offset += num_threads) {
+
+    int batch_index = offset / (channels * projections * detector_bins);
+    int channel_index =
+        (offset - batch_index * channels * projections * detector_bins) /
+        (projections * detector_bins);
+    int projection_index =
+        (offset - batch_index * channels * projections * detector_bins -
+         channel_index * projections * detector_bins) /
+        detector_bins;
+    int detector_index = offset -
+                         batch_index * channels * projections * detector_bins -
+                         channel_index * projections * detector_bins -
+                         projection_index * detector_bins;
+
+    if (projection_index >= projections || detector_index >= detector_bins)
+      return;
+
+    float bx = -(height / 2.0f);
+    float by = -(width / 2.0f);
+    float u = detector_spacing * (detector_index - detector_bins / 2.0f);
+
+    float p1[2];
+    float p2[2];
+    float angle;
+
+    if (type == 'p') {
+      angle = projection_index * coverage / projections;
+
+      p1[0] = distance * cosf(angle) - u * sinf(angle);
+      p1[1] = distance * sinf(angle) + u * cosf(angle);
+
+      p2[0] = -distance * cosf(angle) - u * sinf(angle);
+      p2[1] = -distance * sinf(angle) + u * cosf(angle);
+    }
+
+    else if (type == 'f') {
+      angle = projection_index * coverage / projections;
+
+      p1[0] = distance * sinf(angle);
+      p1[1] = distance * cosf(angle);
+
+      p2[0] = -distance * sinf(angle) + u * cosf(angle);
+      p2[1] = -distance * cosf(angle) - u * sinf(angle);
+    }
+
+    float dx = p2[0] - p1[0];
+    float dy = p2[1] - p1[1];
+    float d_conv = sqrtf(dx * dx + dy * dy);
+    float d_ax = (std::abs(dx) > 1e-6f) ? 1.0f / std::abs(dx) : 1e9f;
+    float d_ay = (std::abs(dy) > 1e-6f) ? 1.0f / std::abs(dy) : 1e9f;
+
+    float ax_min = (std::abs(dx) > 1e-6f)
+                       ? min((bx - p1[0]) / dx, (bx + height - p1[0]) / dx)
+                       : -1e9f;
+    float ax_max = (std::abs(dx) > 1e-6f)
+                       ? max((bx - p1[0]) / dx, (bx + height - p1[0]) / dx)
+                       : 1e9f;
+
+    float ay_min = (std::abs(dy) > 1e-6f)
+                       ? min((by - p1[1]) / dy, (by + width - p1[1]) / dy)
+                       : -1e9f;
+    float ay_max = (std::abs(dy) > 1e-6f)
+                       ? max((by - p1[1]) / dy, (by + width - p1[1]) / dy)
+                       : 1e9f;
+
+    float alpha_min = max(0.0f, max(ax_min, ay_min));
+    float alpha_max = min(1.0f, min(ax_max, ay_max));
+
+    float ax_next = 1e9f;
+    if (std::abs(dx) > 1e-6f) {
+      float rx_entry = p1[0] + alpha_min * dx - bx;
+      int next_i = (dx > 0) ? (int)floorf(rx_entry) + 1 : (int)floorf(rx_entry);
+      ax_next = (bx + (float)next_i - p1[0]) / dx;
+      if (ax_next <= alpha_min)
+        ax_next += d_ax;
+    }
+    float ay_next = 1e9f;
+    if (std::abs(dy) > 1e-6f) {
+      float ry_entry = p1[1] + alpha_min * dy - by;
+      int next_j = (dy > 0) ? (int)floorf(ry_entry) + 1 : (int)floorf(ry_entry);
+      ay_next = (by + (float)next_j - p1[1]) / dy;
+      if (ay_next <= alpha_min)
+        ay_next += d_ay;
+    }
+
+    float val = sinogram[batch_index * channels * projections * detector_bins +
+                         channel_index * projections * detector_bins +
+                         projection_index * detector_bins + detector_index];
+    float alpha_curr = alpha_min;
+
+    // --- ray march: scatter instead of gather ---
+    while (alpha_curr < alpha_max - 1e-6f) {
+      float alpha_next = min(alpha_max, min(ax_next, ay_next));
+      float mid_alpha = (alpha_curr + alpha_next) * 0.5f;
+
+      int img_i = (int)floorf(p1[0] + mid_alpha * dx - bx);
+      int img_j = (int)floorf(p1[1] + mid_alpha * dy - by);
+
+      if (img_i >= 0 && img_i < height && img_j >= 0 && img_j < width) {
+        float length = (alpha_next - alpha_curr) * d_conv;
+        output[batch_index * channels * height * width +
+               channel_index * height * width + img_i * width + img_j] +=
+            length * val;
+      }
+
+      if (ax_next < ay_next)
+        ax_next += d_ax;
+      else
+        ay_next += d_ay;
+      alpha_curr = alpha_next;
+    }
+  }
+
+  return;
+}
+
+torch::Tensor projector_forward_cpu(torch::Tensor image, int projections,
+                                    int detector_bins, float detector_spacing,
+                                    float coverage, float distance, char type,
+                                    int num_threads) {
+  int batches = image.size(0);
+  int channels = image.size(1);
+  int height = image.size(2);
+  int width = image.size(3);
+  auto output = torch::zeros(
+      {batches, channels, projections, detector_bins},
+      torch::TensorOptions().dtype(torch::kFloat32).device(image.device()));
+
+#pragma omp parallel num_threads(num_threads)
+  {
+    int thread_idx = omp_get_thread_num();
+    forward_siddon(image.data_ptr<float>(), output.data_ptr<float>(), batches,
+                   channels, height, width, projections, detector_bins,
+                   detector_spacing, coverage, distance, type);
+  }
+
+  return output;
+}
+
+torch::Tensor projector_backward_cpu(torch::Tensor sinogram,
+                                     const std::vector<int64_t> &image_shape,
+                                     int projections, int detector_bins,
+                                     float detector_spacing, float coverage,
+                                     float distance, char type,
+                                     int num_threads) {
+  int batches = sinogram.size(0);
+  int channels = sinogram.size(1);
+  int height = image_shape[2];
+  int width = image_shape[3];
+  auto output = torch::zeros(
+      {num_threads, batches, channels, height, width},
+      torch::TensorOptions().dtype(torch::kFloat32).device(sinogram.device()));
+
+#pragma omp parallel num_threads(num_threads)
+  {
+    int thread_idx = omp_get_thread_num();
+    backward_siddon(sinogram.data_ptr<float>(),
+                    output[thread_idx].data_ptr<float>(), batches, channels,
+                    height, width, projections, detector_bins, detector_spacing,
+                    coverage, distance, type);
+  }
+
+  return output.sum(0);
+}
+```
+
+### difftomo/CT/Cpp_files/bindings_cpu.cpp
+```
+#include <stdio.h>
+#include <torch/extension.h>
+
+torch::Tensor projector_forward_cpu(torch::Tensor image, int projections,
+                                    int detector_bins, float detector_spacing,
+                                    float coverage, float distance, char type,
+                                    int num_threads);
+
+torch::Tensor projector_backward_cpu(torch::Tensor sinogram,
+                                     const std::vector<int64_t> &image_shape,
+                                     int projections, int detector_bins,
+                                     float detector_spacing, float coverage,
+                                     float distance, char type,
+                                     int num_threads);
+
+torch::Tensor ARTReconstruction(torch::Tensor sinogram,
+                                const std::vector<int64_t> &image_shape,
+                                int projections, int detector_bins,
+                                int iterations, float relaxation_parameter,
+                                float detector_spacing, float coverage,
+                                float distance, char type);
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("forward_siddon_cpu", &projector_forward_cpu);
+  m.def("backward_siddon_cpu", &projector_backward_cpu);
+  m.def("ARTRecon", &ARTReconstruction);
+}
+```
+
+### difftomo/CT/Cpp_files/bindings_cuda.cpp
+```
+#include <stdio.h>
+#include <torch/extension.h>
+
+torch::Tensor projector_forward(torch::Tensor image, int projections,
+                                int detector_bins, float detector_spacing,
+                                float coverage, float distance, char type);
+
+torch::Tensor projector_backward(torch::Tensor sinogram,
+                                 const std::vector<int64_t> &image_shape,
+                                 int projections, int detector_bins,
+                                 float detector_spacing, float coverage,
+                                 float distance, char type);
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("forward_siddon", &projector_forward);
+  m.def("backward_siddon", &projector_backward);
+}
+```
+
+### difftomo/CT/Cuda_files/SiddonAlgorithm.cu
+```
+#include <cuda_runtime.h>
+#include <torch/extension.h>
+
+__global__ void siddon_kernel(float *image, float *output, int batches,
+                              int channels, int height, int width,
+                              int projections, int detector_bins,
+                              float detector_spacing, float coverage,
+                              float distance, char type) {
+
+  int threadsPerBlock = blockDim.x * blockDim.y * blockDim.z;
+
+  int blocksPerProjection =
+      (detector_bins + threadsPerBlock - 1) / threadsPerBlock;
+
+  int blocksPerImage = projections * blocksPerProjection;
+
+  int image_index = blockIdx.x / blocksPerImage;
+  int block_in_image = blockIdx.x % blocksPerImage;
+
+  int batch_index = image_index / channels;
+  int channel_index = image_index % channels;
+
+  int projection_index = block_in_image / blocksPerProjection;
+
+  int block_in_projection = block_in_image % blocksPerProjection;
+
+  int detector_index = block_in_projection * threadsPerBlock + threadIdx.x;
+
+  // stopping illegal threads from executing
+  if (projection_index >= projections || detector_index >= detector_bins)
+    return;
+
+  float bx = -(height / 2.0f);
+  float by = -(width / 2.0f);
+  float u = detector_spacing * (detector_index - detector_bins / 2.0f);
+
+  // thread starts executing here so calculate ray for this detector index and
+  // projection index
+  float p1[2];
+  float p2[2];
+  float angle;
+
+  if (type == 'p') {
+    angle = projection_index * coverage / projections;
+
+    p1[0] = distance * cosf(angle) - u * sinf(angle);
+    p1[1] = distance * sinf(angle) + u * cosf(angle);
+
+    p2[0] = -distance * cosf(angle) - u * sinf(angle);
+    p2[1] = -distance * sinf(angle) + u * cosf(angle);
+  }
+
+  else if (type == 'f') {
+    angle = projection_index * coverage / projections;
+
+    p1[0] = distance * sinf(angle);
+    p1[1] = distance * cosf(angle);
+
+    p2[0] = -distance * sinf(angle) + u * cosf(angle);
+    p2[1] = -distance * cosf(angle) - u * sinf(angle);
+  }
+
+  float dx = p2[0] - p1[0];
+  float dy = p2[1] - p1[1];
+  float d_conv = sqrtf(dx * dx + dy * dy);
+
+  // Parametric boundaries for x and y planes
+  float ax_min = (std::abs(dx) > 1e-6f)
+                     ? min((bx - p1[0]) / dx, (bx + height - p1[0]) / dx)
+                     : -1e9f;
+  float ax_max = (std::abs(dx) > 1e-6f)
+                     ? max((bx - p1[0]) / dx, (bx + height - p1[0]) / dx)
+                     : 1e9f;
+
+  float ay_min = (std::abs(dy) > 1e-6f)
+                     ? min((by - p1[1]) / dy, (by + width - p1[1]) / dy)
+                     : -1e9f;
+  float ay_max = (std::abs(dy) > 1e-6f)
+                     ? max((by - p1[1]) / dy, (by + width - p1[1]) / dy)
+                     : 1e9f;
+
+  float alpha_min = max(0.0f, max(ax_min, ay_min));
+  float alpha_max = min(1.0f, min(ax_max, ay_max));
+
+  float d_ax = (std::abs(dx) > 1e-6f) ? 1.0f / std::abs(dx) : 1e9f;
+  float d_ay = (std::abs(dy) > 1e-6f) ? 1.0f / std::abs(dy) : 1e9f;
+
+  // Initial alpha values
+  float ax_next = 1e9f;
+  if (std::abs(dx) > 1e-6f) {
+    float rx_entry = p1[0] + alpha_min * dx - bx;
+    int next_i = (dx > 0) ? (int)floorf(rx_entry) + 1 : (int)floorf(rx_entry);
+    ax_next = (bx + (float)next_i - p1[0]) / dx;
+    if (ax_next <= alpha_min)
+      ax_next += d_ax;
+  }
+
+  float ay_next = 1e9f;
+  if (std::abs(dy) > 1e-6f) {
+    float ry_entry = p1[1] + alpha_min * dy - by;
+    int next_j = (dy > 0) ? (int)floorf(ry_entry) + 1 : (int)floorf(ry_entry);
+    ay_next = (by + (float)next_j - p1[1]) / dy;
+    if (ay_next <= alpha_min)
+      ay_next += d_ay;
+  }
+
+  float alpha_curr = alpha_min;
+  float sum = 0.0f;
+
+  // Ray marching loop
+  while (alpha_curr < alpha_max - 1e-6f) {
+    float alpha_next = min(alpha_max, min(ax_next, ay_next));
+    float mid_alpha = (alpha_curr + alpha_next) * 0.5f;
+
+    int img_i = (int)floorf(p1[0] + mid_alpha * dx - bx);
+    int img_j = (int)floorf(p1[1] + mid_alpha * dy - by);
+
+    if (img_i >= 0 && img_i < height && img_j >= 0 && img_j < width) {
+      float length = (alpha_next - alpha_curr) * d_conv;
+      sum += length *
+             image[batch_index * channels * height * width +
+                   channel_index * height * width + img_i * width + img_j];
+    }
+
+    if (ax_next < ay_next) {
+      ax_next += d_ax;
+    } else {
+      ay_next += d_ay;
+    }
+    alpha_curr = alpha_next;
+  }
+
+  output[batch_index * channels * projections * detector_bins +
+         channel_index * projections * detector_bins +
+         projection_index * detector_bins + detector_index] = sum;
+}
+
+__global__ void backprojection_kernel(float *sinogram, float *output,
+                                      int batches, int channels, int height,
+                                      int width, int projections,
+                                      int detector_bins, float detector_spacing,
+                                      float coverage, float distance,
+                                      char type) {
+  int threadsPerBlock = blockDim.x * blockDim.y * blockDim.z;
+
+  int blocksPerProjection =
+      (detector_bins + threadsPerBlock - 1) / threadsPerBlock;
+
+  int blocksPerImage = projections * blocksPerProjection;
+
+  int image_index = blockIdx.x / blocksPerImage;
+  int block_in_image = blockIdx.x % blocksPerImage;
+
+  int batch_index = image_index / channels;
+  int channel_index = image_index % channels;
+
+  int projection_index = block_in_image / blocksPerProjection;
+
+  int block_in_projection = block_in_image % blocksPerProjection;
+
+  int detector_index = block_in_projection * threadsPerBlock + threadIdx.x;
+
+  // stopping illegal threads from executing
+  if (projection_index >= projections || detector_index >= detector_bins)
+    return;
+
+  float bx = -(height / 2.0f);
+  float by = -(width / 2.0f);
+  float u = detector_spacing * (detector_index - detector_bins / 2.0f);
+
+  // thread starts executing here so calculate ray for this detector index and
+  // projection index
+  float p1[2];
+  float p2[2];
+  float angle;
+
+  if (type == 'p') {
+    angle = projection_index * coverage / projections;
+
+    p1[0] = distance * cosf(angle) - u * sinf(angle);
+    p1[1] = distance * sinf(angle) + u * cosf(angle);
+
+    p2[0] = -distance * cosf(angle) - u * sinf(angle);
+    p2[1] = -distance * sinf(angle) + u * cosf(angle);
+  }
+
+  else if (type == 'f') {
+    angle = projection_index * coverage / projections;
+
+    p1[0] = distance * sinf(angle);
+    p1[1] = distance * cosf(angle);
+
+    p2[0] = -distance * sinf(angle) + u * cosf(angle);
+    p2[1] = -distance * cosf(angle) - u * sinf(angle);
+  }
+
+  float dx = p2[0] - p1[0];
+  float dy = p2[1] - p1[1];
+  float d_conv = sqrtf(dx * dx + dy * dy);
+  float d_ax = (std::abs(dx) > 1e-6f) ? 1.0f / std::abs(dx) : 1e9f;
+  float d_ay = (std::abs(dy) > 1e-6f) ? 1.0f / std::abs(dy) : 1e9f;
+
+  float ax_min = (std::abs(dx) > 1e-6f)
+                     ? min((bx - p1[0]) / dx, (bx + height - p1[0]) / dx)
+                     : -1e9f;
+  float ax_max = (std::abs(dx) > 1e-6f)
+                     ? max((bx - p1[0]) / dx, (bx + height - p1[0]) / dx)
+                     : 1e9f;
+
+  float ay_min = (std::abs(dy) > 1e-6f)
+                     ? min((by - p1[1]) / dy, (by + width - p1[1]) / dy)
+                     : -1e9f;
+  float ay_max = (std::abs(dy) > 1e-6f)
+                     ? max((by - p1[1]) / dy, (by + width - p1[1]) / dy)
+                     : 1e9f;
+
+  float alpha_min = max(0.0f, max(ax_min, ay_min));
+  float alpha_max = min(1.0f, min(ax_max, ay_max));
+
+  float ax_next = 1e9f;
+  if (std::abs(dx) > 1e-6f) {
+    float rx_entry = p1[0] + alpha_min * dx - bx;
+    int next_i = (dx > 0) ? (int)floorf(rx_entry) + 1 : (int)floorf(rx_entry);
+    ax_next = (bx + (float)next_i - p1[0]) / dx;
+    if (ax_next <= alpha_min)
+      ax_next += d_ax;
+  }
+  float ay_next = 1e9f;
+  if (std::abs(dy) > 1e-6f) {
+    float ry_entry = p1[1] + alpha_min * dy - by;
+    int next_j = (dy > 0) ? (int)floorf(ry_entry) + 1 : (int)floorf(ry_entry);
+    ay_next = (by + (float)next_j - p1[1]) / dy;
+    if (ay_next <= alpha_min)
+      ay_next += d_ay;
+  }
+
+  float val = sinogram[batch_index * channels * projections * detector_bins +
+                       channel_index * projections * detector_bins +
+                       projection_index * detector_bins + detector_index];
+  float alpha_curr = alpha_min;
+
+  // --- ray march: scatter instead of gather ---
+  while (alpha_curr < alpha_max - 1e-6f) {
+    float alpha_next = min(alpha_max, min(ax_next, ay_next));
+    float mid_alpha = (alpha_curr + alpha_next) * 0.5f;
+
+    int img_i = (int)floorf(p1[0] + mid_alpha * dx - bx);
+    int img_j = (int)floorf(p1[1] + mid_alpha * dy - by);
+
+    if (img_i >= 0 && img_i < height && img_j >= 0 && img_j < width) {
+      float length = (alpha_next - alpha_curr) * d_conv;
+      atomicAdd(&output[batch_index * channels * height * width +
+                        channel_index * height * width + img_i * width + img_j],
+                length * val);
+    }
+
+    if (ax_next < ay_next)
+      ax_next += d_ax;
+    else
+      ay_next += d_ay;
+    alpha_curr = alpha_next;
+  }
+}
+
+torch::Tensor projector_forward(torch::Tensor image, int projections,
+                                int detector_bins, float detector_spacing,
+                                float coverage, float distance, char type) {
+
+  int batches = image.size(0);
+  int channels = image.size(1);
+  int height = image.size(2);
+  int width = image.size(3);
+
+  int threads = 256;
+  int blocks_per_projection = (detector_bins + threads - 1) / threads;
+  int blocks_per_image = projections * blocks_per_projection;
+  int blocks = batches * channels * blocks_per_image;
+
+  auto output = torch::zeros(
+      {batches, channels, projections, detector_bins},
+      torch::TensorOptions().dtype(torch::kFloat32).device(image.device()));
+
+  siddon_kernel<<<blocks, threads>>>(
+      image.data_ptr<float>(), output.data_ptr<float>(), batches, channels,
+      height, width, projections, detector_bins, detector_spacing, coverage,
+      distance, type);
+
+  return output;
+}
+
+torch::Tensor projector_backward(torch::Tensor sinogram,
+                                 const std::vector<int64_t> &image_shape,
+                                 int projections, int detector_bins,
+                                 float detector_spacing, float coverage,
+                                 float distance, char type) {
+  int batches = sinogram.size(0);
+  int channels = sinogram.size(1);
+  int height = image_shape[2];
+  int width = image_shape[3];
+
+  int threads = 256;
+  int blocks_per_projection = (detector_bins + threads - 1) / threads;
+  int blocks_per_image = projections * blocks_per_projection;
+  int blocks = batches * channels * blocks_per_image;
+
+  auto output = torch::zeros(
+      {batches, channels, height, width},
+      torch::TensorOptions().dtype(torch::kFloat32).device(sinogram.device()));
+
+  backprojection_kernel<<<blocks, threads>>>(
+      sinogram.data_ptr<float>(), output.data_ptr<float>(), batches, channels,
+      height, width, projections, detector_bins, detector_spacing, coverage,
+      distance, type);
+
+  return output;
+}
+```
+
+### difftomo/CT/Iterative/ClassicAlgorithm.py
+```
+import torch
+import warnings
+from difftomo.CT._extensions import ARTReconstruction
+
+
+class ART:
+    def __init__(self, projector, iterations=10, relaxation_factor=1):
+        self.projector = projector
+        self.iterations = iterations
+        self.relaxation_factor = relaxation_factor
+
+    def reconstruct(self, sinogram, image_shape=None):
+        if image_shape is not None:
+            self.image_shape = image_shape
+        else:
+            warnings.warn(
+                "Image shape not specified. Defaulting to (1, 1, 256, 256). Please specify the image shape for accurate reconstruction.",
+                UserWarning,
+            )
+            self.image_shape = (1, 1, 256, 256)
+
+        reconstructed_image = ARTReconstruction(
+            sinogram,
+            self.image_shape,
+            self.projector.projections,
+            self.projector.detectors,
+            self.iterations,
+            self.relaxation_factor,
+            self.projector.detector_spacing,
+            self.projector.coverage,
+            self.projector.distance,
+            self.projector.mode,
+        )
+        return reconstructed_image
+
+
+class SART:
+    def __init__(self, projector, relaxation_parameter=1, iterations=10, device="cpu"):
+        self.projector = projector
+        self.relaxation_parameter = relaxation_parameter
+        self.iterations = iterations
+        self.device = device
+
+    def WAx(self, residual, image_shape):
+        U = torch.ones(image_shape, device=self.device)
+        mag_A = self.projector.forward(U)
+
+        return residual * torch.reciprocal(mag_A)
+
+    def V_inverseAT(self, residual, image_shape):
+        U = torch.ones(image_shape, device=self.device)
+        mag_A = self.projector.backward(U)
+
+        return residual * torch.reciprocal(mag_A)
+
+    def reconstruct(self, sinogram, image_shape=None):
+        if image_shape is not None:
+            if len(image_shape) > 4:
+                raise ValueError("Invalid image_shape. Expected a 4D, 3D or 2D tensor.")
+            if len(image_shape) == 3:
+                self.image_shape = (1, *image_shape)
+            if len(image_shape) == 2:
+                self.image_shape = (1, 1, *image_shape)
+            if len(image_shape) < 2:
+                raise ValueError("Invalid image_shape. Expected a 4D, 3D or 2D tensor.")
+            self.image_shape = image_shape
+        else:
+            self.image_shape = (1, 1, 512, 512)
+            warnings.warn(
+                "No image shape specified gonna take default shape of 512x512",
+                UserWarning,
+            )
+
+        if len(sinogram.shape) == 4:
+            batches, channels = sinogram.shape[0], sinogram.shape[1]
+        elif len(sinogram.shape) == 3:
+            batches, channels = 1, sinogram.shape[0]
+        elif len(sinogram.shape) == 2:
+            batches, channels = 1, 1
+        else:
+            raise ValueError("Invalid sinogram shape. Expected 2D, 3D, or 4D tensor.")
+
+        if image_shape is None:
+            self.image_shape = (
+                batches,
+                channels,
+                self.image_shape[-2],
+                self.image_shape[-1],
+            )
+
+        x_k = torch.zeros(self.image_shape, dtype=torch.float32, device=self.device)
+
+        for i in range(self.iterations):
+            residual = sinogram - self.projector.forward(x_k)
+            W_residual = self.WAx(residual, image_shape=self.image_shape)
+            ATW_residual = self.projector.backward(
+                W_residual, image_shape=self.image_shape
+            )
+            V_inverse_ATW_residual = self.V_inverseAT(
+                ATW_residual, image_shape=sinogram.shape
+            )
+
+            x_k = x_k + self.relaxation_parameter * V_inverse_ATW_residual
+
+        return x_k
+
+
+class SIRT:
+    def __init__(self, projector, iterations=10, device="cpu"):
+        self.projector = projector
+        self.iterations = iterations
+        self.device = device
+        self.relaxation_factor = 1
+
+    def reconstruct(self, sinogram, image_shape=None):
+        if image_shape is not None:
+            self.image_shape = image_shape
+        else:
+            self.image_shape = (1, 1, 512, 512)
+            warnings.warn(
+                "No image shape specified gonna take default shape of 512x512",
+                UserWarning,
+            )
+
+        if len(sinogram.shape) == 4:
+            batches, channels = sinogram.shape[0], sinogram.shape[1]
+        elif len(sinogram.shape) == 3:
+            batches, channels = 1, sinogram.shape[0]
+        elif len(sinogram.shape) == 2:
+            batches, channels = 1, 1
+        else:
+            raise ValueError("Invalid sinogram shape. Expected 2D, 3D, or 4D tensor.")
+
+        self.image_shape = (
+            batches,
+            channels,
+            self.image_shape[-2],
+            self.image_shape[-1],
+        )
+
+        ones_image = torch.ones(
+            (batches, channels, self.projector.detectors, self.projector.detectors),
+            device=self.device,
+        )
+        row_sum = self.projector.forward(ones_image)
+        self.row_sum = torch.where(
+            row_sum > 1e-8, 1.0 / row_sum, torch.zeros_like(row_sum)
+        )
+        ones_sinogram = torch.ones(
+            (batches, channels, self.projector.projections, self.projector.detectors),
+            device=self.device,
+        )
+        column_sum = self.projector.backward(
+            ones_sinogram, image_shape=self.image_shape
+        )
+        self.col_sum = torch.where(
+            column_sum > 1e-8, 1.0 / column_sum, torch.zeros_like(column_sum)
+        )
+        # Initialize the image with zeros
+        image_shape = self.image_shape
+        image = torch.zeros(image_shape, dtype=torch.float32)
+        image = image.to(self.device)
+
+        # Perform SIRT iterations
+        for i in range(self.iterations):
+            # Forward projections
+            projected = self.projector.forward(image)
+            projected = projected.to(self.device)
+
+            # Compute the difference between the measured and projected sinogram
+            difference = sinogram - projected
+
+            # Backward projection of the difference
+            difference = difference.to(self.device)
+
+            # Update the image
+
+            # R
+            difference = self.row_sum * difference
+
+            # A^T
+            correction = self.projector.backward(difference)
+
+            # C
+            correction = self.col_sum * correction
+
+            # update
+            image += self.relaxation_factor * correction
+
+        return image
+```
+
+### difftomo/CT/Iterative/DIP.py
+```
+import torch
+import torch.nn as nn
+from difftomo.CT.Models import PriorModel
+from tqdm import tqdm
+
+
+class DRPDenoising:
+    def __init__(self, projector, epochs=250, inner_steps=50, step_size=0.25, lr=5e-4):
+        self.projector = projector
+        self.epochs = epochs
+        self.inner_steps = inner_steps
+        self.beta = step_size
+        self.lr = lr
+        self.loss = nn.MSELoss()
+
+    def reconstruct(self, sparse_sinogram, prior_model=None):
+        device = self.projector.device
+        p = sparse_sinogram.to(device)
+
+        if prior_model is None:
+            prior = PriorModel().to(device)
+        else:
+            prior = prior_model
+
+        optimizer = torch.optim.Adam(prior.parameters(), lr=self.lr)
+
+        z = self.projector.FBP(p).detach()
+
+        for epoch in tqdm(range(self.epochs)):
+            with torch.no_grad():
+                x = prior(z)
+                delta = self.projector.backward(p - self.projector.forward(x))
+                z = x + self.beta * delta
+
+            for _ in range(self.inner_steps):
+                loss = self.loss(self.projector.forward(prior(z)), p)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+        with torch.no_grad():
+            return prior(z)
+```
+
+### difftomo/CT/Iterative/TV_Minimisation.py
+```
+import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+import math
+
+
+class TVDenoising:
+    def __init__(
+        self, projector, image_shape=None, iterations=10, lamda=0.1, device="cpu"
+    ):
+        self.projector = projector
+        self.iterations = iterations
+        self.device = device
+        self.lr = 0.05
+        self.lam = lamda
+        if image_shape is not None:
+            self.image_shape = image_shape
+        else:
+            self.image_shape = (self.projector.detectors, self.projector.detectors)
+
+    def sobel_filter(self, image):
+        sobel_x = torch.tensor(
+            [[1, 0, -1], [2, 0, -2], [1, 0, -1]], dtype=torch.float32
+        ).to(self.device)
+        sobel_y = torch.tensor(
+            [[1, 2, 1], [0, 0, 0], [-1, -2, -1]], dtype=torch.float32
+        ).to(self.device)
+
+        channels = image.shape[1]
+        sobel_x = sobel_x.view(1, 1, 3, 3).repeat(channels, 1, 1, 1)
+        sobel_y = sobel_y.view(1, 1, 3, 3).repeat(channels, 1, 1, 1)
+
+        grad_x = nn.functional.conv2d(image, sobel_x, padding=1, groups=channels)
+        grad_y = nn.functional.conv2d(image, sobel_y, padding=1, groups=channels)
+
+        return torch.sqrt(grad_x**2 + grad_y**2 + 1e-6)
+
+    def reconstruct(self, noisy_img):
+        noisy_img = noisy_img.to(self.device)
+
+        if len(noisy_img.shape) == 2:
+            noisy_img = noisy_img.unsqueeze(0).unsqueeze(0)
+        elif len(noisy_img.shape) == 3:
+            noisy_img = noisy_img.unsqueeze(0)
+        elif len(noisy_img.shape) != 4:
+            raise ValueError("Invalid image shape. Expected 2D, 3D, or 4D tensor.")
+
+        image = noisy_img.clone().detach().requires_grad_(True)
+        projected_img = self.projector.forward(noisy_img)
+
+        for _ in range(self.iterations):
+            projected = self.projector.forward(image)
+
+            D_f = (projected_img - projected).square().flatten(1).mean(dim=1)
+            R_x = self.sobel_filter(image).flatten(1).sum(dim=1)
+
+            l = (D_f + self.lam * R_x).mean()
+            l.backward()
+
+            with torch.no_grad():
+                image -= self.lr * image.grad
+
+            image.grad.zero_()
+
+        return image
+
+
+class TGVDenoising:
+    """
+    Second-order TGV using the Chambolle-Pock primal-dual algorithm.
+
+    Objective:
+        min_{u,w} 0.5 * ||A(u)/L - b/L||^2
+                   + alpha1 * ||grad(u) - w||_{1,2}
+                   + alpha2 * ||E(w)||_{1,F}
+
+    Assumes projector.forward(x) computes A(x) and
+    projector.backward(y) computes the adjoint A^T(y).
+    """
+
+    def __init__(
+        self,
+        projector,
+        image_shape=None,
+        iterations=300,
+        lamda=None,
+        device="cpu",
+        tau=None,
+        sigma=None,
+        theta=1.0,
+        normalize=True,
+        verbose=False,
+    ):
+        self.projector = projector
+        self.image_shape = image_shape
+        self.iterations = iterations
+        self.device = torch.device(device)
+        self.theta = theta
+        self.normalize = normalize
+        self.verbose = verbose
+
+        if lamda is None:
+            self.alpha1, self.alpha2 = 0.1, 0.1
+        elif isinstance(lamda, (int, float)):
+            self.alpha1 = self.alpha2 = float(lamda)
+        else:
+            self.alpha1, self.alpha2 = map(float, lamda)
+
+        self.tau = tau
+        self.sigma = sigma
+        self.L = 1.0
+
+    def _A(self, x):
+        return self.projector.forward(x) / self.L
+
+    def _AT(self, y):
+        return self.projector.backward(y) / self.L
+
+    @staticmethod
+    def Dx(x):
+        out = torch.zeros_like(x)
+        out[..., :-1] = x[..., 1:] - x[..., :-1]
+        return out
+
+    @staticmethod
+    def Dy(x):
+        out = torch.zeros_like(x)
+        out[..., :-1, :] = x[..., 1:, :] - x[..., :-1, :]
+        return out
+
+    @staticmethod
+    def DxT(y):
+        out = torch.zeros_like(y)
+        out[..., 0] = -y[..., 0]
+        out[..., 1:-1] = y[..., :-2] - y[..., 1:-1]
+        out[..., -1] = y[..., -2]
+        return out
+
+    @staticmethod
+    def DyT(y):
+        out = torch.zeros_like(y)
+        out[..., 0, :] = -y[..., 0, :]
+        out[..., 1:-1, :] = y[..., :-2, :] - y[..., 1:-1, :]
+        out[..., -1, :] = y[..., -2, :]
+        return out
+
+    def grad(self, u):
+        return torch.stack((self.Dx(u), self.Dy(u)), dim=1)
+
+    def grad_adjoint(self, p):
+        return self.DxT(p[:, 0]) + self.DyT(p[:, 1])
+
+    def epsilon(self, w):
+        wx, wy = w[:, 0], w[:, 1]
+
+        e_xx = self.Dx(wx)
+        e_yy = self.Dy(wy)
+        e_xy = (self.Dy(wx) + self.Dx(wy)) / math.sqrt(2.0)
+
+        return torch.stack((e_xx, e_yy, e_xy), dim=1)
+
+    def epsilon_adjoint(self, q):
+        q_xx, q_yy, q_xy = q[:, 0], q[:, 1], q[:, 2]
+        inv_sqrt2 = 1.0 / math.sqrt(2.0)
+
+        wx = self.DxT(q_xx) + inv_sqrt2 * self.DyT(q_xy)
+        wy = self.DyT(q_yy) + inv_sqrt2 * self.DxT(q_xy)
+
+        return torch.stack((wx, wy), dim=1)
+
+    @staticmethod
+    def project_ball(x, radius):
+        norm = torch.sqrt(torch.sum(x * x, dim=1, keepdim=True))
+        scale = torch.clamp(norm / radius, min=1.0)
+        return x / scale
+
+    @torch.no_grad()
+    def estimate_A_norm(self, image_shape, n_iter=30):
+        image_shape = (1, *image_shape[1:])
+        u = torch.randn(image_shape, device=self.device, dtype=torch.float32)
+        u = u / torch.linalg.norm(u)
+
+        eig = 1.0
+        for _ in range(n_iter):
+            v = self.projector.backward(self.projector.forward(u))
+            eig = torch.linalg.norm(v).clamp_min(1e-12)
+            u = v / eig
+
+        return torch.sqrt(eig).item()
+
+    @torch.no_grad()
+    def estimate_operator_norm(self, image_shape, n_iter=30):
+        image_shape = (1, *image_shape[1:])
+        u = torch.randn(image_shape, device=self.device, dtype=torch.float32)
+        w = torch.randn(
+            (u.shape[0], 2, *u.shape[1:]),
+            device=self.device,
+            dtype=u.dtype,
+        )
+
+        norm = torch.sqrt(torch.sum(u * u) + torch.sum(w * w))
+        u, w = u / norm, w / norm
+
+        for _ in range(n_iter):
+            r = self._A(u)
+            p = self.grad(u) - w
+            q = self.epsilon(w)
+
+            u_next = self._AT(r) + self.grad_adjoint(p)
+            w_next = -p + self.epsilon_adjoint(q)
+
+            norm = torch.sqrt(
+                torch.sum(u_next * u_next) + torch.sum(w_next * w_next)
+            ).clamp_min(1e-12)
+
+            u, w = u_next / norm, w_next / norm
+
+        r = self._A(u)
+        p = self.grad(u) - w
+        q = self.epsilon(w)
+
+        norm_K = torch.sqrt(torch.sum(r * r) + torch.sum(p * p) + torch.sum(q * q))
+        return norm_K.item()
+
+    @torch.no_grad()
+    def reconstruct(self, noisy_img):
+        noisy_img = noisy_img.to(self.device, dtype=torch.float32)
+
+        if noisy_img.ndim == 2:
+            noisy_img = noisy_img.unsqueeze(0).unsqueeze(0)
+        elif noisy_img.ndim == 3:
+            noisy_img = noisy_img.unsqueeze(0)
+        elif noisy_img.ndim != 4:
+            raise ValueError("Invalid image shape. Expected 2D, 3D, or 4D tensor.")
+
+        self.L = self.estimate_A_norm(noisy_img.shape) if self.normalize else 1.0
+
+        b = self._A(noisy_img)
+
+        u = noisy_img.clone()
+        w = torch.zeros(
+            (u.shape[0], 2, *u.shape[1:]),
+            device=self.device,
+            dtype=u.dtype,
+        )
+
+        r = torch.zeros_like(b)
+        p = torch.zeros_like(w)
+        q = torch.zeros(
+            (u.shape[0], 3, *u.shape[1:]),
+            device=self.device,
+            dtype=u.dtype,
+        )
+
+        norm_K = 1.05 * self.estimate_operator_norm(u.shape)
+        if self.tau is None or self.sigma is None:
+            step = 0.95 / max(norm_K, 1e-8)
+            tau = sigma = step
+        else:
+            tau, sigma = self.tau, self.sigma
+            if tau * sigma * norm_K**2 >= 1:
+                raise ValueError("Step sizes violate tau * sigma * ||K||^2 < 1.")
+
+        if self.verbose:
+            print(
+                f"[TGV] L={self.L:.4f}  ||K||={norm_K:.4f}  "
+                f"tau={tau:.4f}  sigma={sigma:.4f}"
+            )
+
+        u_bar = u.clone()
+        w_bar = w.clone()
+
+        for it in range(self.iterations):
+            r = (r + sigma * (self._A(u_bar) - b)) / (1.0 + sigma)
+
+            p = p + sigma * (self.grad(u_bar) - w_bar)
+            p = self.project_ball(p, self.alpha1)
+
+            q = q + sigma * self.epsilon(w_bar)
+            q = self.project_ball(q, self.alpha2)
+
+            u_old = u
+            w_old = w
+
+            u = u - tau * (self._AT(r) + self.grad_adjoint(p))
+            w = w + tau * p - tau * self.epsilon_adjoint(q)
+
+            u_bar = u + self.theta * (u - u_old)
+            w_bar = w + self.theta * (w - w_old)
+
+            if self.verbose and (it % 10 == 0 or it == self.iterations - 1):
+                p_sat = (p.norm(dim=1).max() / self.alpha1).item()
+                q_sat = (q.norm(dim=1).max() / self.alpha2).item()
+                print(
+                    f"[TGV] it={it:4d}  "
+                    f"||u-u0||={torch.linalg.norm(u - noisy_img).item():.4f}  "
+                    f"p/alpha1={p_sat:.3f}  q/alpha2={q_sat:.3f}"
+                )
+
+        return u
+```
+
+### difftomo/CT/Iterative/__init__.py
+```
+from .ClassicAlgorithm import SIRT, ART, SART
+from .TV_Minimisation import TVDenoising, TGVDenoising
+from .DIP import DRPDenoising
+
+__all__ = ["SIRT", "ART", "SARTTVDenoising", "TGVDenoising", "DRPDenoising"]
+```
+
+### difftomo/CT/Models/DuDoTransModel.py
+```
+# =============================================================================
+# THIRD-PARTY CODE NOTICE
+# =============================================================================
+#
+# This file contains code adapted and modified from the official
+# DuDoTrans implementation:
+#
+# "DuDoTrans: Dual-Domain Transformer for Sparse-View CT Reconstruction"
+#
+# Original repository:
+# https://github.com/cewang-sysu/DuDoTrans
+#
+# Original authors:
+# Ce Wang, Kun Shang, Haimiao Zhang, Qian Li, S. Kevin Zhou
+# The original DuDoTrans implementation is released under the MIT License.
+# This implementation has been incorporated into DiffTomo and has been
+# substantially modified to fit the architecture, interfaces, organization,
+# dependencies, and functionality of the DiffTomo project. In particular,
+# portions of the original implementation have been adapted, refactored,
+# renamed, and/or modified to integrate with DiffTomo's tomography framework.
+# However, a substantial portion of the code in this file remains derived from
+# the original DuDoTrans implementation. We therefore retain this notice to
+# clearly acknowledge the original authors and source of the implementation.
+# We are grateful to the authors of DuDoTrans for making their implementation
+# openly available and for releasing it under the MIT License.
+# Copyright and license notices applicable to the original DuDoTrans code are
+# retained in accordance with the MIT License. The original license permits
+# use, copying, modification, and redistribution of the original code subject
+# to its license conditions.
+# If you use or redistribute this file, please retain this attribution and
+# refer to the original repository and license for the applicable terms.
+# The DuDoTrans paper should also be cited when the corresponding method or
+# implementation is used:
+# C. Wang, K. Shang, H. Zhang, Q. Li, and S. K. Zhou,
+# "DuDoTrans: Dual-Domain Transformer for Sparse-View CT Reconstruction,"
+# International Workshop on Machine Learning for Medical Image Reconstruction,
+# 2022.
+
+
+# =============================================================================
+#   MIT LICENSE
+# =============================================================================
+# Copyright (c) 2021 Mars
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+# =============================================================================
+
+
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.utils.checkpoint as checkpoint
+import os
+from .utils import DropPath, to_2tuple, trunc_normal_, get_weight_file
+
+
+class Mlp(nn.Module):
+    def __init__(
+        self,
+        in_features,
+        hidden_features=None,
+        out_features=None,
+        act_layer=nn.GELU,
+        drop=0.0,
+    ):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.act = act_layer()
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.drop = nn.Dropout(drop)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        return x
+
+
+def window_partition(x, window_size):
+    """
+    Args:
+        x: (B, H, W, C)
+        window_size (int): window size
+
+    Returns:
+        windows: (num_windows*B, window_size, window_size, C)
+    """
+    B, H, W, C = x.shape
+    x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
+    windows = (
+        x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
+    )
+    return windows
+
+
+def window_reverse(windows, window_size, H, W):
+    """
+    Args:
+        windows: (num_windows*B, window_size, window_size, C)
+        window_size (int): Window size
+        H (int): Height of image
+        W (int): Width of image
+
+    Returns:
+        x: (B, H, W, C)
+    """
+    B = int(windows.shape[0] / (H * W / window_size / window_size))
+    x = windows.view(
+        B, H // window_size, W // window_size, window_size, window_size, -1
+    )
+    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
+    return x
+
+
+class WindowAttention(nn.Module):
+    r"""Window based multi-head self attention (W-MSA) module with relative position bias.
+    It supports both of shifted and non-shifted window.
+
+    Args:
+        dim (int): Number of input channels.
+        window_size (tuple[int]): The height and width of the window.
+        num_heads (int): Number of attention heads.
+        qkv_bias (bool, optional):  If True, add a learnable bias to query, key, value. Default: True
+        qk_scale (float | None, optional): Override default qk scale of head_dim ** -0.5 if set
+        attn_drop (float, optional): Dropout ratio of attention weight. Default: 0.0
+        proj_drop (float, optional): Dropout ratio of output. Default: 0.0
+    """
+
+    def __init__(
+        self,
+        dim,
+        window_size,
+        num_heads,
+        qkv_bias=True,
+        qk_scale=None,
+        attn_drop=0.0,
+        proj_drop=0.0,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.window_size = window_size  # Wh, Ww
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim**-0.5
+
+        # define a parameter table of relative position bias
+        self.relative_position_bias_table = nn.Parameter(
+            torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads)
+        )  # 2*Wh-1 * 2*Ww-1, nH
+
+        # get pair-wise relative position index for each token inside the window
+        coords_h = torch.arange(self.window_size[0])
+        coords_w = torch.arange(self.window_size[1])
+        coords = torch.stack(
+            torch.meshgrid([coords_h, coords_w])
+        )  # 2, Wh, Ww coordinates
+        coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
+        relative_coords = (
+            coords_flatten[:, :, None] - coords_flatten[:, None, :]
+        )  # 2, Wh*Ww, Wh*Ww
+        relative_coords = relative_coords.permute(
+            1, 2, 0
+        ).contiguous()  # Wh*Ww, Wh*Ww, 2
+        relative_coords[:, :, 0] += self.window_size[0] - 1  # shift to start from 0
+        relative_coords[:, :, 1] += self.window_size[1] - 1
+        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
+        relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
+        self.register_buffer("relative_position_index", relative_position_index)
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+
+        self.proj_drop = nn.Dropout(proj_drop)
+
+        trunc_normal_(self.relative_position_bias_table, std=0.02)
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x, mask=None):
+        """
+        Args:
+            x: input features with shape of (num_windows*B, N, C)
+            mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
+        """
+        B_, N, C = x.shape
+        qkv = (
+            self.qkv(x)
+            .reshape(B_, N, 3, self.num_heads, C // self.num_heads)
+            .permute(2, 0, 3, 1, 4)
+        )
+        q, k, v = (
+            qkv[0],
+            qkv[1],
+            qkv[2],
+        )  # make torchscript happy (cannot use tensor as tuple)
+
+        q = q * self.scale
+        attn = q @ k.transpose(-2, -1)
+
+        relative_position_bias = self.relative_position_bias_table[
+            self.relative_position_index.view(-1)
+        ].view(
+            self.window_size[0] * self.window_size[1],
+            self.window_size[0] * self.window_size[1],
+            -1,
+        )  # Wh*Ww,Wh*Ww,nH
+        relative_position_bias = relative_position_bias.permute(
+            2, 0, 1
+        ).contiguous()  # nH, Wh*Ww, Wh*Ww
+        attn = attn + relative_position_bias.unsqueeze(0)
+
+        if mask is not None:
+            nW = mask.shape[0]
+            attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(
+                1
+            ).unsqueeze(0)
+            attn = attn.view(-1, self.num_heads, N, N)
+            attn = self.softmax(attn)
+        else:
+            attn = self.softmax(attn)
+
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+    def extra_repr(self) -> str:
+        return f"dim={self.dim}, window_size={self.window_size}, num_heads={self.num_heads}"
+
+    def flops(self, N):
+        # calculate flops for 1 window with token length of N
+        flops = 0
+        # qkv = self.qkv(x)
+        flops += N * self.dim * 3 * self.dim
+        # attn = (q @ k.transpose(-2, -1))
+        flops += self.num_heads * N * (self.dim // self.num_heads) * N
+        #  x = (attn @ v)
+        flops += self.num_heads * N * N * (self.dim // self.num_heads)
+        # x = self.proj(x)
+        flops += N * self.dim * self.dim
+        return flops
+
+
+class SwinTransformerBlock(nn.Module):
+    r"""Swin Transformer Block.
+
+    Args:
+        dim (int): Number of input channels.
+        input_resolution (tuple[int]): Input resulotion.
+        num_heads (int): Number of attention heads.
+        window_size (int): Window size.
+        shift_size (int): Shift size for SW-MSA.
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
+        qkv_bias (bool, optional): If True, add a learnable bias to query, key, value. Default: True
+        qk_scale (float | None, optional): Override default qk scale of head_dim ** -0.5 if set.
+        drop (float, optional): Dropout rate. Default: 0.0
+        attn_drop (float, optional): Attention dropout rate. Default: 0.0
+        drop_path (float, optional): Stochastic depth rate. Default: 0.0
+        act_layer (nn.Module, optional): Activation layer. Default: nn.GELU
+        norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
+    """
+
+    def __init__(
+        self,
+        dim,
+        input_resolution,
+        num_heads,
+        window_size=7,
+        shift_size=0,
+        mlp_ratio=4.0,
+        qkv_bias=True,
+        qk_scale=None,
+        drop=0.0,
+        attn_drop=0.0,
+        drop_path=0.0,
+        act_layer=nn.GELU,
+        norm_layer=nn.LayerNorm,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.input_resolution = input_resolution
+        self.num_heads = num_heads
+        self.window_size = window_size
+        self.shift_size = shift_size
+        self.mlp_ratio = mlp_ratio
+        if min(self.input_resolution) <= self.window_size:
+            # if window size is larger than input resolution, we don't partition windows
+            self.shift_size = 0
+            self.window_size = min(self.input_resolution)
+        assert 0 <= self.shift_size < self.window_size, (
+            "shift_size must in 0-window_size"
+        )
+
+        self.norm1 = norm_layer(dim)
+        self.attn = WindowAttention(
+            dim,
+            window_size=to_2tuple(self.window_size),
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            qk_scale=qk_scale,
+            attn_drop=attn_drop,
+            proj_drop=drop,
+        )
+
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = Mlp(
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            act_layer=act_layer,
+            drop=drop,
+        )
+
+        if self.shift_size > 0:
+            attn_mask = self.calculate_mask(self.input_resolution)
+        else:
+            attn_mask = None
+
+        self.register_buffer("attn_mask", attn_mask)
+
+    def calculate_mask(self, x_size):
+        # calculate attention mask for SW-MSA
+        H, W = x_size
+        img_mask = torch.zeros((1, H, W, 1))  # 1 H W 1
+        h_slices = (
+            slice(0, -self.window_size),
+            slice(-self.window_size, -self.shift_size),
+            slice(-self.shift_size, None),
+        )
+        w_slices = (
+            slice(0, -self.window_size),
+            slice(-self.window_size, -self.shift_size),
+            slice(-self.shift_size, None),
+        )
+        cnt = 0
+        for h in h_slices:
+            for w in w_slices:
+                img_mask[:, h, w, :] = cnt
+                cnt += 1
+
+        mask_windows = window_partition(
+            img_mask, self.window_size
+        )  # nW, window_size, window_size, 1
+        mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
+        attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+        attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(
+            attn_mask == 0, float(0.0)
+        )
+
+        return attn_mask
+
+    def forward(self, x, x_size):
+        H, W = x_size
+        B, L, C = x.shape
+        # assert L == H * W, "input feature has wrong size"
+
+        shortcut = x
+        x = self.norm1(x)
+        x = x.view(B, H, W, C)
+
+        # cyclic shift
+        if self.shift_size > 0:
+            shifted_x = torch.roll(
+                x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2)
+            )
+        else:
+            shifted_x = x
+
+        # partition windows
+        x_windows = window_partition(
+            shifted_x, self.window_size
+        )  # nW*B, window_size, window_size, C
+        x_windows = x_windows.view(
+            -1, self.window_size * self.window_size, C
+        )  # nW*B, window_size*window_size, C
+
+        # W-MSA/SW-MSA (to be compatible for testing on images whose shapes are the multiple of window size
+        if self.input_resolution == x_size:
+            attn_windows = self.attn(
+                x_windows, mask=self.attn_mask
+            )  # nW*B, window_size*window_size, C
+        else:
+            attn_windows = self.attn(
+                x_windows, mask=self.calculate_mask(x_size).to(x.device)
+            )
+
+        # merge windows
+        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
+        shifted_x = window_reverse(attn_windows, self.window_size, H, W)  # B H' W' C
+
+        # reverse cyclic shift
+        if self.shift_size > 0:
+            x = torch.roll(
+                shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2)
+            )
+        else:
+            x = shifted_x
+        x = x.view(B, H * W, C)
+
+        # FFN
+        x = shortcut + self.drop_path(x)
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
+
+        return x
+
+    def extra_repr(self) -> str:
+        return (
+            f"dim={self.dim}, input_resolution={self.input_resolution}, num_heads={self.num_heads}, "
+            f"window_size={self.window_size}, shift_size={self.shift_size}, mlp_ratio={self.mlp_ratio}"
+        )
+
+    def flops(self):
+        flops = 0
+        H, W = self.input_resolution
+        # norm1
+        flops += self.dim * H * W
+        # W-MSA/SW-MSA
+        nW = H * W / self.window_size / self.window_size
+        flops += nW * self.attn.flops(self.window_size * self.window_size)
+        # mlp
+        flops += 2 * H * W * self.dim * self.dim * self.mlp_ratio
+        # norm2
+        flops += self.dim * H * W
+        return flops
+
+
+class PatchMerging(nn.Module):
+    r"""Patch Merging Layer.
+
+    Args:
+        input_resolution (tuple[int]): Resolution of input feature.
+        dim (int): Number of input channels.
+        norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
+    """
+
+    def __init__(self, input_resolution, dim, norm_layer=nn.LayerNorm):
+        super().__init__()
+        self.input_resolution = input_resolution
+        self.dim = dim
+        self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
+        self.norm = norm_layer(4 * dim)
+
+    def forward(self, x):
+        """
+        x: B, H*W, C
+        """
+        H, W = self.input_resolution
+        B, L, C = x.shape
+        assert L == H * W, "input feature has wrong size"
+        assert H % 2 == 0 and W % 2 == 0, f"x size ({H}*{W}) are not even."
+
+        x = x.view(B, H, W, C)
+
+        x0 = x[:, 0::2, 0::2, :]  # B H/2 W/2 C
+        x1 = x[:, 1::2, 0::2, :]  # B H/2 W/2 C
+        x2 = x[:, 0::2, 1::2, :]  # B H/2 W/2 C
+        x3 = x[:, 1::2, 1::2, :]  # B H/2 W/2 C
+        x = torch.cat([x0, x1, x2, x3], -1)  # B H/2 W/2 4*C
+        x = x.view(B, -1, 4 * C)  # B H/2*W/2 4*C
+
+        x = self.norm(x)
+        x = self.reduction(x)
+
+        return x
+
+    def extra_repr(self) -> str:
+        return f"input_resolution={self.input_resolution}, dim={self.dim}"
+
+    def flops(self):
+        H, W = self.input_resolution
+        flops = H * W * self.dim
+        flops += (H // 2) * (W // 2) * 4 * self.dim * 2 * self.dim
+        return flops
+
+
+class BasicLayer(nn.Module):
+    """A basic Swin Transformer layer for one stage.
+
+    Args:
+        dim (int): Number of input channels.
+        input_resolution (tuple[int]): Input resolution.
+        depth (int): Number of blocks.
+        num_heads (int): Number of attention heads.
+        window_size (int): Local window size.
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
+        qkv_bias (bool, optional): If True, add a learnable bias to query, key, value. Default: True
+        qk_scale (float | None, optional): Override default qk scale of head_dim ** -0.5 if set.
+        drop (float, optional): Dropout rate. Default: 0.0
+        attn_drop (float, optional): Attention dropout rate. Default: 0.0
+        drop_path (float | tuple[float], optional): Stochastic depth rate. Default: 0.0
+        norm_layer (nn.Module, optional): Normalization layer. Default: nn.LayerNorm
+        downsample (nn.Module | None, optional): Downsample layer at the end of the layer. Default: None
+        use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
+    """
+
+    def __init__(
+        self,
+        dim,
+        input_resolution,
+        depth,
+        num_heads,
+        window_size,
+        mlp_ratio=4.0,
+        qkv_bias=True,
+        qk_scale=None,
+        drop=0.0,
+        attn_drop=0.0,
+        drop_path=0.0,
+        norm_layer=nn.LayerNorm,
+        downsample=None,
+        use_checkpoint=False,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.input_resolution = input_resolution
+        self.depth = depth
+        self.use_checkpoint = use_checkpoint
+
+        # build blocks
+        self.blocks = nn.ModuleList(
+            [
+                SwinTransformerBlock(
+                    dim=dim,
+                    input_resolution=input_resolution,
+                    num_heads=num_heads,
+                    window_size=window_size,
+                    shift_size=0 if (i % 2 == 0) else window_size // 2,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    qk_scale=qk_scale,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=drop_path[i]
+                    if isinstance(drop_path, list)
+                    else drop_path,
+                    norm_layer=norm_layer,
+                )
+                for i in range(depth)
+            ]
+        )
+
+        # patch merging layer
+        if downsample is not None:
+            self.downsample = downsample(
+                input_resolution, dim=dim, norm_layer=norm_layer
+            )
+        else:
+            self.downsample = None
+
+    def forward(self, x, x_size):
+        for blk in self.blocks:
+            if self.use_checkpoint:
+                x = checkpoint.checkpoint(blk, x, x_size)
+            else:
+                x = blk(x, x_size)
+        if self.downsample is not None:
+            x = self.downsample(x)
+        return x
+
+    def extra_repr(self) -> str:
+        return f"dim={self.dim}, input_resolution={self.input_resolution}, depth={self.depth}"
+
+    def flops(self):
+        flops = 0
+        for blk in self.blocks:
+            flops += blk.flops()
+        if self.downsample is not None:
+            flops += self.downsample.flops()
+        return flops
+
+
+class RSTB(nn.Module):
+    """Residual Swin Transformer Block (RSTB).
+
+    Args:
+        dim (int): Number of input channels.
+        input_resolution (tuple[int]): Input resolution.
+        depth (int): Number of blocks.
+        num_heads (int): Number of attention heads.
+        window_size (int): Local window size.
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
+        qkv_bias (bool, optional): If True, add a learnable bias to query, key, value. Default: True
+        qk_scale (float | None, optional): Override default qk scale of head_dim ** -0.5 if set.
+        drop (float, optional): Dropout rate. Default: 0.0
+        attn_drop (float, optional): Attention dropout rate. Default: 0.0
+        drop_path (float | tuple[float], optional): Stochastic depth rate. Default: 0.0
+        norm_layer (nn.Module, optional): Normalization layer. Default: nn.LayerNorm
+        downsample (nn.Module | None, optional): Downsample layer at the end of the layer. Default: None
+        use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
+        img_size: Input image size.
+        patch_size: Patch size.
+        resi_connection: The convolutional block before residual connection.
+    """
+
+    def __init__(
+        self,
+        dim,
+        input_resolution,
+        depth,
+        num_heads,
+        window_size,
+        mlp_ratio=4.0,
+        qkv_bias=True,
+        qk_scale=None,
+        drop=0.0,
+        attn_drop=0.0,
+        drop_path=0.0,
+        norm_layer=nn.LayerNorm,
+        downsample=None,
+        use_checkpoint=False,
+        img_size=224,
+        patch_size=4,
+        resi_connection="1conv",
+    ):
+        super(RSTB, self).__init__()
+
+        self.dim = dim
+        self.input_resolution = input_resolution
+
+        self.residual_group = BasicLayer(
+            dim=dim,
+            input_resolution=input_resolution,
+            depth=depth,
+            num_heads=num_heads,
+            window_size=window_size,
+            mlp_ratio=mlp_ratio,
+            qkv_bias=qkv_bias,
+            qk_scale=qk_scale,
+            drop=drop,
+            attn_drop=attn_drop,
+            drop_path=drop_path,
+            norm_layer=norm_layer,
+            downsample=downsample,
+            use_checkpoint=use_checkpoint,
+        )
+
+        if resi_connection == "1conv":
+            self.conv = nn.Conv2d(dim, dim, 3, 1, 1)
+        elif resi_connection == "3conv":
+            # to save parameters and memory
+            self.conv = nn.Sequential(
+                nn.Conv2d(dim, dim // 4, 3, 1, 1),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+                nn.Conv2d(dim // 4, dim // 4, 1, 1, 0),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+                nn.Conv2d(dim // 4, dim, 3, 1, 1),
+            )
+
+        self.patch_embed = PatchEmbed(
+            img_size=img_size,
+            patch_size=patch_size,
+            in_chans=0,
+            embed_dim=dim,
+            norm_layer=None,
+        )
+
+        self.patch_unembed = PatchUnEmbed(
+            img_size=img_size,
+            patch_size=patch_size,
+            in_chans=0,
+            embed_dim=dim,
+            norm_layer=None,
+        )
+
+    def forward(self, x, x_size):
+        return (
+            self.patch_embed(
+                self.conv(self.patch_unembed(self.residual_group(x, x_size), x_size))
+            )
+            + x
+        )
+
+    def flops(self):
+        flops = 0
+        flops += self.residual_group.flops()
+        H, W = self.input_resolution
+        flops += H * W * self.dim * self.dim * 9
+        flops += self.patch_embed.flops()
+        flops += self.patch_unembed.flops()
+
+        return flops
+
+
+class PatchEmbed(nn.Module):
+    r"""Image to Patch Embedding
+
+    Args:
+        img_size (int): Image size.  Default: 224.
+        patch_size (int): Patch token size. Default: 4.
+        in_chans (int): Number of input image channels. Default: 3.
+        embed_dim (int): Number of linear projection output channels. Default: 96.
+        norm_layer (nn.Module, optional): Normalization layer. Default: None
+    """
+
+    def __init__(
+        self, img_size=224, patch_size=4, in_chans=3, embed_dim=96, norm_layer=None
+    ):
+        super().__init__()
+        img_size = to_2tuple(img_size)
+        patch_size = to_2tuple(patch_size)
+        patches_resolution = [
+            img_size[0] // patch_size[0],
+            img_size[1] // patch_size[1],
+        ]
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.patches_resolution = patches_resolution
+        self.num_patches = patches_resolution[0] * patches_resolution[1]
+
+        self.in_chans = in_chans
+        self.embed_dim = embed_dim
+
+        if norm_layer is not None:
+            self.norm = norm_layer(embed_dim)
+        else:
+            self.norm = None
+
+    def forward(self, x):
+        x = x.flatten(2).transpose(1, 2)  # B Ph*Pw C
+        if self.norm is not None:
+            x = self.norm(x)
+        return x
+
+    def flops(self):
+        flops = 0
+        H, W = self.img_size
+        if self.norm is not None:
+            flops += H * W * self.embed_dim
+        return flops
+
+
+class PatchUnEmbed(nn.Module):
+    r"""Image to Patch Unembedding
+
+    Args:
+        img_size (int): Image size.  Default: 224.
+        patch_size (int): Patch token size. Default: 4.
+        in_chans (int): Number of input image channels. Default: 3.
+        embed_dim (int): Number of linear projection output channels. Default: 96.
+        norm_layer (nn.Module, optional): Normalization layer. Default: None
+    """
+
+    def __init__(
+        self, img_size=224, patch_size=4, in_chans=3, embed_dim=96, norm_layer=None
+    ):
+        super().__init__()
+        img_size = to_2tuple(img_size)
+        patch_size = to_2tuple(patch_size)
+        patches_resolution = [
+            img_size[0] // patch_size[0],
+            img_size[1] // patch_size[1],
+        ]
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.patches_resolution = patches_resolution
+        self.num_patches = patches_resolution[0] * patches_resolution[1]
+
+        self.in_chans = in_chans
+        self.embed_dim = embed_dim
+
+    def forward(self, x, x_size):
+        B, HW, C = x.shape
+        x = x.transpose(1, 2).view(B, self.embed_dim, x_size[0], x_size[1])  # B Ph*Pw C
+        return x
+
+    def flops(self):
+        flops = 0
+        return flops
+
+
+class Upsample(nn.Sequential):
+    """Upsample module.
+
+    Args:
+        scale (int): Scale factor. Supported scales: 2^n and 3.
+        num_feat (int): Channel number of intermediate features.
+    """
+
+    def __init__(self, scale, num_feat):
+        m = []
+        if (scale & (scale - 1)) == 0:  # scale = 2^n
+            for _ in range(int(math.log(scale, 2))):
+                m.append(nn.Conv2d(num_feat, 4 * num_feat, 3, 1, 1))
+                m.append(nn.PixelShuffle(2))
+        elif scale == 3:
+            m.append(nn.Conv2d(num_feat, 9 * num_feat, 3, 1, 1))
+            m.append(nn.PixelShuffle(3))
+        else:
+            raise ValueError(
+                f"scale {scale} is not supported. Supported scales: 2^n and 3."
+            )
+        super(Upsample, self).__init__(*m)
+
+
+class UpsampleOneStep(nn.Sequential):
+    """UpsampleOneStep module (the difference with Upsample is that it always only has 1conv + 1pixelshuffle)
+       Used in lightweight SR to save parameters.
+
+    Args:
+        scale (int): Scale factor. Supported scales: 2^n and 3.
+        num_feat (int): Channel number of intermediate features.
+
+    """
+
+    def __init__(self, scale, num_feat, num_out_ch, input_resolution=None):
+        self.num_feat = num_feat
+        self.input_resolution = input_resolution
+        m = []
+        m.append(nn.Conv2d(num_feat, (scale**2) * num_out_ch, 3, 1, 1))
+        m.append(nn.PixelShuffle(scale))
+        super(UpsampleOneStep, self).__init__(*m)
+
+    def flops(self):
+        H, W = self.input_resolution
+        flops = H * W * self.num_feat * 3 * 9
+        return flops
+
+
+class SwinIR(nn.Module):
+    r"""SwinIR
+        A PyTorch impl of : `SwinIR: Image Restoration Using Swin Transformer`, based on Swin Transformer.
+
+    Args:
+        img_size (int | tuple(int)): Input image size. Default 64
+        patch_size (int | tuple(int)): Patch size. Default: 1
+        in_chans (int): Number of input image channels. Default: 3
+        embed_dim (int): Patch embedding dimension. Default: 96
+        depths (tuple(int)): Depth of each Swin Transformer layer.
+        num_heads (tuple(int)): Number of attention heads in different layers.
+        window_size (int): Window size. Default: 7
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim. Default: 4
+        qkv_bias (bool): If True, add a learnable bias to query, key, value. Default: True
+        qk_scale (float): Override default qk scale of head_dim ** -0.5 if set. Default: None
+        drop_rate (float): Dropout rate. Default: 0
+        attn_drop_rate (float): Attention dropout rate. Default: 0
+        drop_path_rate (float): Stochastic depth rate. Default: 0.1
+        norm_layer (nn.Module): Normalization layer. Default: nn.LayerNorm.
+        ape (bool): If True, add absolute position embedding to the patch embedding. Default: False
+        patch_norm (bool): If True, add normalization after patch embedding. Default: True
+        use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False
+        upscale: Upscale factor. 2/3/4/8 for image SR, 1 for denoising and compress artifact reduction
+        img_range: Image range. 1. or 255.
+        upsampler: The reconstruction reconstruction module. 'pixelshuffle'/'pixelshuffledirect'/'nearest+conv'/None
+        resi_connection: The convolutional block before residual connection. '1conv'/'3conv'
+    """
+
+    def __init__(
+        self,
+        img_size=64,
+        patch_size=1,
+        in_chans=1,
+        out_chans=1,
+        embed_dim=96,
+        depths=[6, 6, 6, 6],
+        num_heads=[6, 6, 6, 6],
+        window_size=7,
+        mlp_ratio=4.0,
+        qkv_bias=True,
+        qk_scale=None,
+        drop_rate=0.0,
+        attn_drop_rate=0.0,
+        drop_path_rate=0.1,
+        norm_layer=nn.LayerNorm,
+        ape=False,
+        patch_norm=True,
+        use_checkpoint=False,
+        upscale=2,
+        img_range=1.0,
+        upsampler="",
+        resi_connection="1conv",
+        **kwargs,
+    ):
+        super(SwinIR, self).__init__()
+        num_in_ch = in_chans
+        num_out_ch = out_chans
+        print(num_out_ch)
+        num_feat = 64
+        self.img_range = img_range
+
+        # this need to be modified when dealing medical images since in_ch=1 in this case
+        if in_chans == 3:
+            rgb_mean = (0.4488, 0.4371, 0.4040)
+            self.mean = torch.Tensor(rgb_mean).view(1, 3, 1, 1)
+        else:
+            self.mean = torch.zeros(1, 1, 1, 1)
+
+        self.upscale = upscale
+        self.upsampler = upsampler
+        self.window_size = window_size
+
+        #####################################################################################################
+        ################################### 1, shallow feature extraction ###################################
+        self.conv_first = nn.Conv2d(num_in_ch, embed_dim, 3, 1, 1)
+
+        #####################################################################################################
+        ################################### 2, deep feature extraction ######################################
+        self.num_layers = len(depths)
+        self.embed_dim = embed_dim
+        self.ape = ape
+        self.patch_norm = patch_norm
+        self.num_features = embed_dim
+        self.mlp_ratio = mlp_ratio
+
+        # split image into non-overlapping patches
+        self.patch_embed = PatchEmbed(
+            img_size=img_size,
+            patch_size=patch_size,
+            in_chans=embed_dim,
+            embed_dim=embed_dim,
+            norm_layer=norm_layer if self.patch_norm else None,
+        )
+        num_patches = self.patch_embed.num_patches
+        patches_resolution = self.patch_embed.patches_resolution
+        self.patches_resolution = patches_resolution
+
+        # merge non-overlapping patches into image
+        self.patch_unembed = PatchUnEmbed(
+            img_size=img_size,
+            patch_size=patch_size,
+            in_chans=embed_dim,
+            embed_dim=embed_dim,
+            norm_layer=norm_layer if self.patch_norm else None,
+        )
+
+        # absolute position embedding
+        if self.ape:
+            self.absolute_pos_embed = nn.Parameter(
+                torch.zeros(1, num_patches, embed_dim)
+            )
+            trunc_normal_(self.absolute_pos_embed, std=0.02)
+
+        self.pos_drop = nn.Dropout(p=drop_rate)
+
+        # stochastic depth
+        dpr = [
+            x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))
+        ]  # stochastic depth decay rule
+
+        # build Residual Swin Transformer blocks (RSTB)
+        self.layers = nn.ModuleList()
+        for i_layer in range(self.num_layers):
+            layer = RSTB(
+                dim=embed_dim,
+                input_resolution=(patches_resolution[0], patches_resolution[1]),
+                depth=depths[i_layer],
+                num_heads=num_heads[i_layer],
+                window_size=window_size,
+                mlp_ratio=self.mlp_ratio,
+                qkv_bias=qkv_bias,
+                qk_scale=qk_scale,
+                drop=drop_rate,
+                attn_drop=attn_drop_rate,
+                drop_path=dpr[
+                    sum(depths[:i_layer]) : sum(depths[: i_layer + 1])
+                ],  # no impact on SR results
+                norm_layer=norm_layer,
+                downsample=None,
+                use_checkpoint=use_checkpoint,
+                img_size=img_size,
+                patch_size=patch_size,
+                resi_connection=resi_connection,
+            )
+            self.layers.append(layer)
+        self.norm = norm_layer(self.num_features)
+
+        # build the last conv layer in deep feature extraction
+        if resi_connection == "1conv":
+            self.conv_after_body = nn.Conv2d(embed_dim, embed_dim, 3, 1, 1)
+        elif resi_connection == "3conv":
+            # to save parameters and memory
+            self.conv_after_body = nn.Sequential(
+                nn.Conv2d(embed_dim, embed_dim // 4, 3, 1, 1),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+                nn.Conv2d(embed_dim // 4, embed_dim // 4, 1, 1, 0),
+                nn.LeakyReLU(negative_slope=0.2, inplace=True),
+                nn.Conv2d(embed_dim // 4, embed_dim, 3, 1, 1),
+            )
+
+        #####################################################################################################
+        ################################ 3, high quality image reconstruction ################################
+        if self.upsampler == "pixelshuffle":
+            # for classical SR
+            self.conv_before_upsample = nn.Sequential(
+                nn.Conv2d(embed_dim, num_feat, 3, 1, 1), nn.LeakyReLU(inplace=True)
+            )
+            self.upsample = Upsample(upscale, num_feat)
+            self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
+        elif self.upsampler == "pixelshuffledirect":
+            # for lightweight SR (to save parameters)
+            self.upsample = UpsampleOneStep(
+                upscale,
+                embed_dim,
+                num_out_ch,
+                (patches_resolution[0], patches_resolution[1]),
+            )
+        elif self.upsampler == "nearest+conv":
+            # for real-world SR (less artifacts)
+            assert self.upscale == 4, "only support x4 now."
+            self.conv_before_upsample = nn.Sequential(
+                nn.Conv2d(embed_dim, num_feat, 3, 1, 1), nn.LeakyReLU(inplace=True)
+            )
+            self.conv_up1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+            self.conv_up2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+            self.conv_hr = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+            self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
+            self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+        else:
+            # for image denoising and JPEG compression artifact reduction
+            self.conv_last = nn.Conv2d(embed_dim, num_out_ch, 3, 1, 1)
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=0.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        return {"absolute_pos_embed"}
+
+    @torch.jit.ignore
+    def no_weight_decay_keywords(self):
+        return {"relative_position_bias_table"}
+
+    def check_image_size(self, x):
+        _, _, h, w = x.size()
+        mod_pad_h = (self.window_size - h % self.window_size) % self.window_size
+        mod_pad_w = (self.window_size - w % self.window_size) % self.window_size
+        x = F.pad(x, (0, mod_pad_w, 0, mod_pad_h), "reflect")
+        return x
+
+    def forward_features(self, x):
+        x_size = (x.shape[2], x.shape[3])
+        x = self.patch_embed(x)
+        if self.ape:
+            x = x + self.absolute_pos_embed
+        x = self.pos_drop(x)
+
+        for layer in self.layers:
+            x = layer(x, x_size)
+
+        x = self.norm(x)  # B L C
+        x = self.patch_unembed(x, x_size)
+
+        return x
+
+    def forward(self, x):
+        H, W = x.shape[2:]
+        x = self.check_image_size(x)
+
+        self.mean = self.mean.type_as(x)
+        x = (x - self.mean) * self.img_range
+
+        if self.upsampler == "pixelshuffle":
+            # for classical SR
+            x = self.conv_first(x)
+            x = self.conv_after_body(self.forward_features(x)) + x
+            x = self.conv_before_upsample(x)
+            x = self.conv_last(self.upsample(x))
+        elif self.upsampler == "pixelshuffledirect":
+            # for lightweight SR
+            x = self.conv_first(x)
+            x = self.conv_after_body(self.forward_features(x)) + x
+            x = self.upsample(x)
+        elif self.upsampler == "nearest+conv":
+            # for real-world SR
+            x = self.conv_first(x)
+            x = self.conv_after_body(self.forward_features(x)) + x
+            x = self.conv_before_upsample(x)
+            x = self.lrelu(
+                self.conv_up1(
+                    torch.nn.functional.interpolate(x, scale_factor=2, mode="nearest")
+                )
+            )
+            x = self.lrelu(
+                self.conv_up2(
+                    torch.nn.functional.interpolate(x, scale_factor=2, mode="nearest")
+                )
+            )
+            x = self.conv_last(self.lrelu(self.conv_hr(x)))
+        else:
+            # for image denoising and JPEG compression artifact reduction
+            x_first = self.conv_first(x)
+            res = self.conv_after_body(self.forward_features(x_first)) + x_first
+            x = x[:, 0, :, :] + self.conv_last(res)
+
+        x = x / self.img_range + self.mean
+
+        return x[:, :, : H * self.upscale, : W * self.upscale]
+
+    def flops(self):
+        flops = 0
+        H, W = self.patches_resolution
+        flops += H * W * 3 * self.embed_dim * 9
+        flops += self.patch_embed.flops()
+        for i, layer in enumerate(self.layers):
+            flops += layer.flops()
+        flops += H * W * 3 * self.embed_dim * self.embed_dim
+        # flops += self.upsample.flops()
+        return flops
+
+
+class Reconstructor(nn.Module):
+    def __init__(
+        self, img_h=512, img_w=512, load_pretrained=False, path=None, device="cpu"
+    ):
+        super(Reconstructor, self).__init__()
+
+        self.Image_recon_module = SwinIR(
+            upscale=1,
+            img_size=(img_h, img_w),
+            in_chans=2,
+            window_size=8,
+            img_range=1.0,
+            depths=[2, 2, 2, 2],
+            embed_dim=60,
+            num_heads=[2, 2, 2, 2],
+            mlp_ratio=2,
+            upsampler="",
+        )
+
+        self.Sinogram_recon_module = SwinIR(
+            upscale=1,
+            img_size=(96, 800),
+            window_size=8,
+            img_range=1.0,
+            depths=[1, 1, 1],
+            embed_dim=60,
+            num_heads=[2, 2, 2],
+            mlp_ratio=2,
+            upsampler="",
+        )
+
+        self.path = path
+        if self.path is None:
+            self.path = "weights/DuDoTrans.pth.tar"
+
+        if load_pretrained:
+            url = "https://drive.google.com/uc?id=1EWFb6TiCQn6XkKF5U7vktVexc_MiPglu"
+            weights_folder_path = "weights"
+            if not os.path.exists(weights_folder_path):
+                os.makedirs(weights_folder_path)
+            get_weight_file(url, self.path)
+            self.load_pretrained(path=self.path, device=device, strict=True)
+
+    def load_pretrained(self, path, device="cpu", strict=True):
+        checkpoint = torch.load(
+            path,
+            map_location=device,
+        )
+
+        if "reconstructor_state" in checkpoint:
+            state_dict = checkpoint["reconstructor_state"]
+        else:
+            state_dict = checkpoint
+
+        state_dict = {
+            key.removeprefix("module."): value for key, value in state_dict.items()
+        }
+
+        self.load_state_dict(
+            state_dict,
+            strict=strict,
+        )
+
+        return self
+```
+
+### difftomo/CT/Models/FBPConvNet.py
+```
+# FBPConvNet implementation based on:
+
+# K. H. Jin et al.,
+# 'Deep Convolutional Neural Network for Inverse Problems in Imaging,'
+# IEEE Transactions on Image Processing, 2017.
+
+# Original implementation:
+# https://github.com/panakino/FBPConvNet
+
+
+import torch
+import torch.nn as nn
+
+
+class FBPConvNet(nn.Module):
+    def __init__(self, in_channels=1, out_channels=1):
+        super().__init__()
+
+        self.enc1 = self.conv_block(in_channels, 64)
+        self.enc2 = self.conv_block(64, 128)
+        self.enc3 = self.conv_block(128, 256)
+        self.enc4 = self.conv_block(256, 512)
+
+        self.bottleneck = self.conv_block(512, 1024)
+
+        self.up4 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
+        self.dec4 = self.conv_block(1024, 512)
+
+        self.up3 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.dec3 = self.conv_block(512, 256)
+
+        self.up2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.dec2 = self.conv_block(256, 128)
+
+        self.up1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.dec1 = self.conv_block(128, 64)
+
+        self.out_conv = nn.Conv2d(64, out_channels, kernel_size=1)
+
+    @staticmethod
+    def conv_block(in_channels, out_channels):
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        e1 = self.enc1(x)
+        p1 = nn.functional.max_pool2d(e1, 2)
+
+        e2 = self.enc2(p1)
+        p2 = nn.functional.max_pool2d(e2, 2)
+
+        e3 = self.enc3(p2)
+        p3 = nn.functional.max_pool2d(e3, 2)
+
+        e4 = self.enc4(p3)
+        p4 = nn.functional.max_pool2d(e4, 2)
+
+        b = self.bottleneck(p4)
+
+        u4 = self.up4(b)
+        u4 = torch.cat([u4, e4], dim=1)
+        d4 = self.dec4(u4)
+
+        u3 = self.up3(d4)
+        u3 = torch.cat([u3, e3], dim=1)
+        d3 = self.dec3(u3)
+
+        u2 = self.up2(d3)
+        u2 = torch.cat([u2, e2], dim=1)
+        d2 = self.dec2(u2)
+
+        u1 = self.up1(d2)
+        u1 = torch.cat([u1, e1], dim=1)
+        d1 = self.dec1(u1)
+
+        residual = self.out_conv(d1)
+
+        return x + residual
+```
+
+### difftomo/CT/Models/REDCNN.py
+```
+import torch
+import torch.nn as nn
+from .utils import get_weight_file
+import os
+
+
+class REDCNN(nn.Module):
+    def __init__(self, load_pretrained=False, device="cpu"):
+        super().__init__()
+
+        self.conv1 = nn.Conv2d(1, 96, kernel_size=5, stride=1, padding=0)
+        self.conv2 = nn.Conv2d(96, 96, kernel_size=5, stride=1, padding=0)
+        self.conv3 = nn.Conv2d(96, 96, kernel_size=5, stride=1, padding=0)
+        self.conv4 = nn.Conv2d(96, 96, kernel_size=5, stride=1, padding=0)
+        self.conv5 = nn.Conv2d(96, 96, kernel_size=5, stride=1, padding=0)
+
+        self.deconv5 = nn.ConvTranspose2d(96, 96, kernel_size=5, stride=1, padding=0)
+        self.deconv4 = nn.ConvTranspose2d(96, 96, kernel_size=5, stride=1, padding=0)
+        self.deconv3 = nn.ConvTranspose2d(96, 96, kernel_size=5, stride=1, padding=0)
+        self.deconv2 = nn.ConvTranspose2d(96, 96, kernel_size=5, stride=1, padding=0)
+        self.deconv1 = nn.ConvTranspose2d(96, 1, kernel_size=5, stride=1, padding=0)
+
+        self.relu = nn.ReLU(inplace=False)
+
+        if load_pretrained:
+            self.path = "weights/redcnn.pth"
+            self.load_pretrained_weights(self.path, device=device)
+
+    def forward(self, x):
+        x1 = self.relu(self.conv1(x))
+        x2 = self.relu(self.conv2(x1))
+        x3 = self.relu(self.conv3(x2))
+        x4 = self.relu(self.conv4(x3))
+        x5 = self.relu(self.conv5(x4))
+
+        d5 = self.deconv5(x5)
+
+        d5 = self.relu(d5 + x4)
+        d4 = self.relu(self.deconv4(d5))
+
+        d3 = self.deconv3(d4)
+
+        d3 = self.relu(d3 + x2)
+        d2 = self.relu(self.deconv2(d3))
+
+        d1 = self.deconv1(d2)
+
+        out = self.relu(d1 + x)
+
+        return out
+
+    def load_pretrained_weights(self, path, device="cpu"):
+        url = "https://drive.google.com/uc?export=download&id=1PSpuMzcSh6ZPHlUzW5LwdHnkJMQXlEuz"
+        weights_folder_path = "weights"
+
+        if not os.path.exists(weights_folder_path):
+            os.makedirs(weights_folder_path)
+
+        get_weight_file(url, path)
+        state_dict = torch.load(path, map_location=device)
+
+        self.load_state_dict(state_dict)
+```
+
+### difftomo/CT/Models/RadonPrior.py
+```
+import torch
+import torch.nn as nn
+
+
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1):
+        super().__init__()
+        padding = kernel_size // 2 if stride == 1 else 0
+        self.net = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+            ),
+            nn.BatchNorm2d(out_channels),
+            nn.LeakyReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class Encoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.net = nn.Sequential(
+            ConvBlock(in_channels=1, out_channels=8, kernel_size=3, stride=2),
+            ConvBlock(in_channels=8, out_channels=8, kernel_size=3, stride=1),
+            ConvBlock(in_channels=8, out_channels=16, kernel_size=3, stride=2),
+            ConvBlock(in_channels=16, out_channels=16, kernel_size=3, stride=1),
+            ConvBlock(in_channels=16, out_channels=32, kernel_size=3, stride=2),
+            ConvBlock(in_channels=32, out_channels=32, kernel_size=3, stride=1),
+            ConvBlock(in_channels=32, out_channels=64, kernel_size=3, stride=2),
+            ConvBlock(in_channels=64, out_channels=64, kernel_size=3, stride=1),
+            ConvBlock(in_channels=64, out_channels=128, kernel_size=3, stride=2),
+            ConvBlock(in_channels=128, out_channels=128, kernel_size=3, stride=1),
+        )
+
+    def forward(self, x):
+
+        return self.net(x)
+
+
+class Decoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.net = nn.Sequential(
+            ConvBlock(in_channels=128, out_channels=128, kernel_size=3, stride=1),
+            ConvBlock(in_channels=128, out_channels=128, kernel_size=1, stride=1),
+            nn.ConvTranspose2d(
+                in_channels=128, out_channels=64, kernel_size=3, stride=2
+            ),
+            ConvBlock(in_channels=64, out_channels=64, kernel_size=3, stride=1),
+            ConvBlock(in_channels=64, out_channels=64, kernel_size=1, stride=1),
+            nn.ConvTranspose2d(
+                in_channels=64, out_channels=32, kernel_size=3, stride=2
+            ),
+            ConvBlock(in_channels=32, out_channels=32, kernel_size=3, stride=1),
+            ConvBlock(in_channels=32, out_channels=32, kernel_size=1, stride=1),
+            nn.ConvTranspose2d(
+                in_channels=32, out_channels=16, kernel_size=3, stride=2
+            ),
+            ConvBlock(in_channels=16, out_channels=16, kernel_size=3, stride=1),
+            ConvBlock(in_channels=16, out_channels=16, kernel_size=1, stride=1),
+            nn.ConvTranspose2d(in_channels=16, out_channels=8, kernel_size=3, stride=2),
+            ConvBlock(in_channels=8, out_channels=8, kernel_size=3, stride=1),
+            ConvBlock(in_channels=8, out_channels=8, kernel_size=1, stride=1),
+            nn.ConvTranspose2d(in_channels=8, out_channels=1, kernel_size=3, stride=2),
+            nn.Conv2d(in_channels=1, out_channels=1, kernel_size=1, stride=1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class PriorModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.net = nn.Sequential(
+            Encoder(),
+            nn.Conv2d(in_channels=128, out_channels=128, kernel_size=1, stride=1),
+            Decoder(),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+```
+
+### difftomo/CT/Models/__init__.py
+```
+from .REDCNN import REDCNN
+from .FBPConvNet import FBPConvNet
+from .DuDoTransModel import Reconstructor
+from .RadonPrior import PriorModel
+
+__all__ = ["REDCNN", "FBPConvNet", "Reconstructor", "PriorModel"]
+```
+
+### difftomo/CT/Models/utils.py
+```
+import torch.nn as nn
+import gdown
+
+
+def to_2tuple(x):
+    if isinstance(x, tuple):
+        return x
+    return (x, x)
+
+
+def trunc_normal_(tensor, mean=0.0, std=1.0, a=-2.0, b=2.0):
+    return nn.init.trunc_normal_(
+        tensor,
+        mean=mean,
+        std=std,
+        a=a,
+        b=b,
+    )
+
+
+class DropPath(nn.Module):
+    def __init__(self, drop_prob=0.0):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x):
+        if self.drop_prob == 0.0 or not self.training:
+            return x
+
+        keep_prob = 1 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+
+        random_tensor = x.new_empty(shape).bernoulli_(keep_prob)
+
+        if keep_prob > 0:
+            random_tensor.div_(keep_prob)
+
+        return x * random_tensor
+
+
+def load_gdrive(url, output_path):
+    gdown.download(url, output_path, quiet=False)
+
+
+def get_weight_file(url, output_path):
+    try:
+        load_gdrive(url, output_path)
+    except Exception as e:
+        print(f"Error downloading weight file: {e}")
+```
+
+### difftomo/CT/Projector/FanBeam.py
+```
+import torch
+from .._extensions import (
+    forward_siddon,
+    backward_siddon,
+    forward_siddon_cpu,
+    backward_siddon_cpu,
+)
+import math
+import warnings
+
+
+class _FanBeamFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        image,
+        projections,
+        detectors,
+        detector_spacing,
+        coverage,
+        distance,
+        workers=16,
+        device="cuda",
+    ):
+        ctx.type = "f"
+        ctx.device = device
+        ctx.workers = workers
+        # CUDA A
+        if ctx.device == "cuda":
+            sinogram = forward_siddon(
+                image,
+                projections,
+                detectors,
+                detector_spacing,
+                coverage,
+                distance,
+                ctx.type,
+            )
+        else:
+            sinogram = forward_siddon_cpu(
+                image,
+                projections,
+                detectors,
+                detector_spacing,
+                coverage,
+                distance,
+                ctx.type,
+                ctx.workers,
+            )
+
+        # Save what we need to perform A^T later
+        ctx.image_shape = image.shape
+        ctx.projections = projections
+        ctx.detectors = detectors
+        ctx.detector_spacing = detector_spacing
+        ctx.coverage = coverage
+        ctx.distance = distance
+
+        return sinogram.to(ctx.device)
+
+    @staticmethod
+    def backward(ctx, grad_sinogram):
+        # CUDA A^T
+        if ctx.device == "cuda":
+            grad_image = backward_siddon(
+                grad_sinogram,
+                ctx.image_shape,
+                ctx.projections,
+                ctx.detectors,
+                ctx.detector_spacing,
+                ctx.coverage,
+                ctx.distance,
+                ctx.type,
+            )
+        else:
+            grad_image = backward_siddon_cpu(
+                grad_sinogram,
+                ctx.image_shape,
+                ctx.projections,
+                ctx.detectors,
+                ctx.detector_spacing,
+                ctx.coverage,
+                ctx.distance,
+                ctx.type,
+                ctx.workers,
+            )
+
+        return (
+            grad_image.to(ctx.device),  # image
+            None,  # projections
+            None,  # detectors
+            None,  # detector_spacing
+            None,  # coverage
+            None,  # distance
+            None,  # workers
+            None,  # device
+        )
+
+
+class _FBPFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        sinogram,
+        image_shape,
+        projections,
+        detectors,
+        detector_spacing,
+        coverage,
+        distance,
+        workers=16,
+        device="cuda",
+    ):
+        ctx.type = "f"
+        ctx.device = device
+        ctx.workers = workers
+        # CUDA A^T
+        if ctx.device == "cuda":
+            recon_image = backward_siddon(
+                sinogram,
+                image_shape,
+                projections,
+                detectors,
+                detector_spacing,
+                coverage,
+                distance,
+                ctx.type,
+            )
+        else:
+            recon_image = backward_siddon_cpu(
+                sinogram,
+                image_shape,
+                projections,
+                detectors,
+                detector_spacing,
+                coverage,
+                distance,
+                ctx.type,
+                ctx.workers,
+            )
+
+        # Save what we need to perform A^T later
+        ctx.image_shape = image_shape
+        ctx.projections = projections
+        ctx.detectors = detectors
+        ctx.detector_spacing = detector_spacing
+        ctx.coverage = coverage
+        ctx.distance = distance
+
+        return recon_image.to(ctx.device)
+
+    @staticmethod
+    def backward(ctx, grad_recon_image):
+        # CUDA A
+        if ctx.device == "cuda":
+            grad_sinogram = forward_siddon(
+                grad_recon_image.contiguous(),
+                ctx.projections,
+                ctx.detectors,
+                ctx.detector_spacing,
+                ctx.coverage,
+                ctx.distance,
+                ctx.type,
+            )
+
+        else:
+            grad_sinogram = forward_siddon_cpu(
+                grad_recon_image.contiguous(),
+                ctx.projections,
+                ctx.detectors,
+                ctx.detector_spacing,
+                ctx.coverage,
+                ctx.distance,
+                ctx.type,
+                ctx.workers,
+            )
+
+        # Gradients corresponding to the inputs of forward()
+        return (
+            grad_sinogram,  # sinogram
+            None,  # image_shape
+            None,  # projections
+            None,  # detectors
+            None,  # detector_spacing
+            None,  # coverage
+            None,  # distance
+            None,  # filter_type
+        )
+
+
+class FanBeamProjector:
+    def __init__(
+        self,
+        projections=800,
+        detector_bins=800,
+        detector_spacing=1,
+        coverage=2 * torch.pi,
+        distance=400,
+        type="line",
+        device="cpu",
+        workers=16,
+        pre_weighting=False,
+    ):
+        self.projections = projections
+        self.detectors = detector_bins
+        self.detector_spacing = detector_spacing
+        self.coverage = coverage
+        self.distance = distance
+        self.type = type
+        self.device = device
+        self.workers = workers
+        self.pre_weighting = pre_weighting
+        self.mode = "f"
+
+    def forward(self, image):
+        self.image_shape = image.shape
+
+        if image.device.type != self.device:
+            ValueError(f"Image not on device: {self.device}. ")
+
+        if len(self.image_shape) == 2:
+            warnings.warn(
+                "Image dimension contains only height and width. "
+                "Expected (batch, channels, height, width). "
+                "Automatically reshaping to (1, 1, height, width).",
+                UserWarning,
+            )
+            self.image_shape = (1, 1, *self.image_shape)
+            image = image.unsqueeze(0).unsqueeze(0)
+
+        elif len(self.image_shape) == 3:
+            warnings.warn(
+                "Image dimension contains three dimensions. "
+                "Expected (batch, channels, height, width). "
+                "Automatically reshaping to (1, channels, height, width).",
+                UserWarning,
+            )
+            self.image_shape = (1, *self.image_shape)
+            image = image.unsqueeze(0)
+
+        elif len(self.image_shape) > 4:
+            raise ValueError(
+                f"Image dimension is greater than 4, expected 4 dimensions (batch, channels, height, width)."
+            )
+
+        if self.type == "line":
+            return _FanBeamFunction.apply(
+                image,
+                self.projections,
+                self.detectors,
+                self.detector_spacing,
+                self.coverage,
+                self.distance,
+                self.workers,
+                self.device,
+            )
+
+        raise ValueError(f"Unknown projector type: {self.type}")
+
+    # function to perform the backward operation without autograd
+    def backward(self, sinogram, image_shape=None):
+        sinogram_shape = tuple(sinogram.shape)
+
+        if sinogram.device.type != self.device:
+            ValueError(f"Image not on device: {self.device}. ")
+
+        if len(sinogram_shape) == 2:
+            warnings.warn(
+                "Image dimension contains only height and width. "
+                "Expected (batch, channels, height, width). "
+                "Automatically reshaping to (1, 1, height, width).",
+                UserWarning,
+            )
+            sinogram = sinogram.unsqueeze(0).unsqueeze(0)
+
+        elif len(sinogram_shape) == 3:
+            warnings.warn(
+                "Image dimension contains three dimensions. "
+                "Expected (batch, channels, height, width). "
+                "Automatically reshaping to (1, channels, height, width).",
+                UserWarning,
+            )
+            sinogram = sinogram.unsqueeze(0)
+
+        elif len(sinogram_shape) > 4:
+            raise ValueError(
+                f"Sinogram dimension is greater than 4, expected 4 dimensions (batch, channels, height, width)."
+            )
+
+        batches = sinogram_shape[0]
+
+        if image_shape is not None:
+            self.image_shape = image_shape
+            if len(self.image_shape) == 2:
+                warnings.warn(
+                    "Image dimension contains only height and width. "
+                    "Expected (batch, channels, height, width). "
+                    "Automatically reshaping to (1, 1, height, width).",
+                    UserWarning,
+                )
+                self.image_shape = (batches, 1, *self.image_shape)
+
+            elif len(self.image_shape) == 3:
+                warnings.warn(
+                    "Image dimension contains three dimensions. "
+                    "Expected (batch, channels, height, width). "
+                    "Automatically reshaping to (1, channels, height, width).",
+                    UserWarning,
+                )
+                self.image_shape = (batches, *self.image_shape)
+
+            elif len(self.image_shape) > 4:
+                raise ValueError(
+                    f"Image dimension is greater than 4, expected 4 dimensions (batch, channels, height, width)."
+                )
+
+        elif not hasattr(self, "image_shape"):
+            self.image_shape = (batches, 1, 512, 512)
+            raise warnings.warn(
+                "Image shape must be provided for backward operation. Will use the default image shape (1x1x512x512).",
+                UserWarning,
+            )
+        if sinogram.shape[2] != self.projections or sinogram.shape[3] != self.detectors:
+            raise ValueError(
+                f"Sinogram shape {sinogram.shape} does not match projector configuration "
+                f"({self.projections}, {self.detectors})"
+            )
+
+        if self.type == "line":
+            if self.device == "cuda":
+                return backward_siddon(
+                    sinogram,
+                    self.image_shape,
+                    self.projections,
+                    self.detectors,
+                    self.detector_spacing,
+                    self.coverage,
+                    self.distance,
+                    self.mode,
+                )
+            else:
+                return backward_siddon_cpu(
+                    sinogram,
+                    self.image_shape,
+                    self.projections,
+                    self.detectors,
+                    self.detector_spacing,
+                    self.coverage,
+                    self.distance,
+                    self.mode,
+                    self.workers,
+                )
+
+        raise ValueError(f"Unknown projector type: {self.type}")
+
+    def _sinc(self, x):
+        px = math.pi * x
+        zero = x == 0
+        safe = torch.where(zero, torch.ones_like(px), px)
+        return torch.where(zero, torch.ones_like(x), torch.sin(px) / safe)
+
+    def FBP(self, sinogram, image_shape=None, filter_type="shepp-logan"):
+
+        sinogram_shape = tuple(sinogram.shape)
+
+        if sinogram.device.type != self.device:
+            ValueError(f"Image not on device: {self.device}. ")
+
+        if len(sinogram_shape) == 2:
+            warnings.warn(
+                "Image dimension contains only height and width. "
+                "Expected (batch, channels, height, width). "
+                "Automatically reshaping to (1, 1, height, width).",
+                UserWarning,
+            )
+            sinogram = sinogram.unsqueeze(0).unsqueeze(0)
+
+        elif len(sinogram_shape) == 3:
+            warnings.warn(
+                "Image dimension contains three dimensions. "
+                "Expected (batch, channels, height, width). "
+                "Automatically reshaping to (1, channels, height, width).",
+                UserWarning,
+            )
+            sinogram = sinogram.unsqueeze(0)
+
+        elif len(sinogram_shape) > 4:
+            raise ValueError(
+                f"Sinogram dimension is greater than 4, expected 4 dimensions (batch, channels, height, width)."
+            )
+
+        batches = sinogram.shape[0]
+
+        if image_shape is not None:
+            self.image_shape = image_shape
+            if len(self.image_shape) == 2:
+                warnings.warn(
+                    "Image dimension contains only height and width. "
+                    "Expected (batch, channels, height, width). "
+                    "Automatically reshaping to (1, 1, height, width).",
+                    UserWarning,
+                )
+                self.image_shape = (batches, 1, *self.image_shape)
+
+            elif len(self.image_shape) == 3:
+                warnings.warn(
+                    "Image dimension contains three dimensions. "
+                    "Expected (batch, channels, height, width). "
+                    "Automatically reshaping to (1, channels, height, width).",
+                    UserWarning,
+                )
+                self.image_shape = (batches, *self.image_shape)
+
+            elif len(self.image_shape) > 4:
+                raise ValueError(
+                    f"Image dimension is greater than 4, expected 4 dimensions (batch, channels, height, width)."
+                )
+
+        elif not hasattr(self, "image_shape"):
+            self.image_shape = (batches, 1, 512, 512)
+            raise warnings.warn(
+                "Image shape must be provided for backward operation. Will use the default image shape (1x1x512x512).",
+                UserWarning,
+            )
+
+        if sinogram.shape[2] != self.projections or sinogram.shape[3] != self.detectors:
+            raise ValueError(
+                f"Sinogram shape {sinogram.shape} does not match projector configuration "
+                f"({self.projections}, {self.detectors})"
+            )
+
+        if filter_type not in ["ram-lak", "shepp-logan", "cosine", "hamming", "hann"]:
+            raise ValueError(
+                f"Unknown filter type: {filter_type}. Must be one of ['ram-lak', 'shepp-logan', 'cosine', 'hamming', 'hann']"
+            )
+
+        n = self.detectors
+        pad_len = max(64, 2 ** int(torch.ceil(torch.log2(torch.tensor(2 * n)))))
+        scale = torch.tensor(torch.pi / (self.projections)).to(self.device)
+
+        if self.pre_weighting:
+            D = self.distance  # use the source-to-detector distance here
+            t = (
+                torch.arange(n, device=sinogram.device) - (n - 1) / 2
+            ) * self.detector_spacing
+            sinogram = sinogram * (D / torch.sqrt(D**2 + t**2))[None, None, None, :]
+
+        freqs = torch.fft.fftfreq(pad_len, d=float(self.detector_spacing)).to(
+            sinogram.device
+        )
+        filt = torch.abs(freqs)
+        f_max = 1.0 / (2.0 * float(self.detector_spacing))
+        x = filt / f_max
+
+        if filter_type == "shepp-logan":
+            filt = filt * self._sinc(x / 2)
+        elif filter_type == "cosine":
+            filt = filt * torch.cos(torch.pi * x / 2)
+        elif filter_type == "hamming":
+            filt = filt * (0.54 + 0.46 * torch.cos(torch.pi * x))
+        elif filter_type == "hann":
+            filt = filt * 0.5 * (1 + torch.cos(torch.pi * x))
+
+        if self.type == "line":
+            sino_padded = torch.nn.functional.pad(sinogram, (0, pad_len - n))
+            F_Rf = torch.fft.fft(sino_padded, dim=3).to(self.device)
+            F_Rf_filtered = F_Rf * filt[None, :].to(self.device)
+            Rf_filtered = (
+                torch.fft.ifft(F_Rf_filtered, dim=3)
+                .real[:, :, :, :n]
+                .contiguous()
+                .to(self.device)
+            )
+
+            return (
+                _FBPFunction.apply(
+                    Rf_filtered,
+                    self.image_shape,
+                    self.projections,
+                    self.detectors,
+                    self.detector_spacing,
+                    self.coverage,
+                    self.distance,
+                    self.workers,
+                    self.device,
+                )
+                * scale
+            )
+
+        raise ValueError(f"Unknown projector type: {self.type}")
+```
+
+### difftomo/CT/Projector/ParallelBeam.py
+```
+import torch
+from .._extensions import (
+    forward_siddon,
+    backward_siddon,
+    forward_siddon_cpu,
+    backward_siddon_cpu,
+)
+import math
+import warnings
+
+
+class _ParallelBeamFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        image,
+        projections,
+        detectors,
+        detector_spacing,
+        coverage,
+        distance,
+        workers=16,
+        device="cuda",
+    ):
+        ctx.type = "p"
+        ctx.device = device
+        ctx.workers = workers
+        # CUDA A
+        if device == "cuda":
+            sinogram = forward_siddon(
+                image,
+                projections,
+                detectors,
+                detector_spacing,
+                coverage,
+                distance,
+                ctx.type,
+            )
+        else:
+            sinogram = forward_siddon_cpu(
+                image,
+                projections,
+                detectors,
+                detector_spacing,
+                coverage,
+                distance,
+                ctx.type,
+                ctx.workers,
+            )
+
+        # Save what we need to perform A^T later
+        ctx.image_shape = image.shape
+        ctx.projections = projections
+        ctx.detectors = detectors
+        ctx.detector_spacing = detector_spacing
+        ctx.coverage = coverage
+        ctx.distance = distance
+
+        return sinogram.to(ctx.device)
+
+    @staticmethod
+    def backward(ctx, grad_sinogram):
+        # CUDA A^T
+        if ctx.device == "cuda":
+            grad_image = backward_siddon(
+                grad_sinogram,
+                ctx.image_shape,
+                ctx.projections,
+                ctx.detectors,
+                ctx.detector_spacing,
+                ctx.coverage,
+                ctx.distance,
+                ctx.type,
+            )
+        else:
+            grad_image = backward_siddon_cpu(
+                grad_sinogram,
+                ctx.image_shape,
+                ctx.projections,
+                ctx.detectors,
+                ctx.detector_spacing,
+                ctx.coverage,
+                ctx.distance,
+                ctx.type,
+                ctx.workers,
+            )
+
+        # Gradients corresponding to the inputs of forward()
+        return (
+            grad_image.to(ctx.device),  # image
+            None,  # projections
+            None,  # detectors
+            None,  # detector_spacing
+            None,  # coverage
+            None,  # distance
+            None,  # workers
+            None,  # device
+        )
+
+
+class _FBPFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        sinogram,
+        image_shape,
+        projections,
+        detectors,
+        detector_spacing,
+        coverage,
+        distance,
+        workers=16,
+        device="cuda",
+    ):
+        ctx.type = "p"
+        ctx.workers = workers
+        ctx.device = device
+        # CUDA A^T
+        if ctx.device == "cuda":
+            recon_image = backward_siddon(
+                sinogram,
+                image_shape,
+                projections,
+                detectors,
+                detector_spacing,
+                coverage,
+                distance,
+                ctx.type,
+            )
+        elif ctx.device == "cpu":
+            recon_image = backward_siddon_cpu(
+                sinogram,
+                image_shape,
+                projections,
+                detectors,
+                detector_spacing,
+                coverage,
+                distance,
+                ctx.type,
+                ctx.workers,
+            )
+
+        # Save what we need to perform A^T later
+        ctx.image_shape = image_shape
+        ctx.projections = projections
+        ctx.detectors = detectors
+        ctx.detector_spacing = detector_spacing
+        ctx.coverage = coverage
+        ctx.distance = distance
+
+        return recon_image.to(ctx.device)
+
+    @staticmethod
+    def backward(ctx, grad_recon_image):
+        # CUDA A
+        if ctx.device == "cuda":
+            grad_sinogram = forward_siddon(
+                grad_recon_image.contiguous(),
+                ctx.projections,
+                ctx.detectors,
+                ctx.detector_spacing,
+                ctx.coverage,
+                ctx.distance,
+                ctx.type,
+            )
+        elif ctx.device == "cpu":
+            grad_sinogram = forward_siddon_cpu(
+                grad_recon_image.contiguous(),
+                ctx.projections,
+                ctx.detectors,
+                ctx.detector_spacing,
+                ctx.coverage,
+                ctx.distance,
+                ctx.type,
+                ctx.workers,
+            )
+
+        # Gradients corresponding to the inputs of forward()
+        return (
+            grad_sinogram.to(ctx.device),  # sinogram
+            None,  # image_shape
+            None,  # projections
+            None,  # detectors
+            None,  # detector_spacing
+            None,  # coverage
+            None,  # distance
+            None,  # filter_type
+        )
+
+
+class ParallelBeamProjector:
+    def __init__(
+        self,
+        projections=800,
+        detector_bins=800,
+        detector_spacing=1,
+        coverage=2 * torch.pi,
+        distance=300,
+        type="line",
+        device="cpu",
+        workers=16,
+    ):
+        self.projections = projections
+        self.detectors = detector_bins
+        self.detector_spacing = detector_spacing
+        self.coverage = coverage
+        self.distance = distance
+        self.type = type
+        self.device = device
+        self.workers = workers
+        self.mode = "p"
+
+    def forward(self, image):
+        self.image_shape = image.shape
+
+        if image.device.type != self.device:
+            ValueError(f"Image not on device: {self.device}. ")
+
+        if len(self.image_shape) == 2:
+            warnings.warn(
+                "Image dimension contains only height and width. "
+                "Expected (batch, channels, height, width). "
+                "Automatically reshaping to (1, 1, height, width).",
+                UserWarning,
+            )
+            self.image_shape = (1, 1, *self.image_shape)
+            image = image.unsqueeze(0).unsqueeze(0)
+
+        elif len(self.image_shape) == 3:
+            warnings.warn(
+                "Image dimension contains three dimensions. "
+                "Expected (batch, channels, height, width). "
+                "Automatically reshaping to (1, channels, height, width).",
+                UserWarning,
+            )
+            self.image_shape = (1, *self.image_shape)
+            image = image.unsqueeze(0)
+
+        elif len(self.image_shape) > 4:
+            raise ValueError(
+                f"Image dimension is greater than 4, expected 4 dimensions (batch, channels, height, width)."
+            )
+
+        if self.type == "line":
+            return _ParallelBeamFunction.apply(
+                image,
+                self.projections,
+                self.detectors,
+                self.detector_spacing,
+                self.coverage,
+                self.distance,
+                self.workers,
+                self.device,
+            )
+
+        raise ValueError(f"Unknown projector type: {self.type}")
+
+    # function to perform the backward operation without autograd
+    def backward(self, sinogram, image_shape=None):
+        sinogram_shape = tuple(sinogram.shape)
+
+        if sinogram.device.type != self.device:
+            ValueError(f"Image not on device: {self.device}. ")
+
+        if len(sinogram_shape) == 2:
+            warnings.warn(
+                "Image dimension contains only height and width. "
+                "Expected (batch, channels, height, width). "
+                "Automatically reshaping to (1, 1, height, width).",
+                UserWarning,
+            )
+            sinogram = sinogram.unsqueeze(0).unsqueeze(0)
+
+        elif len(sinogram_shape) == 3:
+            warnings.warn(
+                "Image dimension contains three dimensions. "
+                "Expected (batch, channels, height, width). "
+                "Automatically reshaping to (1, channels, height, width).",
+                UserWarning,
+            )
+            sinogram = sinogram.unsqueeze(0)
+
+        elif len(sinogram_shape) > 4:
+            raise ValueError(
+                f"Sinogram dimension is greater than 4, expected 4 dimensions (batch, channels, height, width)."
+            )
+
+        batches = sinogram_shape[0]
+
+        if image_shape is not None:
+            self.image_shape = image_shape
+            if len(self.image_shape) == 2:
+                warnings.warn(
+                    "Image dimension contains only height and width. "
+                    "Expected (batch, channels, height, width). "
+                    "Automatically reshaping to (1, 1, height, width).",
+                    UserWarning,
+                )
+                self.image_shape = (batches, 1, *self.image_shape)
+
+            elif len(self.image_shape) == 3:
+                warnings.warn(
+                    "Image dimension contains three dimensions. "
+                    "Expected (batch, channels, height, width). "
+                    "Automatically reshaping to (1, channels, height, width).",
+                    UserWarning,
+                )
+                self.image_shape = (batches, *self.image_shape)
+
+            elif len(self.image_shape) > 4:
+                raise ValueError(
+                    f"Image dimension is greater than 4, expected 4 dimensions (batch, channels, height, width)."
+                )
+
+        elif not hasattr(self, "image_shape"):
+            self.image_shape = (batches, 1, 512, 512)  # default image shape
+            raise warnings.warn(
+                "Image shape must be provided for backward operation. Will use the default image shape (1x1x512x512).",
+                UserWarning,
+            )
+        if sinogram.shape[2] != self.projections or sinogram.shape[3] != self.detectors:
+            raise ValueError(
+                f"Sinogram shape {sinogram.shape} does not match projector configuration "
+                f"({self.projections}, {self.detectors})"
+            )
+
+        if self.type == "line":
+            if self.device == "cuda":
+                return backward_siddon(
+                    sinogram,
+                    self.image_shape,
+                    self.projections,
+                    self.detectors,
+                    self.detector_spacing,
+                    self.coverage,
+                    self.distance,
+                    self.mode,
+                )
+            else:
+                return backward_siddon_cpu(
+                    sinogram,
+                    self.image_shape,
+                    self.projections,
+                    self.detectors,
+                    self.detector_spacing,
+                    self.coverage,
+                    self.distance,
+                    self.mode,
+                    self.workers,
+                )
+
+        raise ValueError(f"Unknown projector type: {self.type}")
+
+    def _sinc(self, x):
+        px = math.pi * x
+        zero = x == 0
+        safe = torch.where(zero, torch.ones_like(px), px)
+        return torch.where(zero, torch.ones_like(x), torch.sin(px) / safe)
+
+    def FBP(self, sinogram, image_shape=None, filter_type="ram-lak"):
+
+        sinogram_shape = tuple(sinogram.shape)
+
+        if sinogram.device.type != self.device:
+            ValueError(f"Image not on device: {self.device}. ")
+
+        if len(sinogram_shape) == 2:
+            warnings.warn(
+                "Image dimension contains only height and width. "
+                "Expected (batch, channels, height, width). "
+                "Automatically reshaping to (1, 1, height, width).",
+                UserWarning,
+            )
+            sinogram = sinogram.unsqueeze(0).unsqueeze(0)
+
+        elif len(sinogram_shape) == 3:
+            warnings.warn(
+                "Image dimension contains three dimensions. "
+                "Expected (batch, channels, height, width). "
+                "Automatically reshaping to (1, channels, height, width).",
+                UserWarning,
+            )
+            sinogram = sinogram.unsqueeze(0)
+
+        elif len(sinogram_shape) > 4:
+            raise ValueError(
+                f"Sinogram dimension is greater than 4, expected 4 dimensions (batch, channels, height, width)."
+            )
+
+        batches = sinogram.shape[0]
+
+        if image_shape is not None:
+            self.image_shape = image_shape
+            if len(self.image_shape) == 2:
+                warnings.warn(
+                    "Image dimension contains only height and width. "
+                    "Expected (batch, channels, height, width). "
+                    "Automatically reshaping to (1, 1, height, width).",
+                    UserWarning,
+                )
+                self.image_shape = (batches, 1, *self.image_shape)
+
+            elif len(self.image_shape) == 3:
+                warnings.warn(
+                    "Image dimension contains three dimensions. "
+                    "Expected (batch, channels, height, width). "
+                    "Automatically reshaping to (1, channels, height, width).",
+                    UserWarning,
+                )
+                self.image_shape = (batches, *self.image_shape)
+
+            elif len(self.image_shape) > 4:
+                raise ValueError(
+                    f"Image dimension is greater than 4, expected 4 dimensions (batch, channels, height, width)."
+                )
+
+        if sinogram.shape[2] != self.projections or sinogram.shape[3] != self.detectors:
+            raise ValueError(
+                f"Sinogram shape {sinogram.shape} does not match projector configuration "
+                f"({self.projections}, {self.detectors})"
+            )
+
+        if filter_type not in ["ram-lak", "shepp-logan", "cosine", "hamming", "hann"]:
+            raise ValueError(
+                f"Unknown filter type: {filter_type}. Must be one of ['ram-lak', 'shepp-logan', 'cosine', 'hamming', 'hann']"
+            )
+
+        n = self.detectors
+        pad_len = max(64, 2 ** int(torch.ceil(torch.log2(torch.tensor(2 * n)))))
+        scale = torch.tensor(torch.pi / (self.projections)).to(self.device)
+
+        freqs = torch.fft.fftfreq(pad_len, d=float(self.detector_spacing)).to(
+            sinogram.device
+        )
+        filt = torch.abs(freqs)
+        f_max = 1.0 / (2.0 * float(self.detector_spacing))
+        x = filt / f_max
+
+        if filter_type == "shepp-logan":
+            filt = filt * self._sinc(x / 2)
+        elif filter_type == "cosine":
+            filt = filt * torch.cos(torch.pi * x / 2)
+        elif filter_type == "hamming":
+            filt = filt * (0.54 + 0.46 * torch.cos(torch.pi * x))
+        elif filter_type == "hann":
+            filt = filt * 0.5 * (1 + torch.cos(torch.pi * x))
+
+        if self.type == "line":
+            sino_padded = torch.nn.functional.pad(sinogram, (0, pad_len - n))
+            F_Rf = torch.fft.fft(sino_padded, dim=3).to(self.device)
+            F_Rf_filtered = F_Rf * filt[None, :].to(self.device)
+            Rf_filtered = (
+                torch.fft.ifft(F_Rf_filtered, dim=3)
+                .real[:, :, :, :n]
+                .contiguous()
+                .to(self.device)
+            )
+
+            return (
+                _FBPFunction.apply(
+                    Rf_filtered,
+                    self.image_shape,
+                    self.projections,
+                    self.detectors,
+                    self.detector_spacing,
+                    self.coverage,
+                    self.distance,
+                    self.workers,
+                    self.device,
+                )
+                * scale
+            )
+
+        raise ValueError(f"Unknown projector type: {self.type}")
+```
+
+### difftomo/CT/Projector/__init__.py
+```
+from .ParallelBeam import ParallelBeamProjector
+from .FanBeam import FanBeamProjector
+
+
+__all__ = ["ParallelBeamProjector", "FanBeamProjector"]
+```
+
+### difftomo/CT/Projector/build.py
+```
+from setuptools import setup
+from torch.utils.cpp_extension import CUDAExtension, BuildExtension
+
+setup(
+    name="difftomo_cuda",
+    ext_modules=[
+        CUDAExtension(
+            name="difftomo_cuda",
+            sources=["bindings.cpp", "Siddon_algo.cu"],
+        )
+    ],
+    cmdclass={"build_ext": BuildExtension},
+)
+```
+
+### difftomo/CT/header_files/Algorithms.cuh
+```
+#pragma once
+#include <torch/extension.h>
+#include <vector>
+
+torch::Tensor projector_forward(torch::Tensor image, int projections,
+                                int detector_bins, float detector_spacing,
+                                float coverage, float distance, char type);
+
+torch::Tensor projector_backward(torch::Tensor sinogram,
+                                 const std::vector<int64_t> &image_shape,
+                                 int projections, int detector_bins,
+                                 float detector_spacing, float coverage,
+                                 float distance, char type);
+```
+
+### difftomo/CT/header_files/Algorithms.h
+```
+#pragma once // include guard: safe to include multiple times
+
+#include <torch/extension.h>
+#include <vector>
+
+torch::Tensor projector_forward_cpu(torch::Tensor image, int projections,
+                                    int detector_bins, float detector_spacing,
+                                    float coverage, float distance, char type,
+                                    int num_threads);
+
+torch::Tensor projector_backward_cpu(torch::Tensor sinogram,
+                                     const std::vector<int64_t> &image_shape,
+                                     int projections, int detector_bins,
+                                     float detector_spacing, float coverage,
+                                     float distance, char type,
+                                     int num_threads);
+
+torch::Tensor ARTReconstruction(torch::Tensor sinogram,
+                                const std::vector<int64_t> &image_shape,
+                                int projections, int detector_bins,
+                                int iterations, float relaxation_parameter,
+                                float detector_spacing, float coverage,
+                                float distance, char type);
+```

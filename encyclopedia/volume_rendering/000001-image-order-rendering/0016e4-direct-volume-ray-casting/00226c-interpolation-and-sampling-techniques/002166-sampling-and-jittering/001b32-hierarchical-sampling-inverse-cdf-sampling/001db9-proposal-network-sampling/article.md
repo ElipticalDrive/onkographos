@@ -3,7 +3,7 @@
 Also called: Mip-NeRF 360 Sampling, PDF Approaches, Proposal Network
 
 ## Overview
-Proposal Network Sampling is a method for importance sampling in volume rendering that directly estimates the Probability Density Function (PDF) along a ray using a coarse neural network, known as the proposal network [S1]. It solves the problem of inefficient uniform sampling by concentrating samples on high-contribution areas (such as surfaces) while spreading them in empty or occluded regions, providing more accurate transmittance estimation than spatial skipping methods [S1]. It builds on [Hierarchical Sampling (Inverse CDF Sampling)](973-hierarchical-sampling-inverse-cdf-sampling.md) by learning the sampling distribution dynamically rather than relying on static weights.
+Proposal Network Sampling is a method for importance sampling in volume rendering that directly estimates the Probability Density Function (PDF) along a ray using a coarse neural network, known as the proposal network [S1]. It solves the problem of inefficient uniform sampling by concentrating samples on high-contribution areas (such as surfaces) while spreading them in empty or occluded regions, providing more accurate transmittance estimation than spatial skipping methods [S1]. It builds on [Hierarchical Sampling (Inverse CDF Sampling)](973-hierarchical-sampling-inverse-cdf-sampling.md) by learning the sampling distribution dynamically rather than relying on static weights [G].
 
 ## How it works
 **Inputs:** Ray origin $\mathbf{o}$ and direction $\mathbf{d}$, near and far clipping distances $t_n, t_f$, number of coarse samples $N_c$, and a proposal network (coarse MLP) $\mathcal{M}_c$ [S1].
@@ -14,7 +14,7 @@ Proposal Network Sampling is a method for importance sampling in volume renderin
 - **Densities:** An array $\sigma_i = \mathcal{M}_c(\mathbf{o} + t_i \mathbf{d})$ [S1].
 
 **Steps:**
-1. Generate $N_c$ sample distances $t_i$ uniformly along the ray segment $[t_n, t_f]$ [G].
+1. Initialize $N_c$ sample distances $t_i$ uniformly along the ray segment $[t_n, t_f]$ [G].
 2. Evaluate the proposal network at each sample position to obtain densities $\sigma(t_i)$ [S1].
 3. Compute the transmittance estimator $T(t_i) = \exp(-\sum_{j=1}^{i-1} \sigma(t_j) \Delta t_j)$, where $\Delta t_j$ is the distance between consecutive samples [S1].
 4. Compute the discrete PDF estimator $p(t_i) = \sigma(t_i) \exp(-\sigma(t_i) \Delta t_i)$ [S1].
@@ -31,7 +31,7 @@ Proposal Network Sampling is a method for importance sampling in volume renderin
 - Dilation factor $\epsilon_k$ for resampling level $k$: $\epsilon_k = \frac{a}{\prod_{k'=1}^{k-1} n_{k'}} + b$, where $n_{k'}$ is the sample count at level $k'$ [S2].
 - Hyperparameter $a = 0.5$ determines dilation relative to expected bin size [S2].
 - Hyperparameter $b = 0.0025$ determines dilation in absolute terms [S2].
-- Typical values for $N_c$ and $N_f$: Not given in the sources.
+- Typical values for $N_c$ and $N_f$: Not given in the sources. [G]
 
 **Edge Cases and Pitfalls:**
 - **Aliasing:** The piece-wise linearity assumption for estimating transmittance along the ray introduces aliasing effects (z-aliasing) [S1].
@@ -61,17 +61,17 @@ def proposal_network_sampling(ray_origin, ray_direction, t_near, t_far, n_coarse
     Returns:
         fine_samples: (n_fine,) array of sampled distances along the ray.
     """
-    # Step 1: Generate coarse sample distances uniformly along the ray
+    # Step 1: Initialize coarse sample distances uniformly along the ray [G]
     dt = (t_far - t_near) / n_coarse
     t_coarse = [t_near + i * dt for i in range(n_coarse)]
 
-    # Step 2: Evaluate proposal network to get densities
+    # Step 2: Evaluate proposal network to get densities [S1]
     positions = [(ray_origin[0] + t * ray_direction[0],
                   ray_origin[1] + t * ray_direction[1],
                   ray_origin[2] + t * ray_direction[2]) for t in t_coarse]
     sigma = [proposal_mlp(pos) for pos in positions]
 
-    # Step 3: Compute transmittance estimator T(t_i)
+    # Step 3: Compute transmittance estimator T(t_i) [S1]
     # T(t_i) = exp(- sum_{j=1}^{i-1} sigma(t_j) * dt)
     T = [1.0] * n_coarse
     cumulative = 0.0
@@ -79,24 +79,27 @@ def proposal_network_sampling(ray_origin, ray_direction, t_near, t_far, n_coarse
         cumulative += sigma[i-1] * dt
         T[i] = math.exp(-cumulative)
 
-    # Step 4: Compute PDF estimator p(t_i)
+    # Step 4: Compute PDF estimator p(t_i) [S1]
     # p(t_i) = sigma(t_i) * exp(-sigma(t_i) * dt)
     pdf = [sigma[i] * math.exp(-sigma[i] * dt) for i in range(n_coarse)]
 
-    # Step 5: Normalize PDF
+    # Normalize PDF to form a valid probability mass function [G]
     pdf_sum = sum(pdf)
     if pdf_sum > 0:
         pdf = [p / pdf_sum for p in pdf]
     else:
         pdf = [1.0 / n_coarse] * n_coarse
 
-    # Step 6: Compute CDF
+    # Step 5: Update transmittance estimator through gradient descent [S1]
+    # (Handled externally by the training loop using volumetric rendering loss)
+
+    # Step 6: Compute CDF [G]
     cdf = [0.0] * n_coarse
     cdf[0] = pdf[0]
     for i in range(1, n_coarse):
         cdf[i] = cdf[i-1] + pdf[i]
 
-    # Step 7: Inverse CDF sampling for fine samples
+    # Step 7: Inverse CDF sampling for fine samples [G]
     fine_samples = []
     for _ in range(n_fine):
         u = random.uniform(0.0, 1.0)
@@ -137,8 +140,8 @@ A technique to dilate proposal histograms to reduce aliasing artifacts caused by
 - **When to choose:** Use when training early stages or when the proposal network shows rotational aliasing artifacts [S2].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
+- **Time Complexity:** Not given in the sources. [G]
+- **Memory Complexity:** Not given in the sources. [G]
 - **Measured Performance:** Provides more accurate transmittance estimation than spatial skipping, concentrating samples on high-contribution areas [S1]. However, it is less efficient in large empty regions because it does not skip empty space [S1].
 - **Strengths:** Accurate transmittance estimation; adapts to scene content via learned PDF; compatible with hierarchical sampling [S1].
 - **Limitations:** Introduces aliasing due to piece-wise linearity assumption; samples are always spread out, leading to higher sample counts in empty space compared to spatial skipping [S1].
@@ -146,7 +149,7 @@ A technique to dilate proposal histograms to reduce aliasing artifacts caused by
 - **When not to use:** When real-time performance is critical and the scene has large empty volumes, where spatial skipping (e.g., Occupancy Grid) would be more efficient [S1].
 
 ## Background
-Proposal Network Sampling originated with the Mip-NeRF 360 paper [S1, S2]. It was introduced as a way to improve the efficiency of importance sampling in NeRF by using a coarse MLP to estimate the PDF directly. The method is part of a broader class of "PDF Approaches" that view importance sampling through the lens of transmittance estimation [S1]. It addresses the limitations of uniform sampling and simple spatial skipping by learning a distribution that matches the actual contribution of different parts of the ray [S1].
+Proposal Network Sampling originated with the Mip-NeRF 360 paper [S1, S2]. It was introduced as a way to improve the efficiency of importance sampling in NeRF by using a coarse MLP to estimate the PDF directly [S1]. The method is part of a broader class of "PDF Approaches" that view importance sampling through the lens of transmittance estimation [S1]. It addresses the limitations of uniform sampling and simple spatial skipping by learning a distribution that matches the actual contribution of different parts of the ray [S1].
 
 ## Sources
 [S1] NerfAcc: Efficient Sampling Accelerates NeRFs, https://doi.org/10.1109/iccv51070.2023.01699, fetched 2026-10-26

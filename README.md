@@ -9,5 +9,8 @@ Read it at https://elipticaldrive.github.io/onkographos/.
 
 Run locally: `python3 -m http.server` in this folder, then open http://localhost:8000/.
 
+Built by Elijah Furrer and Claude (Anthropic) together: the pipeline that searches, reads, organises, writes, and checks
+the articles was designed and written by both; the articles themselves are written by the local models it runs.
+
 Licenses: code MIT (`LICENSE`); article text CC BY-SA 4.0 (`LICENSE-CONTENT`); source texts keep their owners' licenses and
 takedown rules (`NOTICE`). Articles are AI-generated and may contain errors.

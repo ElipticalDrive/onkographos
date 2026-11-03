@@ -10,12 +10,12 @@ The Sphere Signed Distance Function (SDF) computes the exact Euclidean distance 
 *   **Inputs**:
     *   `p`: The query point in 3D space, represented as a vector $(x, y, z)$ or `vec3` [S1, S3, S13].
     *   `c`: The center of the sphere, represented as a 3D vector $(c_x, c_y, c_z)$ [S3, S4, S5, S6]. Default is the origin $(0, 0, 0)$ [S1, S8, S11].
-    *   `r`: The physical radius of the sphere, a scalar value $r \ge 0$ [S3, S4, S5, S6, S8].
+    *   `r`: The physical radius of the sphere [S6], a scalar value $r \ge 0$ [S3, S4, S5, S6, S8].
 *   **Output**:
     *   `d`: A scalar representing the signed distance. $d = 0$ on the surface, $d < 0$ inside, $d > 0$ outside [S1, S8, S10, S13].
 
 ### Data Structures
-No complex data structures are required. In neural implicit representations, `c` and `r` may be stored as learnable parameters (tensors) [S4, S5, S6].
+No complex data structures are required [G]. In neural implicit representations, `c` and `r` may be stored as learnable parameters (tensors) [S4, S5, S6].
 
 ### Formula
 The signed distance $d(p)$ from a point $p$ to a sphere with center $c$ and radius $r$ is defined as:
@@ -37,8 +37,8 @@ $$
 [S1, S8, S9, S11]
 
 ### Parameters
-*   **Radius (`r`)**: The physical radius of the sphere. In some implementations, this is a hardcoded constant (e.g., 0.5 or 1.0) [S8, S11], while in others (particularly neural implicit fields), it is a learnable parameter initialized from configuration [S4, S5, S6].
-*   **Center (`c`)**: The 3D coordinates of the sphere's center. Like the radius, this can be fixed or learnable [S4, S5, S6]. Default is $(0, 0, 0)$ [S1, S7, S8].
+*   **Radius (`r`)**: The physical radius of the sphere [S6]. In some implementations, this is a hardcoded constant (e.g., 0.5 or 1.0) [S8, S11], while in others (particularly neural implicit fields), it is a learnable parameter initialized from configuration [S4, S5, S6].
+*   **Center (`c`)**: The 3D coordinates of the sphere's center [S7]. Like the radius, this can be fixed or learnable [S4, S5, S6]. Default is $(0, 0, 0)$ [S1, S7, S8].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -55,23 +55,23 @@ def sphere_sdf(p, c, r):
 ```
 
 ### Edge Cases and Pitfalls
-1.  **Definition Order**: In some scripting environments (e.g., Fennel/Lua), the SDF function must be defined before any object constructor or scene graph that references it, due to top-down evaluation order [S13].
+1.  **Definition Order**: In some scripting environments (e.g., Fennel/Lua), the SDF function must be defined before any object constructor or scene graph that references it, due to top-down evaluation order [S14].
 
 ## Subtopics
 
 ### Circle Signed Distance Function
 The 2D analog of the sphere SDF. It computes the signed distance from a 2D point $p$ to a circle of radius $r$ centered at the origin [S9].
 *   **Formula**: $d(p) = \|p\| - r$, where $\|p\| = \sqrt{x^2 + y^2}$ [S9].
-*   **Usage**: Used in 2D ray marching or as a cross-section primitive.
+*   **Usage**: Used in 2D ray marching or as a cross-section primitive [G].
 *   **Code**: `pub fn circle(p: Vec2, r: f32) -> f32 { p.length() - r }` [S9].
 
 ## Operating characteristics
-*   **Time Complexity**: $O(1)$. The computation involves a fixed number of arithmetic operations (subtractions, multiplications, one addition, one square root) [S1, S8, S13].
-*   **Memory Complexity**: $O(1)$.
+*   **Time Complexity**: $O(1)$. The computation involves a fixed number of arithmetic operations (subtractions, multiplications, one addition, one square root) [S1, S8].
+*   **Memory Complexity**: $O(1)$ [G].
 *   **Strengths**:
     *   **Exactness**: Provides the exact Euclidean distance, unlike voxel-based approximations [S3, S12].
 *   **Limitations**:
-    *   **Shape Limitation**: Only represents perfect spheres. Cannot represent complex organic shapes without composition (e.g., blending with other SDFs) [S10].
+    *   **Shape Limitation**: Only represents perfect spheres [G]. Cannot represent complex organic shapes without composition (e.g., blending with other SDFs) [S10].
 *   **When to use**: Ideal for simple geometric primitives and as building blocks for complex scenes via Boolean operations (union, intersection) [S10].
 *   **When not to use**: When the object is not spherical or when high-frequency geometric detail is required without composition [S10].
 
@@ -80,7 +80,6 @@ The Sphere SDF is one of the most basic implicit surface representations, origin
 
 ## Sources
 [S1] Raymarching Distance Fields (2013), http://9bitscience.blogspot.com/2013/07/raymarching-distance-fields_14.html, fetched 2026-10-26 (unofficial)
-[S2] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)
 [S3] Leesan-haruki/FunctionRenderer, https://github.com/Leesan-haruki/FunctionRenderer, fetched 2026-10-26 (unofficial)
 [S4] omkarchittar/Neural_Radiance_Fields, https://github.com/omkarchittar/Neural_Radiance_Fields, fetched 2026-10-26 (unofficial)
 [S5] samirangode/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/samirangode/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
@@ -91,4 +90,5 @@ The Sphere SDF is one of the most basic implicit surface representations, origin
 [S10] Volumetric Rendering: Signed Distance Functions - Alan Zucconi, https://www.alanzucconi.com/2016/07/01/signed-distance-functions/, fetched 2026-10-28 (unofficial)
 [S11] Introduction to Raymarching Distance Functions, https://observablehq.com/@gre/introduction-to-raymarching-distance-functions, fetched 2026-10-29 (unofficial)
 [S12] Sphere tracing: a geometric method for the antialiased ray tracing of implicit surfaces, http://graphics.cs.illinois.edu/sites/default/files/zeno.pdf, fetched 2026-10-29
-[S13] Raymarching with Fennel and LÖVE · Andrey Listopadov, https://andreyor.st/posts/2020-10-15-raymarching-with-fennel-and-love/, fetched 2026-10-30 (unofficial)
+[S13] http://ngildea.blogspot.com.br/2014/11/implementing-dual-contouring.html, http://ngildea.blogspot.com.br/2014/11/implementing-dual-contouring.html, fetched 2026-10-30 (unofficial)
+[S14] Raymarching with Fennel and LÖVE · Andrey Listopadov, https://andreyor.st/posts/2020-10-15-raymarching-with-fennel-and-love/, fetched 2026-10-30 (unofficial)

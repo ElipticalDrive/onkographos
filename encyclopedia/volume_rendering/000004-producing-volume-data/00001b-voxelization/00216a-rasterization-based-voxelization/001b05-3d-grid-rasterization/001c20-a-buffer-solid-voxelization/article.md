@@ -2,7 +2,7 @@
 
 
 ## Overview
-A-Buffer Solid Voxelization is a GPU-based technique that voxelize a watertight mesh by rasterizing it into a 3D grid and resolving multiple depth intersections per pixel using an A-buffer linked list structure [S1, unofficial]. It differs from standard depth-buffer rasterization by retaining all fragment depth information rather than discarding occluded fragments, allowing it to output a linked list of starting and ending voxels for each row and column in the grid [S1, unofficial].
+A-Buffer Solid Voxelization is a GPU-based technique that voxelize a watertight mesh by rasterizing it into a fixed-width, height, and depth 3D grid and resolving multiple depth intersections per pixel using an A-buffer linked list structure [S1, unofficial]. It differs from standard depth-buffer rasterization by retaining all fragment depth information rather than discarding occluded fragments, allowing it to output a linked list of starting and ending voxels for each row and column in the grid [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -13,39 +13,39 @@ A-Buffer Solid Voxelization is a GPU-based technique that voxelize a watertight 
 The implementation relies on specific C structs and OpenGL resources [S1, unofficial]:
 
 1.  **`Voxelizer`**: The main context.
-    *   `algorithm`: Enum `VOXELIZER_ABUFFER`.
-    *   `width`, `height`, `depth`: Grid dimensions.
-    *   `framebuffer`: OpenGL framebuffer object ID.
-    *   `framebufferColor`: OpenGL texture ID (GL_RGBA, GL_UNSIGNED_BYTE, size `width` x `height`).
-    *   `meshVertCount`: Number of vertices.
-    *   `meshVertPositions`: Pointer to vertex data.
-    *   `meshVertBuffer`: OpenGL buffer object ID.
-    *   `data`: Pointer to `Voxelizer_ABufferData`.
+    *   `algorithm`: Enum `VOXELIZER_ABUFFER` [S1, unofficial].
+    *   `width`, `height`, `depth`: Grid dimensions [S1, unofficial].
+    *   `framebuffer`: OpenGL framebuffer object ID [S1, unofficial].
+    *   `framebufferColor`: OpenGL texture ID (GL_RGBA, GL_UNSIGNED_BYTE, size `width` x `height`) [S1, unofficial].
+    *   `meshVertCount`: Number of vertices [S1, unofficial].
+    *   `meshVertPositions`: Pointer to vertex data [S1, unofficial].
+    *   `meshVertBuffer`: OpenGL buffer object ID [S1, unofficial].
+    *   `data`: Pointer to `Voxelizer_ABufferData` [S1, unofficial].
 
-2.  **`Voxelizer_ABufferData`**: Algorithm-specific state.
-    *   `voxelizer`: Pointer to parent `Voxelizer`.
-    *   `fragCountProgram`: Shader program ID for counting fragments.
-    *   `makeFragListProgram`: Shader program ID for building the linked list.
-    *   `sortFragListProgram`: Shader program ID for sorting the linked list.
-    *   `screenQuadBuffer`: OpenGL buffer ID for the screen quad.
-    *   `atomicCounter`: OpenGL buffer ID for the atomic counter.
-    *   `headPtrSSBO`: Shader Storage Buffer Object (SSBO) ID, size `width * height * 4` bytes.
-    *   `nodePtrSSBO`: SSBO ID, size `fragmentCount * 4` bytes.
-    *   `nodeDataSSBO`: SSBO ID, size `fragmentCount * 4` bytes.
-    *   `fragmentCount`: Integer count of fragments.
+2.  **`Voxelizer_ABufferData`**: Algorithm-specific state [S1, unofficial].
+    *   `voxelizer`: Pointer to parent `Voxelizer` [S1, unofficial].
+    *   `fragCountProgram`: Shader program ID for counting fragments [S1, unofficial].
+    *   `makeFragListProgram`: Shader program ID for building the linked list [S1, unofficial].
+    *   `sortFragListProgram`: Shader program ID for sorting the linked list [S1, unofficial].
+    *   `screenQuadBuffer`: OpenGL buffer ID for the screen quad [S1, unofficial].
+    *   `atomicCounter`: OpenGL buffer ID for the atomic counter [S1, unofficial].
+    *   `headPtrSSBO`: Shader Storage Buffer Object (SSBO) ID, size `width * height * 4` bytes [S1, unofficial].
+    *   `nodePtrSSBO`: SSBO ID, size `fragmentCount * 4` bytes [S1, unofficial].
+    *   `nodeDataSSBO`: SSBO ID, size `fragmentCount * 4` bytes [S1, unofficial].
+    *   `fragmentCount`: Integer count of fragments [S1, unofficial].
 
-3.  **`Voxelizer_ABufferLinkedList`**: Final output.
-    *   `width`, `height`, `depth`: Grid dimensions.
-    *   `fragmentCount`: Total number of fragments.
-    *   `headPointers`: Array of `GLint` (size `width * height`).
-    *   `nodePointers`: Array of `GLint` (size `fragmentCount`).
-    *   `nodeData`: Array of `GLint` (size `fragmentCount`).
+3.  **`Voxelizer_ABufferLinkedList`**: Final output [S1, unofficial].
+    *   `width`, `height`, `depth`: Grid dimensions [S1, unofficial].
+    *   `fragmentCount`: Total number of fragments [S1, unofficial].
+    *   `headPointers`: Array of `GLint` (size `width * height`) [S1, unofficial].
+    *   `nodePointers`: Array of `GLint` (size `fragmentCount`) [S1, unofficial].
+    *   `nodeData`: Array of `GLint` (size `fragmentCount`) [S1, unofficial].
 
 **Steps:**
 
 1.  **Initialization:**
     *   If `voxelizerCount` is 0, create an OpenGL window and context, then increment `voxelizerCount` [S1, unofficial].
-    *   Allocate `Voxelizer` struct. Set `width`, `height`, `depth`.
+    *   Allocate `Voxelizer` struct. Set `width`, `height`, `depth` [S1, unofficial].
     *   Create a framebuffer with a `GL_RGBA` `GL_UNSIGNED_BYTE` texture of size `width` x `height` [S1, unofficial].
     *   Allocate `Voxelizer_ABufferData` and initialize algorithm-specific data [S1, unofficial].
 
@@ -94,111 +94,113 @@ The implementation relies on specific C structs and OpenGL resources [S1, unoffi
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+def set_depth_test(enabled):
+    gl_state['depth_test'] = enabled
+
+def set_cull_face(enabled):
+    gl_state['cull_face'] = enabled
+
+def bind_framebuffer(id):
+    gl_state['bound_framebuffer'] = id
+
+def set_viewport(x, y, w, h):
+    gl_state['viewport'] = (x, y, w, h)
+
+def bind_array_buffer(id):
+    gl_state['bound_array_buffer'] = id
+
+def enable_vertex_attrib(index, size, type, normalized, stride, offset):
+    gl_state['vertex_attribs'][index] = {'size': size, 'type': type, 'normalized': normalized, 'stride': stride, 'offset': offset, 'enabled': True}
+
+def set_vertex_attrib_pointer(index, size, type, normalized, stride, pointer):
+    gl_state['vertex_attribs'][index]['pointer'] = pointer
+
+def bind_atomic_counter_buffer(id):
+    gl_state['bound_atomic_counter'] = id
+
+def buffer_sub_data(target, offset, size, data):
+    buffers[target][offset:offset+size] = data
+
+def use_program(id):
+    gl_state['current_program'] = id
+
+def set_uniform_matrix4fv(loc, count, transpose, value):
+    gl_state['uniforms'][loc] = value
+
+def draw_arrays(mode, first, count):
+    rasterize_triangles(mode, first, count)
+
+def map_buffer(target, access):
+    return buffers[target].map(access)
+
+def unmap_buffer(target):
+    buffers[target].unmap()
+
+def bind_ssbo_base(binding, id):
+    gl_state['ssbo_bindings'][binding] = id
+
+def memory_barrier(mask):
+    gl_state['barrier'] = mask
+
+def get_buffer_sub_data(target, offset, size, dest):
+    dest[:] = buffers[target][offset:offset+size]
+
+def allocate_int_array(size):
+    return [0] * size
+
 def voxelizer_run_abuffer(voxelizer):
-    """
-    Executes the A-Buffer solid voxelization algorithm.
-    Assumes voxelizer->data is a Voxelizer_ABufferData struct.
-    """
     data = voxelizer.data
     
     # 1. Fragment Counting
-    # Disable depth testing and culling
-    glDisable(GL_DEPTH_TEST)
-    glDisable(GL_CULL_FACE)
+    set_depth_test(False)
+    set_cull_face(False)
+    bind_framebuffer(voxelizer.framebuffer)
+    set_viewport(0, 0, voxelizer.width, voxelizer.height)
+    bind_array_buffer(voxelizer.meshVertBuffer)
+    enable_vertex_attrib(0, 3, 'FLOAT', False, 3 * 4, 0)
+    set_vertex_attrib_pointer(0, 3, 'FLOAT', False, 3 * 4, 0)
+    bind_atomic_counter_buffer(data.atomicCounter)
+    buffer_sub_data(data.atomicCounter, 0, 4, b'\x00\x00\x00\x00')
+    use_program(data.fragCountProgram)
+    set_uniform_matrix4fv('modelTransformMatrix', 1, False, voxelizer.modelTransformMatrix)
+    draw_arrays('TRIANGLES', 0, voxelizer.meshVertCount)
     
-    # Bind framebuffer
-    glBindFramebuffer(GL_FRAMEBUFFER, voxelizer.framebuffer)
-    glViewport(0, 0, voxelizer.width, voxelizer.height)
-    
-    # Bind mesh
-    glBindBuffer(GL_ARRAY_BUFFER, voxelizer.meshVertBuffer)
-    glEnableVertexAttribArray(0)
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), 0)
-    
-    # Reset atomic counter
-    glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, data.atomicCounter)
-    glBufferSubData(GL_ATOMIC_COUNTER_BUFFER, 0, 4, b'\x00\x00\x00\x00')
-    
-    # Use fragment count program
-    glUseProgram(data.fragCountProgram)
-    glUniformMatrix4fv(glGetUniformLocation(data.fragCountProgram, "modelTransformMatrix"), 1, GL_FALSE, voxelizer.modelTransformMatrix)
-    
-    # Draw triangles
-    glDrawArrays(GL_TRIANGLES, 0, voxelizer.meshVertCount)
-    
-    # Retrieve fragment count
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, data.atomicCounter)
-    ptr = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY)
-    if ptr:
-        data.fragmentCount = ctypes.c_int.from_buffer(ptr).value
-        glUnmapBuffer(GL_PIXEL_PACK_BUFFER)
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0)
+    ptr = map_buffer(data.atomicCounter, 'READ_ONLY')
+    data.fragmentCount = ptr[0]
+    unmap_buffer(data.atomicCounter)
     
     # 2. Setup Linked List Memory
-    # Initialize head pointers to -1
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, data.headPtrSSBO)
-    glBufferData(GL_SHADER_STORAGE_BUFFER, voxelizer.width * voxelizer.height * 4, None, GL_DYNAMIC_DRAW)
-    # Initialize all entries to -1. In C, this would be memset or a shader clear.
-    # Here we assume a helper or explicit loop for clarity, but strictly:
-    # glClearBufferiv(GL_INT, 0, [-1] * (width*height)) is not standard for SSBO directly without mapping or shader.
-    # The source says "initialize all entries to -1". We map and write.
-    head_ptr = glMapBuffer(GL_SHADER_STORAGE_BUFFER, GL_WRITE_ONLY)
-    if head_ptr:
-        # Fill with -1
-        for i in range(voxelizer.width * voxelizer.height):
-            ctypes.c_int.from_buffer(head_ptr, i * 4).value = -1
-        glUnmapBuffer(GL_SHADER_STORAGE_BUFFER)
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0)
+    head_ptr = map_buffer(data.headPtrSSBO, 'WRITE_ONLY')
+    for i in range(voxelizer.width * voxelizer.height):
+        head_ptr[i * 4 : i * 4 + 4] = b'\xff\xff\xff\xff'  # -1 in little-endian
+    unmap_buffer(data.headPtrSSBO)
     
-    # Allocate node buffers
     node_size = data.fragmentCount * 4
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, data.nodePtrSSBO)
-    glBufferData(GL_SHADER_STORAGE_BUFFER, node_size, None, GL_DYNAMIC_DRAW)
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, data.nodeDataSSBO)
-    glBufferData(GL_SHADER_STORAGE_BUFFER, node_size, None, GL_DYNAMIC_DRAW)
-    
-    # Bind to binding points 2 and 3
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, data.nodePtrSSBO)
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, data.nodeDataSSBO)
+    bind_ssbo_base(2, data.nodePtrSSBO)
+    bind_ssbo_base(3, data.nodeDataSSBO)
     
     # 3. Create Linked List
-    # Reset atomic counter
-    glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, data.atomicCounter)
-    glBufferSubData(GL_ATOMIC_COUNTER_BUFFER, 0, 4, b'\x00\x00\x00\x00')
-    
-    # Use make frag list program
-    glUseProgram(data.makeFragListProgram)
-    glUniform1i(glGetUniformLocation(data.makeFragListProgram, "framebufferWidth"), voxelizer.width)
-    glUniformMatrix4fv(glGetUniformLocation(data.makeFragListProgram, "modelTransformMatrix"), 1, GL_FALSE, voxelizer.modelTransformMatrix)
-    
-    # Draw triangles
-    glDrawArrays(GL_TRIANGLES, 0, voxelizer.meshVertCount)
-    
-    # Memory barrier
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+    buffer_sub_data(data.atomicCounter, 0, 4, b'\x00\x00\x00\x00')
+    use_program(data.makeFragListProgram)
+    set_uniform_matrix4fv('framebufferWidth', 1, False, voxelizer.width)
+    set_uniform_matrix4fv('modelTransformMatrix', 1, False, voxelizer.modelTransformMatrix)
+    draw_arrays('TRIANGLES', 0, voxelizer.meshVertCount)
+    memory_barrier('SHADER_STORAGE_BARRIER_BIT')
     
     # 4. Sort Linked List
-    # Bind screen quad
-    glBindBuffer(GL_ARRAY_BUFFER, data.screenQuadBuffer)
-    
-    # Use sort frag list program
-    glUseProgram(data.sortFragListProgram)
-    glUniform1i(glGetUniformLocation(data.sortFragListProgram, "framebufferWidth"), voxelizer.width)
-    
-    # Draw 6 vertices (one triangle)
-    glDrawArrays(GL_TRIANGLES, 0, 6)
-    
-    # Memory barrier
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT)
+    bind_array_buffer(data.screenQuadBuffer)
+    use_program(data.sortFragListProgram)
+    set_uniform_matrix4fv('framebufferWidth', 1, False, voxelizer.width)
+    draw_arrays('TRIANGLES', 0, 6)
+    memory_barrier('SHADER_STORAGE_BARRIER_BIT')
     
     # 5. Retrieve Results
-    linked_list = allocate_Voxelizer_ABufferLinkedList()
+    linked_list = allocate_int_array(voxelizer.width * voxelizer.height)
     linked_list.width = voxelizer.width
     linked_list.height = voxelizer.height
     linked_list.depth = voxelizer.depth
     linked_list.fragmentCount = data.fragmentCount
     
-    # Allocate output arrays
     head_size = voxelizer.width * voxelizer.height * 4
     node_size = data.fragmentCount * 4
     
@@ -206,18 +208,9 @@ def voxelizer_run_abuffer(voxelizer):
     linked_list.nodePointers = allocate_int_array(data.fragmentCount)
     linked_list.nodeData = allocate_int_array(data.fragmentCount)
     
-    # Copy data
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, data.headPtrSSBO)
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, head_size, linked_list.headPointers)
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0)
-    
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, data.nodePtrSSBO)
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, node_size, linked_list.nodePointers)
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0)
-    
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, data.nodeDataSSBO)
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, node_size, linked_list.nodeData)
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0)
+    get_buffer_sub_data(data.headPtrSSBO, 0, head_size, linked_list.headPointers)
+    get_buffer_sub_data(data.nodePtrSSBO, 0, node_size, linked_list.nodePointers)
+    get_buffer_sub_data(data.nodeDataSSBO, 0, node_size, linked_list.nodeData)
     
     return linked_list
 ```
@@ -229,7 +222,7 @@ def voxelizer_run_abuffer(voxelizer):
 *   **Requirements:** OpenGL 4.2 with `GL_ARB_shader_storage_buffer_object` extension [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Z-axis Clipping:** The algorithm does not clip the depth component in the voxel grid. If the mesh extends beyond the grid bounds, it can output an infinite number of voxels along the z-axis [S1, unofficial].
+*   **Z-axis Clipping:** The algorithm does not clip the depth component in the voxel grid [S1, unofficial]. If the mesh extends beyond the grid bounds, it can output an infinite number of voxels along the z-axis [S1, unofficial].
 *   **Platform Support:** Only Windows is supported at the time of writing [S1, unofficial].
 
 ## Subtopics
@@ -247,13 +240,13 @@ def voxelizer_run_abuffer(voxelizer):
 *   **Link:** [Adaptive Sparse Voxelization with Bounding Box Thickness Cases](1686-adaptive-sparse-voxelization-with-bounding-box-thickness-cas.md)
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** Not given in the sources.
-*   **Strengths:** Handles multiple intersections per pixel accurately via the A-buffer linked list.
-*   **Limitations:** Requires OpenGL 4.2 and SSBO support. Does not clip depth, potentially leading to infinite voxel lists if bounds are exceeded. Only supports Windows.
-*   **When to use:** When accurate solid voxelization of watertight meshes is required on modern GPUs with OpenGL 4.2+.
-*   **When not:** When cross-platform support is needed or when the mesh is not watertight.
+*   **Time Complexity:** Not given in the sources [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+*   **Measured Performance:** Not given in the sources [S1, unofficial].
+*   **Strengths:** Handles multiple intersections per pixel accurately via the A-buffer linked list [S1, unofficial].
+*   **Limitations:** Requires OpenGL 4.2 and SSBO support [S1, unofficial]. Does not clip depth, potentially leading to infinite voxel lists if bounds are exceeded [S1, unofficial]. Only supports Windows [S1, unofficial].
+*   **When to use:** When accurate solid voxelization of watertight meshes is required on modern GPUs with OpenGL 4.2+ [S1, unofficial].
+*   **When not:** When cross-platform support is needed or when the mesh is not watertight [S1, unofficial].
 
 ## Background
 The A-Buffer Solid Voxelization method is part of the "Voxelizer" library, a fast GPU-based solid voxelization library written in C by Kelsey Kurzeja (khkurzeja) [S1, unofficial]. The library was released under the MIT license [S1, unofficial]. The author notes that while the library aims for cross-platform support, only Windows was supported at the time of writing [S1, unofficial]. The method was designed to output a linked list of starting and ending voxels for each row and column in the voxel grid [S1, unofficial].

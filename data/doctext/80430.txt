@@ -1,0 +1,4145 @@
+# voxelizer
+
+An OpenGL-based tool, and a library, that converts a 3D model to a 3D volume, represented as a Sparse Voxel Octree.
+
+![Preview](gallery/img2.png)
+
+#### How did it born?
+
+This code was originally part of `mdmc`, another project of mine meant to convert a 3D model to a Minecraft schematic. I've decided to modularize this part
+as it could be useful for other tasks (and hopefully be useful to other people).
+
+## Usage as a tool
+
+You can generate the octree out of the 3d model using the following command:
+```
+./voxelizer <model-file> <volume-height> <output-file>
+```
+
+You can visualize the output octree by running the following command:
+```
+./viewer <octree-file> [model-file]
+```
+
+Where `model-file` is optional and can be used to compare the original model with the result.
+
+## The octree format
+
+The output file consists of an array of little endian `uint32_t`, in binary format, representing the following data:
+- The `version` of the format (should be 0x01)
+- The `volume_size.x`
+- The `volume_size.y`
+- The `volume_size.z`
+- The `octree_resolution` (could be derived from `volume_size`)
+- The `octree_bytesize`: the number of bytes reserved for the octree structure
+- The `octree`: the actual octree structure
+
+The `octree` structure consists of a set of levels one allocated after the other.
+
+The first 8 `uint32_t` correspond to the first octree level. Every value can be either:
+- A **parent node**: can be identified because the MSB is set. The remaining bits are the index of the first child node
+- A **leaf node**: can be identified because the MSB is not set. The remaining bits are the voxel color. Excluding the MSB: 7 bits for alpha, 8 bits for blue, 8 bits for green, 8 bits for red
+- An **empty node**: is 0
+
+## Usage as a library
+
+### Depending on it (CMake users only)
+
+Once you have integrated the code in your project (e.g. either by using git submodules, CMake's FetchContent...), you can add it as a dependency to your project:
+
+```cmake
+add_subdirectory(voxelizer)
+```
+
+Then you have to include its directories and link the library to your target:
+
+```cmake
+target_include_directories(<your-target> PUBLIC "voxelizer/voxelizer")
+target_link_libraries(<your-target> PUBLIC voxelizer)
+```
+
+### The API _(as for the first version)_
+
+As a first step, you have to create a representation of the 3d model that the voxelizer pipeline is compatible with (i.e. you have to initialize the `voxelizer::scene` object). You can either load it from a file or initialize it from already loaded data (this is the hard part, I'll cover it, probably).
+
+To load it from a model file:
+```c++
+#include <voxelizer/ai_scene_loader.hpp>
+#include <voxelizer/scene.hpp>
+
+voxelizer::assimp_scene_loader scene_loader{};
+voxelizer::scene scene{};
+char const* my_model_file = /* ... */;
+
+scene_loader.load(scene, my_model_file);
+```
+
+Then you can run the voxelization process:
+```c++
+#include <voxelizer/voxelize.hpp>
+
+voxelizer::voxelize voxelize{};
+voxelizer::voxel_list voxel_list{};
+uint32_t volume_height = /* ... */;
+
+voxelize(voxel_list, scene, volume_height, scene.m_transformed_min, scene.get_transformed_size());
+```
+
+Finally build the octree:
+```c++
+#include <voxelizer/voxelize.hpp>
+#include <voxelizer/octree_builder.hpp>
+
+voxelizer::octree_builder octree_builder{};
+glm::uvec3 volume_size = voxelizer::voxelize::calc_proportional_grid(scene.get_transformed_size(), volume_height);
+uint32_t max_volume_side = glm::max(glm::max(volume_size.x, volume_size.y), volume_size.z);
+uint32_t octree_resolution = (uint32_t) glm::ceil(glm::log2((float) max_volume_side));
+size_t octree_bytesize = voxelizer::octree::get_octree_bytesize(octree_resolution);
+
+GLuint octree_buffer{};
+glGenBuffers(1, &octree_buffer);
+glBindBuffer(GL_SHADER_STORAGE_BUFFER, octree_buffer);
+glBufferStorage(GL_SHADER_STORAGE_BUFFER, octree_bytesize, nullptr, NULL);
+
+voxelizer::octree octree{};
+octree_builder.build(voxel_list, octree_resolution, octree_buffer, 0, octree); 
+```
+
+The built data structure is encapsulated in the `octree` object.
+
+### viewer/viewer/camera.cpp
+```
+/*
+ tdogl::Camera
+ Copyright 2012 Thomas Dalling - http://tomdalling.com/
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+ http://www.apache.org/licenses/LICENSE-2.0
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ */
+#define _USE_MATH_DEFINES
+#include <cmath>
+#include "camera.hpp"
+#include <glm/gtc/matrix_transform.hpp>
+
+using namespace tdogl;
+
+static const float MaxVerticalAngle = 85.0f; //must be less than 90 to avoid gimbal lock
+
+Camera::Camera() :
+	_position(0.0f, 0.0f, 1.0f),
+	_horizontalAngle(0.0f),
+	_verticalAngle(0.0f),
+	m_fov(50.0f),
+	m_near_plane(0.01f),
+	m_far_plane(1000.0f),
+	_viewportAspectRatio(4.0f/3.0f)
+{
+}
+
+const glm::vec3& Camera::position() const {
+	return _position;
+}
+
+void Camera::setPosition(const glm::vec3& position) {
+	_position = position;
+}
+
+void Camera::offsetPosition(const glm::vec3& offset) {
+	_position += offset;
+}
+
+float Camera::horizontalAngle() const
+{
+	return _horizontalAngle;
+}
+
+float Camera::verticalAngle() const
+{
+	return _verticalAngle;
+}
+
+glm::mat4 Camera::orientation() const {
+	auto orientation = glm::identity<glm::mat4>();
+	orientation = glm::rotate(orientation, glm::radians(_verticalAngle), glm::vec3(1,0,0));
+	orientation = glm::rotate(orientation, glm::radians(_horizontalAngle), glm::vec3(0,1,0));
+	return orientation;
+}
+
+void Camera::offsetOrientation(float upAngle, float rightAngle) {
+	_horizontalAngle += rightAngle;
+	_verticalAngle += upAngle;
+	normalizeAngles();
+}
+
+void Camera::lookAt(glm::vec3 position) {
+	assert(position != _position);
+	glm::vec3 direction = glm::normalize(position - _position);
+	_verticalAngle = glm::degrees(asinf(-direction.y));
+	_horizontalAngle = -glm::degrees(atan2f(-direction.x, -direction.z));
+	normalizeAngles();
+}
+
+float Camera::viewportAspectRatio() const {
+	return _viewportAspectRatio;
+}
+
+void Camera::setViewportAspectRatio(float viewportAspectRatio) {
+	assert(viewportAspectRatio > 0.0);
+	_viewportAspectRatio = viewportAspectRatio;
+}
+
+glm::vec3 Camera::forward() const {
+	glm::vec4 forward = glm::inverse(orientation()) * glm::vec4(0,0,-1,1);
+	return glm::vec3(forward);
+}
+
+glm::vec3 Camera::right() const {
+	glm::vec4 right = glm::inverse(orientation()) * glm::vec4(1,0,0,1);
+	return glm::vec3(right);
+}
+
+glm::vec3 Camera::up() const {
+	glm::vec4 up = glm::inverse(orientation()) * glm::vec4(0,1,0,1);
+	return glm::vec3(up);
+}
+
+glm::mat4 Camera::matrix() const {
+	return projection() * view();
+}
+
+glm::mat4 Camera::projection() const {
+	return glm::perspective(glm::radians(m_fov), _viewportAspectRatio, m_near_plane, m_far_plane);
+}
+
+glm::mat4 Camera::view() const {
+	return orientation() * glm::translate(glm::identity<glm::mat4>(), -_position);
+}
+
+void Camera::normalizeAngles() {
+	_horizontalAngle = fmodf(_horizontalAngle, 360.0f);
+	//fmodf can return negative values, but this will make them all positive
+	if(_horizontalAngle < 0.0f)
+		_horizontalAngle += 360.0f;
+
+	if(_verticalAngle > MaxVerticalAngle)
+		_verticalAngle = MaxVerticalAngle;
+	else if(_verticalAngle < -MaxVerticalAngle)
+		_verticalAngle = -MaxVerticalAngle;
+}
+```
+
+### viewer/viewer/camera.hpp
+```
+/*
+ tdogl::Camera
+ Copyright 2012 Thomas Dalling - http://tomdalling.com/
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+ http://www.apache.org/licenses/LICENSE-2.0
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ */
+
+#pragma once
+
+#include <glm/glm.hpp>
+
+namespace tdogl {
+
+	/**
+	 A first-person shooter type of camera.
+	 Set the properties of the camera, then use the `matrix` method to get the camera matrix for
+	 use in the vertex shader.
+	 Includes the perspective projection matrix.
+	 */
+	class Camera {
+	public:
+		float m_fov;
+		float m_near_plane, m_far_plane;
+
+		Camera();
+
+		/**
+		 The position of the camera.
+		 */
+		const glm::vec3& position() const;
+		void setPosition(const glm::vec3& position);
+		void offsetPosition(const glm::vec3& offset);
+
+		float horizontalAngle() const;
+		float verticalAngle() const;
+
+		/**
+		 The vertical viewing angle of the camera, in degrees.
+		 Determines how "wide" the view of the camera is. Large angles appear to be zoomed out,
+		 as the camera has a wide view. Small values appear to be zoomed in, as the camera has a
+		 very narrow view.
+		 The value must be between 0 and 180.
+		 */
+		float fieldOfView() const;
+		void setFieldOfView(float fieldOfView);
+
+		/**
+		 Sets the near and far plane distances.
+		 Everything between the near plane and the var plane will be visible. Everything closer
+		 than the near plane, or farther than the far plane, will not be visible.
+		 @param nearPlane  Minimum visible distance from camera. Must be > 0
+		 @param farPlane   Maximum visible distance from vamera. Must be > nearPlane
+		 */
+		void setNearAndFarPlanes(float nearPlane, float farPlane);
+
+		/**
+		 A rotation matrix that determines the direction the camera is looking.
+		 Does not include translation (the camera's position).
+		 */
+		glm::mat4 orientation() const;
+
+		/**
+		 Offsets the cameras orientation.
+		 The verticle angle is constrained between 85deg and -85deg to avoid gimbal lock.
+		 @param upAngle     the angle (in degrees) to offset upwards. Negative values are downwards.
+		 @param rightAngle  the angle (in degrees) to offset rightwards. Negative values are leftwards.
+		 */
+		void offsetOrientation(float upAngle, float rightAngle);
+
+		/**
+		 Orients the camera so that is it directly facing `position`
+		 @param position  the position to look at
+		 */
+		void lookAt(glm::vec3 position);
+
+		/**
+		 The width divided by the height of the screen/window/viewport
+		 Incorrect values will make the 3D scene look stretched.
+		 */
+		float viewportAspectRatio() const;
+		void setViewportAspectRatio(float viewportAspectRatio);
+
+		/** A unit vector representing the direction the camera is facing */
+		glm::vec3 forward() const;
+
+		/** A unit vector representing the direction to the right of the camera*/
+		glm::vec3 right() const;
+
+		/** A unit vector representing the direction out of the top of the camera*/
+		glm::vec3 up() const;
+
+		/**
+		 The combined camera transformation matrix, including perspective projection.
+		 This is the complete matrix to use in the vertex shader.
+		 */
+		glm::mat4 matrix() const;
+
+		/**
+		 The perspective projection transformation matrix
+		 */
+		glm::mat4 projection() const;
+
+		/**
+		 The translation and rotation matrix of the camera.
+		 Same as the `matrix` method, except the return value does not include the projection
+		 transformation.
+		 */
+		glm::mat4 view() const;
+
+	private:
+		glm::vec3 _position;
+		float _horizontalAngle;
+		float _verticalAngle;
+		float _viewportAspectRatio;
+
+		void normalizeAngles();
+	};
+}
+```
+
+### viewer/viewer/main.cpp
+```
+#include <iostream>
+#include <optional>
+#include <filesystem>
+#include <fstream>
+
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+#include <glm/gtc/matrix_transform.hpp>
+
+#include <voxelizer/ai_scene_loader.hpp>
+#include <voxelizer/voxelize.hpp>
+#include <voxelizer/octree_builder.hpp>
+
+#include "scene_renderer.hpp"
+#include "octree_tracer.hpp"
+#include "camera.hpp"
+
+bool g_show_scene = false;
+bool g_show_octree = true;
+bool g_show_debug_geometry = false;
+int g_show_scene_projection = -1;
+
+void GLAPIENTRY message_callback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, GLchar const* message, void const* userParam)
+{
+	if (severity <= GL_DEBUG_SEVERITY_MEDIUM && type == GL_DEBUG_TYPE_ERROR)
+	{
+		fprintf(stderr, "GL CALLBACK: type = 0x%x, severity = 0x%x, message = %s\n", type, severity, message);
+		fflush(stderr);
+	}
+}
+
+void on_key(GLFWwindow* window, int key, int scancode, int action, int mods)
+{
+	if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) // ESCAPE
+	{
+		int input_mode = glfwGetInputMode(window, GLFW_CURSOR);
+		if (input_mode == GLFW_CURSOR_DISABLED) glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+		else if (input_mode == GLFW_CURSOR_NORMAL) glfwSetWindowShouldClose(window, true);
+	}
+	else if (key == GLFW_KEY_ENTER && action == GLFW_PRESS) // ENTER
+	{
+		int input_mode = glfwGetInputMode(window, GLFW_CURSOR);
+		if (input_mode == GLFW_CURSOR_NORMAL) glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+	}
+	else if (key == GLFW_KEY_F1 && action == GLFW_PRESS) // F1
+	{
+		g_show_scene_projection = -1;
+		g_show_scene = !g_show_scene;
+	}
+	else if (key == GLFW_KEY_F2 && action == GLFW_PRESS) // F2
+	{
+		g_show_scene_projection = -1;
+		g_show_octree = !g_show_octree;
+	}
+	else if (key == GLFW_KEY_F3 && action == GLFW_PRESS) // F3
+	{
+		g_show_debug_geometry = !g_show_debug_geometry;
+	}
+	else if ((key >= GLFW_KEY_1 && key <= GLFW_KEY_3) && action == GLFW_PRESS) // 1, 2, 3
+	{
+		g_show_scene_projection = key - GLFW_KEY_1;
+	}
+}
+
+void process_freecam_movement_and_rotation(
+	GLFWwindow* window,
+	float dt,
+	tdogl::Camera& camera,
+	glm::dvec2 const& cursor_position_delta
+)
+{
+	// Movement
+	const float k_movement_speed = 0.1f;
+
+	float speed = k_movement_speed * (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) ? 10 : 1);
+	float intensity = speed * dt;
+
+	if (glfwGetKey(window, GLFW_KEY_A)) camera.offsetPosition(-camera.right() * intensity);
+	if (glfwGetKey(window, GLFW_KEY_D)) camera.offsetPosition(camera.right() * intensity);
+	if (glfwGetKey(window, GLFW_KEY_W)) camera.offsetPosition(camera.forward() * intensity);
+	if (glfwGetKey(window, GLFW_KEY_S)) camera.offsetPosition(-camera.forward() * intensity);
+	if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT)) camera.offsetPosition(-glm::vec3(0, 1, 0) * intensity);
+	if (glfwGetKey(window, GLFW_KEY_SPACE)) camera.offsetPosition(glm::vec3(0, 1, 0) * intensity);
+
+	// Rotation
+	const float k_rotation_speed = 2.0f;
+
+	float dp = (float) cursor_position_delta.y * k_rotation_speed * dt;
+	float dy = (float) cursor_position_delta.x * k_rotation_speed * dt;
+
+	camera.offsetOrientation(dp, dy);
+}
+
+std::pair<GLuint, size_t> load_octree_from_file(
+	char const* filename,
+	glm::uvec3& volume_size,
+	uint32_t& octree_resolution
+)
+{
+	printf("Loading octree at \"%s\"\n", filename);
+
+	uint32_t version{};
+	uint32_t octree_bytesize{};
+
+	std::ifstream input_file_stream(filename, std::ios::binary);
+
+	input_file_stream.read((char*) &version, sizeof(uint32_t));
+	input_file_stream.read((char*) &volume_size, sizeof(glm::uvec3));
+	input_file_stream.read((char*) &octree_resolution, sizeof(uint32_t));
+	input_file_stream.read((char*) &octree_bytesize, sizeof(uint32_t));
+
+	std::vector<char> octree_buffer_data(octree_bytesize);
+	input_file_stream.read(octree_buffer_data.data(), octree_bytesize);
+
+	printf("Octree loaded - Version: %d, Volume size: (%d, %d, %d), Resolution: %d, Bytesize: %d (~%.1f MB)\n",
+		version,
+		volume_size.x, volume_size.y, volume_size.z,
+		octree_resolution,
+		octree_bytesize,
+		octree_bytesize / (float) (1024 * 1024)
+	);
+
+	printf("Uploading octree on a GPU buffer\n");
+
+	GLuint octree_buffer{};
+	glGenBuffers(1, &octree_buffer);
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, octree_buffer);
+	glBufferStorage(GL_SHADER_STORAGE_BUFFER, octree_bytesize, octree_buffer_data.data(), NULL);
+
+	return {
+		octree_buffer,
+		octree_bytesize,
+	};
+}
+
+std::pair<GLuint, size_t> build_octree_from_scene(voxelizer::scene const& scene, uint32_t volume_height)
+{
+	voxelizer::voxelize voxelize{};
+	voxelizer::voxel_list voxel_list{};
+
+	glm::vec3 area_size = scene.get_transformed_size();
+	glm::uvec3 volume_size = voxelizer::voxelize::calc_proportional_grid(area_size, volume_height);
+	uint32_t max_volume_side = glm::max(glm::max(volume_size.x, volume_size.y), volume_size.z);
+
+	printf("Voxelizing scene - area size: (%.2f, %.2f, %.2f) volume: (%d, %d, %d), max side: %d\n",
+		area_size.x,
+		area_size.y,
+		area_size.z,
+		volume_size.x,
+		volume_size.y,
+		volume_size.z,
+		max_volume_side
+	);
+
+	voxelize(voxel_list, scene, volume_height, scene.m_transformed_min, scene.get_transformed_size());
+
+	voxelizer::octree_builder octree_builder{};
+	GLuint octree_buffer{};
+	uint32_t octree_resolution = (uint32_t)glm::ceil(glm::log2((float) max_volume_side));
+	size_t octree_bytesize = voxelizer::octree::get_octree_bytesize(octree_resolution);
+
+	glGenBuffers(1, &octree_buffer);
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, octree_buffer);
+	glBufferStorage(GL_SHADER_STORAGE_BUFFER, octree_bytesize, NULL, NULL);
+
+	voxelizer::octree octree{};
+	octree_builder.build(voxel_list, octree_resolution, octree_buffer, 0, octree);
+
+	return {
+		octree_buffer,
+		octree_bytesize,
+	};
+}
+
+int main(int argc, char** argv)
+{
+	argc--;
+	argv++;
+
+	if (argc < 1)
+	{
+		printf("Invalid command syntax: ./viewer <svo-file> [model-file]\n");
+		return 1;
+	}
+
+	// SVO file
+	std::filesystem::path svo_file = argv[0];
+	if (!std::filesystem::exists(svo_file))
+	{
+		printf("Invalid file: %s\n", svo_file.u8string().c_str());
+		return 2;
+	}
+
+	// Model file
+	std::optional<std::filesystem::path> model_file{};
+	if (argc >= 2)
+	{
+		model_file = argv[1];
+		if (!std::filesystem::exists(*model_file))
+		{
+			printf("Invalid file: %s\n", model_file->u8string().c_str());
+			return 3;
+		}
+	}
+
+	if (glfwInit() != GLFW_TRUE)
+	{
+		std::cerr << "GLFW failed to initialize" << std::endl;
+		return 3;
+	}
+
+	GLFWwindow* window = glfwCreateWindow(720, 720, "viewer", nullptr, nullptr);
+	glfwMakeContextCurrent(window);
+
+	if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
+	{
+		std::cerr << "GLAD failed to initialize." << std::endl;
+		return 4;
+	}
+
+	glfwShowWindow(window);
+
+	glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+
+	glfwSetKeyCallback(window, on_key);
+
+	printf("Initializing OpenGL context\n");
+
+	glEnable(GL_DEBUG_OUTPUT);
+	glDebugMessageCallback(message_callback, nullptr);
+
+	tdogl::Camera camera{};
+	voxelizer::octree_tracer octree_tracer{};
+	voxelizer::scene_renderer scene_renderer{};
+
+	// Load scene
+	voxelizer::scene scene{};
+	voxelizer::assimp_scene_loader scene_loader{};
+
+	printf("Loading scene: \"%s\"\n", model_file->u8string().c_str());
+
+	scene_loader.load(scene, *model_file);
+
+	printf("Scene loaded\n");
+
+	// Load octree
+	glm::uvec3 volume_size{};
+	uint32_t octree_resolution{};
+	auto [octree_buffer, octree_buffer_size] = load_octree_from_file(argv[0], volume_size, octree_resolution);
+
+	uint32_t volume_max_side = glm::max(volume_size.x, glm::max(volume_size.y, volume_size.z));
+
+	// Calc octree position
+	glm::vec3 volume_position = glm::vec3(0);
+
+	glm::vec3 octree_min = volume_position;
+	glm::vec3 octree_max = glm::vec3(glm::exp2((float) octree_resolution) / float(volume_max_side)); // Constraint max side of the volume between (0, 1)
+
+	glm::vec3 scene_size = scene.get_transformed_size();
+	uint32_t scene_max_side = glm::max(scene_size.x, glm::max(scene_size.y, scene_size.z));
+
+	glm::mat4 scene_transform{}; // Constraint the max side of the scene between (0, 1)
+	scene_transform = glm::identity<glm::mat4>();
+	scene_transform = glm::scale(scene_transform, glm::vec3(1) / glm::vec3(scene_max_side));
+	scene_transform = glm::translate(scene_transform, -scene.m_transformed_min + volume_position);
+
+	voxelizer::voxelize voxelize{};
+	glm::mat4 scene_normalization_matrix{};
+	glm::mat4 scene_projection_matrices[3]{};
+	scene_normalization_matrix =
+		voxelize.create_scene_normalization_matrix(scene.m_transformed_min, scene.m_transformed_max - scene.m_transformed_min);
+	voxelize.create_projection_matrices(scene_projection_matrices);
+
+	// Debug renderer
+	voxelizer::debug_renderer debug_renderer{};
+
+	// Main loop
+	printf("Starting loop\n");
+
+	std::optional<double> last_time{};
+	std::optional<glm::dvec2> last_cursor_position{};
+
+	while (!glfwWindowShouldClose(window))
+	{
+		// Update
+		glfwPollEvents();
+
+		float dt = 0.0f;
+		if (last_time.has_value())
+		{
+			dt = static_cast<float>(glfwGetTime() - *last_time);
+ 		}
+
+		last_time = glfwGetTime();
+
+		glm::dvec2 cursor_position{};
+		glfwGetCursorPos(window, &cursor_position.x, &cursor_position.y);
+
+		if (
+			dt > 0 &&
+			last_cursor_position &&
+			glfwGetInputMode(window, GLFW_CURSOR) == GLFW_CURSOR_DISABLED
+		)
+		{
+			process_freecam_movement_and_rotation(
+				window,
+				dt,
+				camera,
+				cursor_position - *last_cursor_position
+			);
+		}
+
+		last_cursor_position = cursor_position;
+
+		/*
+		printf("Camera position=(%.1f, %.1f, %.1f) rotation=(%.1f, %.1f)\n",
+			camera.position().x, camera.position().y, camera.position().z,
+			camera.horizontalAngle(), camera.verticalAngle()
+		);*/
+
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		glClearColor(0.7f, 0.7f, 0.7f, 0);
+
+		int width, height;
+		glfwGetFramebufferSize(window, &width, &height);
+		glViewport(0, 0, width, height);
+
+		camera.setViewportAspectRatio(width / (float) height);
+
+		// Render debug geometry
+		if (g_show_debug_geometry)
+		{
+			debug_renderer.cube(glm::vec3(0), glm::vec3(1), glm::vec3(1, 0, 0));
+			debug_renderer.flush(camera.view(), camera.projection());
+		}
+
+		// Render octree
+		if (g_show_octree)
+		{
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+			octree_tracer.render(
+				glm::uvec2(width, height),
+				octree_min,
+				octree_max,
+				camera.projection(),
+				camera.view(),
+				camera.position(),
+				octree_buffer,
+				0,
+				octree_buffer_size,
+				0
+			);
+		}
+
+		// Render scene
+		if (g_show_scene)
+		{
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+			scene_renderer.render(
+				camera.projection(),
+				camera.view(),
+				scene_transform,
+				scene
+			);
+		}
+
+		// Render scene projections
+		if (g_show_scene_projection >= 0)
+		{
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+			scene_renderer.render(
+				scene_projection_matrices[g_show_scene_projection],
+				glm::mat4(1),
+				scene_normalization_matrix,
+				scene
+			);
+		}
+
+		// Swap
+		glfwSwapBuffers(window);
+	}
+	
+	printf("Destroying\n");
+
+	glDeleteBuffers(1, &octree_buffer);
+
+	glfwDestroyWindow(window);
+	glfwTerminate();
+}
+```
+
+### viewer/viewer/octree_tracer.cpp
+```
+#include "octree_tracer.hpp"
+
+#include <iostream>
+
+#include <glm/gtc/type_ptr.hpp>
+
+#include <shinji.hpp>
+
+// ------------------------------------------------------------------------------------------------ octree_tracer
+
+voxelizer::octree_tracer::octree_tracer()
+{
+	// Program
+	shader screen_quad(GL_VERTEX_SHADER);
+	screen_quad.source_from_string(voxelizer::viewer::shinji::load_resource_from_bundle("resources/shaders/screen_quad.vert").m_data);
+	screen_quad.compile();
+
+	m_program.attach_shader(screen_quad);
+
+	shader svo_tracer(GL_FRAGMENT_SHADER);
+	svo_tracer.source_from_string(voxelizer::viewer::shinji::load_resource_from_bundle("resources/shaders/svo_tracer.frag").m_data);
+	svo_tracer.compile();
+
+	m_program.attach_shader(svo_tracer);
+
+	m_program.link();
+}
+
+void voxelizer::octree_tracer::render(
+	glm::uvec2 const& screen,
+
+	glm::vec3 const& position,
+	glm::vec3 const& size,
+
+	glm::mat4 const& camera_projection,
+	glm::mat4 const& camera_view,
+	glm::vec3 const& camera_position,
+
+	GLuint octree_buffer,
+	GLintptr octree_buffer_offset,
+	GLsizeiptr octree_buffer_size,
+
+	uint32_t starting_node_address
+)
+{
+	m_program.use();
+
+	glUniform3fv(m_program.get_uniform_location("u_octree_from"), 1, glm::value_ptr(position));
+	glUniform3fv(m_program.get_uniform_location("u_octree_size"), 1, glm::value_ptr(size));
+
+	glUniform2uiv(m_program.get_uniform_location("u_screen"), 1, glm::value_ptr(screen));
+
+	// camera
+	glUniformMatrix4fv(m_program.get_uniform_location("u_projection"), 1, GL_FALSE, glm::value_ptr(camera_projection));
+	glUniformMatrix4fv(m_program.get_uniform_location("u_view"), 1, GL_FALSE, glm::value_ptr(camera_view));
+	glUniform3fv(m_program.get_uniform_location("u_position"), 1, glm::value_ptr(camera_position));
+
+	glUniform1ui(m_program.get_uniform_location("u_start_address"), starting_node_address);
+
+	glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, octree_buffer, octree_buffer_offset, octree_buffer_size);
+
+	m_screen_quad.render();
+
+	program::unuse();
+}
+```
+
+### viewer/viewer/octree_tracer.hpp
+```
+#pragma once
+
+#include <glm/glm.hpp>
+
+#include <voxelizer/octree.hpp>
+#include <voxelizer/gl.hpp>
+
+namespace voxelizer
+{
+	class octree_tracer
+	{
+	private:
+		program m_program;
+		screen_quad m_screen_quad;
+
+	public:
+		octree_tracer();
+
+		void render(
+			glm::uvec2 const& screen,
+
+			glm::vec3 const& position,
+			glm::vec3 const& size,
+
+			glm::mat4 const& camera_projection,
+			glm::mat4 const& camera_view,
+			glm::vec3 const& camera_position,
+
+			GLuint octree_buffer,
+			GLintptr octree_buffer_offset,
+			GLsizeiptr octree_buffer_size,
+
+			uint32_t starting_node_address = 0
+		);
+	};
+}
+```
+
+### viewer/viewer/scene_renderer.cpp
+```
+#include "scene_renderer.hpp"
+
+#include <sstream>
+
+#include <glm/gtc/type_ptr.hpp>
+
+#include <shinji.hpp>
+
+voxelizer::scene_renderer::scene_renderer()
+{
+	shader vert_shader(GL_VERTEX_SHADER);
+	vert_shader.source_from_string(viewer::shinji::load_resource_from_bundle("resources/shaders/scene.vert").m_data);
+	vert_shader.compile();
+
+	m_program.attach_shader(vert_shader);
+
+	shader frag_shader(GL_FRAGMENT_SHADER);
+	frag_shader.source_from_string(viewer::shinji::load_resource_from_bundle("resources/shaders/scene.frag").m_data);
+	frag_shader.compile();
+
+	m_program.attach_shader(frag_shader);
+
+	m_program.link();
+}
+
+void voxelizer::scene_renderer::scene_renderer::render(
+	glm::mat4 const& camera_projection,
+	glm::mat4 const& camera_view,
+	glm::mat4 const& transform,
+	voxelizer::scene const& scene
+)
+{
+	glEnable(GL_DEPTH_TEST);
+
+	m_program.use();
+
+	glUniformMatrix4fv(m_program.get_uniform_location("u_camera_projection"), 1, GL_FALSE, glm::value_ptr(camera_projection));
+	glUniformMatrix4fv(m_program.get_uniform_location("u_camera_view"), 1, GL_FALSE, glm::value_ptr(camera_view));
+
+	glUniformMatrix4fv(m_program.get_uniform_location("u_scene_transform"), 1, GL_FALSE, glm::value_ptr(transform));
+
+	for (auto& mesh : scene.m_meshes)
+	{
+		glUniformMatrix4fv(m_program.get_uniform_location("u_transform"), 1, GL_FALSE, glm::value_ptr(mesh.m_transform));
+
+		glUniform4fv(m_program.get_uniform_location("u_color"), 1, glm::value_ptr(mesh.m_material->get_color(m_view_type)));
+		glBindTexture(GL_TEXTURE_2D, mesh.m_material->get_texture(m_view_type));
+
+		glBindVertexArray(mesh.m_vao);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.m_ebo);
+
+		glDrawElements(GL_TRIANGLES, mesh.m_element_count, GL_UNSIGNED_INT, NULL);
+
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+		glBindVertexArray(0);
+	}
+}
+```
+
+### viewer/viewer/scene_renderer.hpp
+```
+#pragma once
+
+#include <voxelizer/scene.hpp>
+#include <voxelizer/gl.hpp>
+
+namespace voxelizer
+{
+	class scene_renderer
+	{
+	private:
+		program m_program;
+
+	public:
+		material::type m_view_type = material::type::DIFFUSE; // TODO
+
+		scene_renderer();
+
+		void render(
+			glm::mat4 const& camera_projection,
+			glm::mat4 const& camera_view,
+			glm::mat4 const& transform,
+			voxelizer::scene const& scene
+		);
+	};
+}
+```
+
+### voxelizer/voxelizer/ai_scene_loader.cpp
+```
+#include "ai_scene_loader.hpp"
+
+#include <glm/gtc/type_ptr.hpp>
+
+#include <assimp/scene.h>
+#include <assimp/Importer.hpp>
+#include <assimp/postprocess.h>
+
+#include <glad/glad.h>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
+// ------------------------------------------------------------------------------------------------
+// voxelizer::mesh
+// ------------------------------------------------------------------------------------------------
+
+void load_position_vbo(voxelizer::mesh& mesh, aiMesh const& ai_mesh)
+{
+	glBindVertexArray(mesh.m_vao);
+	glBindBuffer(GL_ARRAY_BUFFER, mesh.m_vbos[voxelizer::mesh::attribute::POSITION]);
+
+	glBufferData(GL_ARRAY_BUFFER, size_t(ai_mesh.mNumVertices) * 3 * sizeof(GLfloat), ai_mesh.mVertices, GL_STATIC_DRAW);
+
+	glEnableVertexAttribArray(voxelizer::mesh::attribute::POSITION);
+	glVertexAttribPointer(voxelizer::mesh::attribute::POSITION, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), 0);
+
+	glBindBuffer(GL_ARRAY_BUFFER, 0); // Unbind
+	glBindVertexArray(0);
+}
+
+void load_normal_vbo(voxelizer::mesh& mesh, aiMesh const& ai_mesh)
+{
+	glBindVertexArray(mesh.m_vao);
+	glBindBuffer(GL_ARRAY_BUFFER, mesh.m_vbos[voxelizer::mesh::attribute::NORMAL]);
+
+	glEnableVertexAttribArray(voxelizer::mesh::attribute::NORMAL);
+
+	if (ai_mesh.HasNormals())
+	{
+		glBufferData(GL_ARRAY_BUFFER, size_t(ai_mesh.mNumVertices) * 3 * sizeof(GLfloat), ai_mesh.mNormals, GL_STATIC_DRAW);
+
+		glVertexAttribPointer(voxelizer::mesh::attribute::NORMAL, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), 0);
+	}
+	else
+	{
+		GLfloat normals[] = { 0.0f, 0.0f, 0.0f };
+		glBufferData(GL_ARRAY_BUFFER, 3 * sizeof(GLfloat), normals, GL_STATIC_DRAW);
+
+		glVertexAttribPointer(voxelizer::mesh::attribute::NORMAL, 3, GL_FLOAT, GL_FALSE, 0, 0);
+		glVertexAttribDivisor(voxelizer::mesh::attribute::NORMAL, ai_mesh.mNumVertices);
+	}
+
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glBindVertexArray(0);
+}
+
+void load_uv_vbo(voxelizer::mesh& mesh, aiMesh const& ai_mesh)
+{
+	glBindVertexArray(mesh.m_vao);
+	glBindBuffer(GL_ARRAY_BUFFER, mesh.m_vbos[voxelizer::mesh::attribute::UV]);
+
+	glEnableVertexAttribArray(voxelizer::mesh::attribute::UV);
+
+	if (ai_mesh.HasTextureCoords(0))
+	{
+		glBufferData(GL_ARRAY_BUFFER, size_t(ai_mesh.mNumVertices) * 3 * sizeof(GLfloat), ai_mesh.mTextureCoords[0], GL_STATIC_DRAW);
+
+		glVertexAttribPointer(voxelizer::mesh::attribute::UV, 2, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), 0);
+	}
+	else
+	{
+		GLfloat uv[] = { 0.0f, 0.0f };
+		glBufferData(GL_ARRAY_BUFFER, 2 * sizeof(GLfloat), uv, GL_STATIC_DRAW);
+
+		glVertexAttribPointer(voxelizer::mesh::attribute::UV, 2, GL_FLOAT, GL_FALSE, 0, 0);
+		glVertexAttribDivisor(voxelizer::mesh::attribute::UV, ai_mesh.mNumVertices);
+	}
+
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glBindVertexArray(0);
+}
+
+void load_color_vbo(voxelizer::mesh& mesh, aiMesh const& ai_mesh)
+{
+	glBindVertexArray(mesh.m_vao);
+	glBindBuffer(GL_ARRAY_BUFFER, mesh.m_vbos[voxelizer::mesh::attribute::COLOR]);
+
+	glEnableVertexAttribArray(voxelizer::mesh::attribute::COLOR);
+
+	if (ai_mesh.HasVertexColors(voxelizer::mesh::attribute::COLOR))
+	{
+		glBufferData(GL_ARRAY_BUFFER, size_t(ai_mesh.mNumVertices) * 4 * sizeof(float), ai_mesh.mColors[0], GL_STATIC_DRAW);
+
+		glVertexAttribPointer(voxelizer::mesh::attribute::COLOR, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), 0);
+	}
+	else
+	{
+		GLfloat color[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+		glBufferData(GL_ARRAY_BUFFER, 4 * sizeof(float), color, GL_STATIC_DRAW);
+
+		glVertexAttribPointer(voxelizer::mesh::attribute::COLOR, 4, GL_FLOAT, GL_FALSE, 0, 0);
+		glVertexAttribDivisor(voxelizer::mesh::attribute::COLOR, ai_mesh.mNumVertices);
+	}
+
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glBindVertexArray(0);
+}
+
+void load_ebo(voxelizer::mesh& mesh, aiMesh const& ai_mesh)
+{
+	mesh.m_element_count = size_t(ai_mesh.mNumFaces) * 3;
+
+	GLuint* indices = new GLuint[mesh.m_element_count];
+
+	for (size_t i = 0; i < ai_mesh.mNumFaces; i++)
+	{
+		aiFace& face = ai_mesh.mFaces[i];
+
+		if (face.mNumIndices != 3)
+			throw; // std::cerr << "face.mNumIndices != 3" << std::endl;
+
+		indices[i * 3] = face.mIndices[0];
+		indices[i * 3 + 1] = face.mIndices[1];
+		indices[i * 3 + 2] = face.mIndices[2];
+	}
+
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.m_ebo);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, mesh.m_element_count * sizeof(GLuint), indices, GL_STATIC_DRAW);
+
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, NULL);
+}
+
+void calc_transformed_min_max(voxelizer::mesh& mesh, aiMesh const& ai_mesh)
+{
+	mesh.m_transformed_min = glm::vec3(std::numeric_limits<float>::infinity());
+	mesh.m_transformed_max = glm::vec3(-std::numeric_limits<float>::infinity());
+
+	for (size_t i = 0; i < ai_mesh.mNumVertices; i++)
+	{
+		aiVector3D position = ai_mesh.mVertices[i];
+		glm::vec3 transformed_position =  glm::vec3(mesh.m_transform * glm::vec4(position.x, position.y, position.z, 1.0));
+
+		mesh.m_transformed_min = glm::min(mesh.m_transformed_min, transformed_position);
+		mesh.m_transformed_max = glm::max(mesh.m_transformed_max, transformed_position);
+	}
+}
+
+voxelizer::mesh load_mesh(aiMesh const& ai_mesh, aiMatrix4x4 const& ai_transform)
+{
+	voxelizer::mesh mesh{};
+
+	mesh.m_triangle_count = ai_mesh.mNumFaces;
+	mesh.m_transform = glm::transpose(glm::make_mat4(ai_transform[0]));
+
+	load_position_vbo(mesh, ai_mesh);
+	load_normal_vbo(mesh, ai_mesh);
+	load_color_vbo(mesh, ai_mesh);
+	load_uv_vbo(mesh, ai_mesh);
+
+	load_ebo(mesh, ai_mesh);
+
+	calc_transformed_min_max(mesh, ai_mesh);
+
+	return mesh;
+}
+
+// ================================================================================================================================
+// voxelizer::material
+// ================================================================================================================================
+
+void load_material_texture(
+	aiScene const& ai_scene,
+	GLuint const& texture,
+	aiTextureType texture_type,
+	std::filesystem::path const& folder,
+	aiMaterial const* ai_material
+)
+{
+	glBindTexture(GL_TEXTURE_2D, texture);
+
+	aiString path{};
+	if (aiGetMaterialTexture(ai_material, texture_type, 0, &path) == aiReturn_SUCCESS && path.length > 0)
+	{
+		int width, height, comp;
+		stbi_uc* image_data{};
+
+		if (path.C_Str()[0] == '*') // Embedded
+		{
+			int32_t texture_id = std::atoi(path.C_Str() + 1);
+			aiTexture* ai_texture = ai_scene.mTextures[texture_id];
+
+			printf("[assimp_scene_loader] Embedded texture %d (width=%d, height=%d)\n", texture_id, ai_texture->mWidth, ai_texture->mHeight);
+
+			size_t texture_size = ai_texture->mWidth * (ai_texture->mHeight > 0 ? ai_texture->mHeight : 1);
+			image_data = stbi_load_from_memory(reinterpret_cast<unsigned char*>(ai_texture->pcData), texture_size, &width, &height, &comp, 0);
+		}
+		else // External file
+		{
+			std::filesystem::path texture_path = folder / path.C_Str();
+
+			printf("[assimp_scene_loader] Loading external texture at \"%s\"\n", texture_path.u8string().c_str());
+
+			image_data = stbi_load((folder / path.C_Str()).u8string().c_str(), &width, &height, &comp, STBI_rgb);
+		}
+
+		if (image_data == nullptr)
+		{
+			fprintf(stderr, "[assimp_scene_loader] Failed to load texture \"%s\"\n", path.C_Str());
+			fflush(stderr);
+
+			throw std::runtime_error("Failed to load texture");
+		}
+
+		if (comp == 3)
+		{
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, image_data);
+		}
+		else if (comp == 4)
+		{
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data);
+		}
+
+		stbi_image_free(image_data);
+	}
+	else
+	{
+		GLfloat empty_image[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_FLOAT, empty_image);
+	}
+
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+	glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void load_material_color(glm::vec4& color, const char* key, unsigned int type, unsigned int index, const aiMaterial* ai_material)
+{
+	if (aiGetMaterialColor(ai_material, key, type, index, (aiColor4D*) &color[0]) != aiReturn_SUCCESS)
+		color = glm::vec4(0);
+}
+
+std::shared_ptr<voxelizer::material> load_material(
+	aiScene const& ai_scene,
+	std::filesystem::path const& folder,
+	aiMaterial const* ai_material
+)
+{
+	std::shared_ptr<voxelizer::material> material = std::make_shared<voxelizer::material>();
+	voxelizer::material::type type{};
+	
+	type = voxelizer::material::type::NONE;
+	load_material_texture(ai_scene, material->get_texture(type), aiTextureType_NONE, folder, ai_material);
+	material->get_color(type) = glm::vec4(1);
+
+	type = voxelizer::material::type::DIFFUSE;
+	load_material_texture(ai_scene, material->get_texture(type), aiTextureType_DIFFUSE, folder, ai_material);
+	load_material_color(material->get_color(type), AI_MATKEY_COLOR_DIFFUSE, ai_material);
+
+	type = voxelizer::material::type::AMBIENT;
+	load_material_texture(ai_scene, material->get_texture(type), aiTextureType_AMBIENT, folder, ai_material);
+	load_material_color(material->get_color(type), AI_MATKEY_COLOR_AMBIENT, ai_material);
+
+	type = voxelizer::material::type::SPECULAR;
+	load_material_texture(ai_scene, material->get_texture(type), aiTextureType_SPECULAR, folder, ai_material);
+	load_material_color(material->get_color(type), AI_MATKEY_COLOR_SPECULAR, ai_material);
+
+	type = voxelizer::material::type::EMISSIVE;
+	load_material_texture(ai_scene, material->get_texture(type), aiTextureType_EMISSIVE, folder, ai_material);
+	load_material_color(material->get_color(type), AI_MATKEY_COLOR_EMISSIVE, ai_material);
+
+	return material;
+}
+
+// ------------------------------------------------------------------------------------------------
+// Node
+// ------------------------------------------------------------------------------------------------
+
+void load_node(voxelizer::scene& scene, aiScene const& ai_scene, const std::filesystem::path& folder, aiMatrix4x4 ai_transform, const aiNode* ai_node)
+{
+	ai_transform *= ai_node->mTransformation;
+
+	for (size_t i = 0; i < ai_node->mNumMeshes; i++)
+	{
+		auto ai_mesh = ai_scene.mMeshes[ai_node->mMeshes[i]];
+
+		voxelizer::mesh mesh = load_mesh(*ai_mesh, ai_transform);
+		mesh.m_material = load_material(ai_scene, folder, ai_scene.mMaterials[ai_mesh->mMaterialIndex]);
+
+		scene.m_transformed_min = glm::min(scene.m_transformed_min, mesh.m_transformed_min);
+		scene.m_transformed_max = glm::max(scene.m_transformed_max, mesh.m_transformed_max);
+
+		scene.m_meshes.push_back(std::move(mesh));
+	}
+
+	for (size_t i = 0; i < ai_node->mNumChildren; i++)
+	{
+		load_node(scene, ai_scene, folder, ai_transform, ai_node->mChildren[i]);
+	}
+}
+
+// ------------------------------------------------------------------------------------------------
+// Scene
+// ------------------------------------------------------------------------------------------------
+
+voxelizer::assimp_scene_loader::assimp_scene_loader()
+{
+}
+
+void voxelizer::assimp_scene_loader::load(scene& scene, std::filesystem::path const& path)
+{
+	Assimp::Importer importer;
+	aiScene const* ai_scene = importer.ReadFile(path.u8string(), aiProcess_Triangulate | aiProcess_JoinIdenticalVertices);
+
+	scene.m_transformed_min = glm::vec3(std::numeric_limits<float>::infinity());
+	scene.m_transformed_max = glm::vec3(-std::numeric_limits<float>::infinity());
+
+	load_node(scene, *ai_scene, path.parent_path(), aiMatrix4x4(),  ai_scene->mRootNode);
+}
+```
+
+### voxelizer/voxelizer/ai_scene_loader.hpp
+```
+#pragma once
+
+#include <memory>
+#include <filesystem>
+
+#include "scene.hpp"
+
+namespace voxelizer
+{
+	class assimp_scene_loader
+	{
+	public:
+		assimp_scene_loader();
+
+		void load(scene& scene, std::filesystem::path const& path);
+	};
+}
+```
+
+### voxelizer/voxelizer/gl.cpp
+```
+#include "gl.hpp"
+
+#include <fstream>
+#include <vector>
+#include <iostream>
+
+#include <glm/gtc/type_ptr.hpp>
+
+// ------------------------------------------------------------------------------------------------
+// shader
+// ------------------------------------------------------------------------------------------------
+
+voxelizer::shader::shader(GLenum type) :
+	m_name(glCreateShader(type))
+{
+}
+
+voxelizer::shader::shader(shader&& other) :
+	m_name(other.m_name)
+{
+	other.m_name = NULL;
+}
+
+voxelizer::shader::~shader()
+{
+	if (m_name != NULL)
+		glDeleteShader(m_name);
+}
+
+void voxelizer::shader::source_from_string(GLchar const* source)
+{
+	glShaderSource(m_name, 1, &source, nullptr);
+}
+
+void voxelizer::shader::source_from_file(GLchar const* path)
+{
+	std::ifstream f(path);
+	if (!f.is_open())
+	{
+		throw std::invalid_argument("Failed to open the file");
+	}
+	std::string string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+
+	this->source_from_string(string.c_str());
+}
+
+void voxelizer::shader::compile()
+{
+	glCompileShader(m_name);
+
+	GLint status{};
+	glGetShaderiv(m_name, GL_COMPILE_STATUS, &status);
+
+	if (status == GL_FALSE)
+	{
+		std::cerr << get_log() << std::endl;
+		throw std::runtime_error("Shader compilation failed");
+	}
+}
+
+std::string voxelizer::shader::get_log()
+{
+	GLint log_length = 0;
+	glGetShaderiv(m_name, GL_INFO_LOG_LENGTH, &log_length);
+
+	std::vector<GLchar> log(log_length);
+	glGetShaderInfoLog(m_name, log_length, NULL, log.data());
+
+	return std::string(log.begin(), log.end());
+}
+
+// ------------------------------------------------------------------------------------------------
+// program
+// ------------------------------------------------------------------------------------------------
+
+voxelizer::program::program() :
+	m_name(glCreateProgram())
+{
+}
+
+voxelizer::program::program(voxelizer::program&& other) :
+	m_name(other.m_name)
+{
+	other.m_name = NULL;
+}
+
+voxelizer::program::~program()
+{
+	if (m_name != NULL)
+		glDeleteProgram(m_name);
+}
+
+void voxelizer::program::attach_shader(voxelizer::shader const& shader)
+{
+	glAttachShader(m_name, shader.m_name);
+}
+
+void voxelizer::program::detach_shader(voxelizer::shader const& shader)
+{
+	glDetachShader(m_name, shader.m_name);
+}
+
+void voxelizer::program::link()
+{
+	glLinkProgram(m_name);
+
+	GLint status{};
+	glGetProgramiv(m_name, GL_LINK_STATUS, &status);
+
+	if (status == GL_FALSE)
+	{
+		std::cerr << get_log() << std::endl;
+		throw std::runtime_error("Program compilation failed");
+	}
+}
+
+void voxelizer::program::use()
+{
+	glUseProgram(m_name);
+}
+
+void voxelizer::program::unuse()
+{
+	glUseProgram(0);
+}
+
+std::string voxelizer::program::get_log()
+{
+	GLint log_length = 0;
+	glGetProgramiv(m_name, GL_INFO_LOG_LENGTH, &log_length);
+
+	std::vector<GLchar> log(log_length);
+	glGetProgramInfoLog(m_name, log_length, NULL, log.data());
+
+	return std::string(log.begin(), log.end());
+}
+
+GLint voxelizer::program::get_attrib_location(GLchar const* attrib_name) const
+{
+	GLint location = glGetAttribLocation(m_name, attrib_name);
+	if (location < 0)
+	{
+		throw std::invalid_argument("Invalid attrib name");
+	}
+	return location;
+}
+
+GLint voxelizer::program::get_uniform_location(GLchar const* uniform_name) const
+{
+	GLint location = glGetUniformLocation(m_name, uniform_name);
+	if (location < 0)
+	{
+		throw std::invalid_argument("Invalid uniform name");
+	}
+	return location;
+}
+
+// ------------------------------------------------------------------------------------------------
+// texture_buffer
+// ------------------------------------------------------------------------------------------------
+
+voxelizer::texture_buffer::texture_buffer()
+{
+	glGenBuffers(1, &m_buffer_name);
+	glGenBuffers(1, &m_texture_name);
+}
+
+voxelizer::texture_buffer::texture_buffer(texture_buffer&& other) :
+	m_buffer_name(other.m_buffer_name),
+	m_texture_name(other.m_texture_name)
+{
+	other.m_buffer_name = NULL;
+	other.m_texture_name = NULL;
+}
+
+voxelizer::texture_buffer::~texture_buffer()
+{
+	if (m_buffer_name != NULL)
+		glDeleteBuffers(1, &m_buffer_name);
+
+	if (m_texture_name != NULL)
+		glDeleteTextures(1, &m_texture_name);
+}
+
+void voxelizer::texture_buffer::load_data(GLsizei size, const void* data, GLenum usage)
+{
+	glBindBuffer(GL_TEXTURE_BUFFER, m_buffer_name);
+
+	glBufferData(GL_TEXTURE_BUFFER, size, data, usage);
+
+	glBindBuffer(GL_TEXTURE_BUFFER, 0);
+}
+
+void voxelizer::texture_buffer::set_format(GLenum format)
+{
+	glBindBuffer(GL_TEXTURE_BUFFER, m_buffer_name);
+	glBindTexture(GL_TEXTURE_BUFFER, m_texture_name);
+
+	glTexBuffer(GL_TEXTURE_BUFFER, format, m_buffer_name);
+
+	glBindTexture(GL_TEXTURE_BUFFER, 0);
+	glBindBuffer(GL_TEXTURE_BUFFER, 0);
+}
+
+void voxelizer::texture_buffer::bind(GLuint binding, GLint level, GLboolean layered, GLint layer, GLenum access, GLenum format) const
+{
+	glBindImageTexture(binding, m_texture_name, level, layered, layer, access, format);
+}
+
+// ------------------------------------------------------------------------------------------------
+// atomic_counter
+// ------------------------------------------------------------------------------------------------
+
+voxelizer::atomic_counter::atomic_counter()
+{
+	glGenBuffers(1, &m_name);
+
+	set_value(0);
+}
+
+voxelizer::atomic_counter::atomic_counter(atomic_counter&& other) :
+	m_name(other.m_name)
+{
+	other.m_name = NULL;
+}
+
+voxelizer::atomic_counter::~atomic_counter()
+{
+	if (m_name != NULL)
+		glDeleteBuffers(1, &m_name);
+}
+
+GLuint voxelizer::atomic_counter::get_value()
+{
+	GLuint value{};
+	glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, m_name);
+	glGetBufferSubData(GL_ATOMIC_COUNTER_BUFFER, 0, sizeof(GLuint), &value);
+
+	glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, 0);
+
+	return value;
+}
+
+void voxelizer::atomic_counter::set_value(GLuint value)
+{
+	glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, m_name);
+	glBufferData(GL_ATOMIC_COUNTER_BUFFER, sizeof(GLuint), &value, GL_DYNAMIC_DRAW);
+
+	glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, 0);
+}
+
+void voxelizer::atomic_counter::bind(GLuint binding)
+{
+	glBindBufferBase(GL_ATOMIC_COUNTER_BUFFER, binding, m_name);
+}
+
+// ------------------------------------------------------------------------------------------------
+// debug_renderer
+// ------------------------------------------------------------------------------------------------
+
+char const* g_debug_renderer_vertex_shader = R"(
+#version 330
+
+layout(location = 0) in vec3 v_pos;
+layout(location = 1) in vec3 v_col;
+
+uniform mat4 u_proj;
+uniform mat4 u_view;
+
+out vec3 f_col;
+
+void main()
+{
+	gl_Position = u_proj * u_view * vec4(v_pos, 1.0);
+	f_col = v_col;
+}
+)";
+
+char const* g_debug_renderer_fragment_shader = R"(
+#version 330
+
+in vec3 f_col;
+
+void main()
+{
+	gl_FragColor = vec4(f_col, 1.0);
+}
+)";
+
+voxelizer::debug_renderer::debug_renderer()
+{
+	shader vertex_shader(GL_VERTEX_SHADER);
+	vertex_shader.source_from_string(g_debug_renderer_vertex_shader);
+	vertex_shader.compile();
+
+	m_program.attach_shader(vertex_shader);
+
+	shader fragment_shader(GL_FRAGMENT_SHADER);
+	fragment_shader.source_from_string(g_debug_renderer_fragment_shader);
+	fragment_shader.compile();
+
+	m_program.attach_shader(fragment_shader);
+
+	m_program.link();
+}
+
+voxelizer::debug_renderer::~debug_renderer()
+{
+	if (m_buffer != NULL)
+		glDeleteBuffers(1, &m_buffer);
+}
+
+void voxelizer::debug_renderer::line(glm::vec3 from, glm::vec3 to, glm::vec3 color)
+{
+	m_lines.push_back(from.x);  m_lines.push_back(from.y);  m_lines.push_back(from.z);
+	m_lines.push_back(color.r); m_lines.push_back(color.g); m_lines.push_back(color.b);
+	m_lines.push_back(to.x);    m_lines.push_back(to.y);    m_lines.push_back(to.z);
+	m_lines.push_back(color.r); m_lines.push_back(color.g); m_lines.push_back(color.b);
+
+	m_line_count += 2;
+}
+
+void voxelizer::debug_renderer::cube(glm::vec3 min, glm::vec3 max, glm::vec3 color)
+{
+	// Bottom
+	line(glm::vec3(min.x, min.y, min.z), glm::vec3(max.x, min.y, min.z), color);
+	line(glm::vec3(min.x, min.y, min.z), glm::vec3(min.x, min.y, max.z), color);
+	line(glm::vec3(max.x, min.y, min.z), glm::vec3(max.x, min.y, max.z), color);
+	line(glm::vec3(min.x, min.y, max.z), glm::vec3(max.x, min.y, max.z), color);
+
+	// Top
+	line(glm::vec3(min.x, max.y, min.z), glm::vec3(max.x, max.y, min.z), color);
+	line(glm::vec3(min.x, max.y, min.z), glm::vec3(min.x, max.y, max.z), color);
+	line(glm::vec3(max.x, max.y, min.z), glm::vec3(max.x, max.y, max.z), color);
+	line(glm::vec3(min.x, max.y, max.z), glm::vec3(max.x, max.y, max.z), color);
+
+	// Side
+	line(glm::vec3(min.x, min.y, min.z), glm::vec3(min.x, max.y, min.z), color);
+	line(glm::vec3(max.x, min.y, min.z), glm::vec3(max.x, max.y, min.z), color);
+	line(glm::vec3(max.x, min.y, max.z), glm::vec3(max.x, max.y, max.z), color);
+	line(glm::vec3(min.x, min.y, max.z), glm::vec3(min.x, max.y, max.z), color);
+}
+
+void voxelizer::debug_renderer::flush(glm::mat4 const& view, glm::mat4 const& projection)
+{
+	if (m_lines.empty())
+		return;
+
+	glEnable(GL_DEPTH_TEST);
+
+	size_t required_buffer_size = m_lines.size() * sizeof(float);
+	if (required_buffer_size > m_buffer_size)
+	{
+		glGenBuffers(1, &m_buffer);
+		glBindBuffer(GL_ARRAY_BUFFER, m_buffer);
+		glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)required_buffer_size, nullptr, GL_DYNAMIC_DRAW);
+
+		m_buffer_size = required_buffer_size;
+	}
+
+	m_program.use();
+
+	glUniformMatrix4fv(m_program.get_uniform_location("u_view"), 1, GL_FALSE, glm::value_ptr(view));
+	glUniformMatrix4fv(m_program.get_uniform_location("u_proj"), 1, GL_FALSE, glm::value_ptr(projection));
+
+	glBindBuffer(GL_ARRAY_BUFFER, m_buffer);
+	glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr) (m_lines.size() * sizeof(float)), m_lines.data());
+
+	// Position
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, false, 2 * sizeof(glm::vec3), nullptr);
+
+	// Color
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 3, GL_FLOAT, false, 2 * sizeof(glm::vec3), (void*) sizeof(glm::vec3));
+
+	glDrawArrays(GL_LINES, 0, m_line_count);
+
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glUseProgram(0);
+
+	m_lines.clear();
+	m_line_count = 0;
+}
+
+// ------------------------------------------------------------------------------------------------
+// screen_quad
+// ------------------------------------------------------------------------------------------------
+
+const GLfloat g_screen_quad_vertices[]{
+	-1.0f, -1.0f,
+	1.0f, -1.0f,
+	1.0f, 1.0f,
+	1.0f, 1.0f,
+	-1.0f, 1.0f,
+	-1.0f, -1.0f
+};
+
+voxelizer::screen_quad::screen_quad()
+{
+	// VBO
+	glGenBuffers(1, &m_vbo);
+
+	glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(g_screen_quad_vertices), g_screen_quad_vertices, GL_STATIC_DRAW);
+
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+	// VAO
+	glGenVertexArrays(1, &m_vao);
+
+	glBindVertexArray(m_vao);
+	glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+
+	glEnableVertexArrayAttrib(m_vao, 0);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), 0);
+
+	//
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glBindVertexArray(0);
+}
+
+voxelizer::screen_quad::~screen_quad()
+{
+	glDeleteBuffers(1, &m_vbo);
+	glDeleteVertexArrays(1, &m_vao);
+}
+
+void voxelizer::screen_quad::render()
+{
+	glDisable(GL_CULL_FACE); // TODO
+
+	glBindVertexArray(m_vao);
+
+	glDrawArrays(GL_TRIANGLES, 0, 6);
+
+	glBindVertexArray(0);
+}
+```
+
+### voxelizer/voxelizer/gl.hpp
+```
+#pragma once
+
+#include <string>
+#include <functional>
+
+#include <glad/glad.h>
+#include <glm/glm.hpp>
+
+namespace voxelizer
+{
+	// ------------------------------------------------------------------------------------------------
+	// shader
+	// ------------------------------------------------------------------------------------------------
+
+	struct shader
+	{
+		GLuint m_name;
+
+		shader(GLenum type);
+		shader(shader const&) = delete;
+		shader(shader&&);
+
+		~shader();
+
+		void source_from_string(const GLchar* source);
+		void source_from_file(const GLchar* path);
+
+		void compile();
+		std::string get_log();
+	};
+
+	// ------------------------------------------------------------------------------------------------
+	// program
+	// ------------------------------------------------------------------------------------------------
+
+	struct program
+	{
+		GLuint m_name;
+
+		program();
+		program(program const&) = delete;
+		program(program&&);
+
+		~program();
+
+		void attach_shader(shader const& shader);
+		void detach_shader(shader const& shader);
+
+		void link();
+
+		void use();
+		static void unuse();
+
+		std::string get_log();
+
+		GLint get_attrib_location(const GLchar* name) const;
+		GLint get_uniform_location(const GLchar* name) const;
+	};
+
+	// ------------------------------------------------------------------------------------------------
+	// texture_buffer
+	// ------------------------------------------------------------------------------------------------
+
+	struct texture_buffer
+	{
+		GLuint m_buffer_name;
+		GLuint m_texture_name;
+
+		texture_buffer();
+		texture_buffer(texture_buffer const&) = delete;
+		texture_buffer(texture_buffer&&);
+
+		~texture_buffer();
+
+		void load_data(GLsizei size, const void* data, GLenum usage);
+		void set_format(GLenum format);
+
+		void bind(GLuint binding, GLint level, GLboolean layered, GLint layer, GLenum access, GLenum format) const;
+	};
+
+	// ------------------------------------------------------------------------------------------------
+	// atomic_counter
+	// ------------------------------------------------------------------------------------------------
+
+	struct atomic_counter
+	{
+		GLuint m_name;
+
+		atomic_counter();
+		atomic_counter(atomic_counter const&) = delete;
+		atomic_counter(atomic_counter&& other);
+
+		~atomic_counter();
+
+		GLuint get_value();
+		void set_value(GLuint value);
+
+		void bind(GLuint binding);
+	};
+
+	// ------------------------------------------------------------------------------------------------
+	// debug_renderer
+	// ------------------------------------------------------------------------------------------------
+
+	class debug_renderer
+	{
+	private:
+		program m_program;
+
+		std::vector<float> m_lines;
+		uint32_t m_line_count = 0;
+
+		GLuint m_buffer = NULL;
+		size_t m_buffer_size = 0;
+
+
+	public:
+		debug_renderer();
+		~debug_renderer();
+
+		void cube(glm::vec3 min, glm::vec3 max, glm::vec3 color);
+		void line(glm::vec3 from, glm::vec3 to, glm::vec3 col);
+
+		void flush(glm::mat4 const& view, glm::mat4 const& projection);
+	};
+
+	// ------------------------------------------------------------------------------------------------
+	// screen_quad
+	// ------------------------------------------------------------------------------------------------
+
+	class screen_quad
+	{
+	private:
+		GLuint m_vao, m_vbo;
+
+	public:
+		screen_quad();
+		~screen_quad();
+
+		void render();
+	};
+}
+```
+
+### voxelizer/voxelizer/main.cpp
+```
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/integer.hpp>
+
+#include "octree.hpp"
+#include "octree_builder.hpp"
+#include "ai_scene_loader.hpp"
+#include "scene.hpp"
+#include "voxelize.hpp"
+
+void GLAPIENTRY message_callback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, GLchar const* message, void const* userParam)
+{
+	if (severity <= GL_DEBUG_SEVERITY_MEDIUM && (type == GL_DEBUG_TYPE_ERROR || type == GL_DEBUG_TYPE_UNDEFINED_BEHAVIOR))
+	{
+		fprintf(stderr, "GL CALLBACK: type = 0x%x, severity = 0x%x, message = %s\n", type, severity, message);
+		fflush(stderr);
+	}
+}
+
+bool is_little_endian()
+{
+	uint16_t test = 0x0001;
+	char* test_ptr = (char*)&test;
+	return test_ptr[0];
+}
+
+uint32_t swap_binary(uint32_t value)
+{
+	std::uint32_t tmp = ((value << 8) & 0xFF00FF00) | ((value >> 8) & 0xFF00FF);
+	return (tmp << 16) | (tmp >> 16);
+}
+
+void run_voxelizer(
+	std::filesystem::path const& input_file_path,
+	uint32_t volume_height,
+	std::filesystem::path const& output_file_path
+)
+{
+	voxelizer::assimp_scene_loader scene_loader{};
+	voxelizer::scene scene{};
+
+	printf("Loading scene \"%s\"\n", input_file_path.u8string().c_str());
+
+	scene_loader.load(scene, input_file_path);
+
+	printf("Scene loaded\n");
+
+	voxelizer::voxelize voxelize{};
+	voxelizer::voxel_list voxel_list{};
+
+	glm::vec3 area_size = scene.get_transformed_size();
+	glm::uvec3 volume_size = voxelizer::voxelize::calc_proportional_grid(area_size, volume_height);
+	uint32_t max_volume_side = glm::max(glm::max(volume_size.x, volume_size.y), volume_size.z);
+
+	printf("Voxelizing scene - area size: (%.2f, %.2f, %.2f) volume: (%d, %d, %d), max side: %d\n",
+		area_size.x,
+		area_size.y,
+		area_size.z,
+		volume_size.x,
+		volume_size.y,
+		volume_size.z,
+		max_volume_side
+	);
+
+	voxelize(voxel_list, scene, volume_height, scene.m_transformed_min, scene.get_transformed_size());
+
+	printf("Generated a voxel list of %zu elements\n", voxel_list.m_size);
+
+	voxelizer::octree_builder octree_builder{};
+	GLuint octree_buffer{};
+	uint32_t octree_resolution = (uint32_t) glm::ceil(glm::log2((float) max_volume_side));
+	size_t octree_bytesize = voxelizer::octree::get_octree_bytesize(octree_resolution);
+
+	printf("Allocating an octree of resolution %d (%zu bytes ~ %.1f MB)\n", octree_resolution, octree_bytesize, ((float) octree_bytesize / (1024 * 1024)));
+
+	glGenBuffers(1, &octree_buffer);
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, octree_buffer);
+	glBufferStorage(GL_SHADER_STORAGE_BUFFER, octree_bytesize, nullptr, NULL);
+
+	printf("Building the octree\n");
+
+	// Build the octree
+	voxelizer::octree octree{};
+	octree_builder.build(voxel_list, octree_resolution, octree_buffer, 0, octree);
+
+	// Download octree from GPU
+	std::vector<GLuint> octree_buffer_data(octree_bytesize / sizeof(GLuint));
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, octree_buffer);
+	glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, octree_bytesize, octree_buffer_data.data());
+
+	// Write on file
+	printf("Writing to the output file \"%s\"\n", output_file_path.u8string().c_str());
+
+	std::ofstream output_file_stream(output_file_path, std::ios::binary);
+
+	auto writeU32 = [](std::ofstream& output, uint32_t value)
+	{
+		value = is_little_endian() ? value : swap_binary(value);
+		output.write((char*) &value, sizeof(GLuint));
+	};
+
+	writeU32(output_file_stream, 0x01); // Version (?)
+	writeU32(output_file_stream, volume_size.x);
+	writeU32(output_file_stream, volume_size.y);
+	writeU32(output_file_stream, volume_size.z);
+	writeU32(output_file_stream, octree_resolution);
+	writeU32(output_file_stream, octree_bytesize);
+
+	for (int i = 0; i < octree_buffer_data.size(); i++)
+		writeU32(output_file_stream, octree_buffer_data[i]);
+}
+
+int main(int argc, char* argv[])
+{
+	argc--;
+	argv++;
+
+	if (argc < 3)
+	{
+		printf("Invalid command syntax: ./voxelizer <input-file> <volume-height> <output-file>\n");
+		return 1;
+	}
+
+	// Input file
+	std::filesystem::path input_file_path = argv[0];
+	if (!std::filesystem::exists(input_file_path) || !std::filesystem::is_regular_file(input_file_path))
+	{
+		printf("Input file not found\n");
+		return 2;
+	}
+
+	// Volume height
+	int32_t volume_height = std::stoi(argv[1]);
+	if (volume_height <= 0 || volume_height > 256)
+	{
+		printf("Volume height out of bounds: [1, 256]\n");
+		return 3;
+	}
+
+	// Output file
+	std::filesystem::path output_file_path = argv[2];
+
+	printf("Initializing OpenGL context\n");
+
+	if (glfwInit() != GLFW_TRUE)
+	{
+		fprintf(stderr, "Failed to initialize GLFW\n");
+		fflush(stderr);
+
+		return 1;
+	}
+
+	glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+
+	GLFWwindow* window = glfwCreateWindow(23, 23 /* We don't care about window dimension */, "voxelizer", nullptr, nullptr);
+	glfwMakeContextCurrent(window);
+
+	if (!gladLoadGLLoader((GLADloadproc) glfwGetProcAddress))
+	{
+		fprintf(stderr, "Failed to initialize GLAD\n");
+		fflush(stderr);
+		return 2;
+	}
+
+	glEnable(GL_DEBUG_OUTPUT);
+	glDebugMessageCallback(message_callback, nullptr);
+
+	run_voxelizer(input_file_path, volume_height, output_file_path);
+
+	printf("Bye bye\n");
+
+	glfwDestroyWindow(window);
+	glfwTerminate();
+
+	return 0;
+}
+```
+
+### voxelizer/voxelizer/octree.cpp
+```
+#include "octree.hpp"
+
+#include <iostream>
+#include <stdexcept>
+
+#include <glm/glm.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
+#include "render_doc.hpp"
+
+// ------------------------------------------------------------------------------------------------ octree
+
+//this->m_buffer.load_data(this->capacity, NULL, GL_DYNAMIC_DRAW);
+//this->m_buffer.set_format(GL_R32UI);
+
+bool voxelizer::octree::is_valid() const
+{
+	return m_buffer != NULL;
+}
+
+size_t voxelizer::octree::get_size() const
+{
+	return voxelizer::octree::get_octree_size(m_resolution);
+}
+
+size_t voxelizer::octree::get_bytesize() const
+{
+	return voxelizer::octree::get_octree_bytesize(m_resolution);
+}
+
+uint32_t voxelizer::octree::get_suitable_resolution_for(glm::vec3 grid)
+{
+	float max_side = glm::max(glm::max(grid.x, grid.y), grid.z);
+	return (uint32_t) glm::ceil(glm::log2(max_side));
+}
+
+uint32_t voxelizer::octree::get_octree_side(uint32_t resolution)
+{
+	return (uint32_t) glm::exp2(resolution);
+}
+
+constexpr size_t voxelizer::octree::get_octree_size(uint32_t resolution)
+{
+	size_t result = 0;
+	for (int level = 1; level <= resolution; level++) {
+		result += (size_t) glm::exp2(3 * level);
+	}
+	return result;
+}
+
+constexpr size_t voxelizer::octree::get_octree_bytesize(uint32_t resolution)
+{
+	return get_octree_size(resolution) * sizeof(GLuint);
+}
+
+bool voxelizer::octree::is_null(uint32_t raw_val)
+{
+	return raw_val == 0;
+}
+
+bool voxelizer::octree::is_leaf(uint32_t raw_val)
+{
+	return (raw_val & 0x80000000) == 0;
+}
+
+bool voxelizer::octree::is_address(uint32_t raw_val)
+{
+	return !is_leaf(raw_val);
+}
+
+uint32_t voxelizer::octree::get_value(uint32_t raw_val)
+{
+	return raw_val & 0x7fffffff;
+}
+
+glm::uvec3 voxelizer::octree::get_voxel_position(uint32_t morton)
+{
+	glm::uvec3 result(0);
+
+	int pos = 0;
+	while (morton != 0)
+	{
+		result.x |= (morton & 1) << pos; morton >>= 1;
+		result.y |= (morton & 1) << pos; morton >>= 1;
+		result.z |= (morton & 1) << pos; morton >>= 1;
+
+		pos++;
+	}
+
+	return result;
+}
+
+void voxelizer::octree::traverse_r(GLuint const* octree, size_t offset, uint32_t depth, voxelizer::octree::on_leaf_t const& on_leaf, uint32_t parent_morton, uint32_t stop_at_lvl)
+{
+	for (int i = 0; i < 8; i++)
+	{
+		uint32_t node_idx = offset + i;
+		GLuint raw_val = octree[node_idx];
+		if (voxelizer::octree::is_null(raw_val)) {
+			continue;
+		}
+
+		uint32_t morton = parent_morton | (i << (3 * (depth - 1)));
+		if (voxelizer::octree::is_leaf(raw_val) || depth == stop_at_lvl) {
+			on_leaf(morton, node_idx);
+		} else {
+			if (voxelizer::octree::is_address(raw_val)) {
+				uint32_t addr = voxelizer::octree::get_value(raw_val);
+				traverse_r(octree, addr, depth + 1, on_leaf, morton, stop_at_lvl);
+			}
+		}
+	}
+}
+
+void voxelizer::octree::traverse(GLuint const* octree, voxelizer::octree::on_leaf_t const& on_leaf, uint32_t stop_at_lvl)
+{
+	traverse_r(octree, 0, 1, on_leaf, 0, stop_at_lvl);
+}
+
+// --------------------------------------------------------------------------------------------------------------------------------
+// octree_traverser
+// --------------------------------------------------------------------------------------------------------------------------------
+
+voxelizer::octree_traverser::octree_traverser(octree_data_const_t* octree, size_t init_node_address)
+{
+	m_octree = octree;
+
+	m_current.m_node_address = init_node_address;
+	m_current.m_child_num = 0;
+	m_current.m_morton_code = 0;
+
+	m_finished = false;
+}
+
+bool voxelizer::octree_traverser::has_finished()
+{
+	return m_finished;
+}
+
+voxelizer::octree_traverser::value voxelizer::octree_traverser::next(uint32_t stop_at_level)
+{
+	while (true)
+	{
+		while (m_current.m_child_num >= 8)
+		{
+			if (m_stack.empty()) {
+				m_finished = true;
+				return {}; // Finished
+			}
+			m_current = m_stack.top();
+			m_stack.pop();
+
+			m_current.m_child_num++;
+		}
+
+		m_current.m_morton_code = (m_current.m_morton_code & (~7)) | m_current.m_child_num;
+
+		uint32_t raw_val = m_octree[m_current.m_node_address + m_current.m_child_num];
+		uint32_t val = voxelizer::octree::get_value(raw_val);
+
+		bool is_null = voxelizer::octree::is_null(raw_val);
+		bool is_leaf = voxelizer::octree::is_leaf(raw_val);
+		bool has_reached_stop = (m_stack.size() + 1) == stop_at_level;
+
+		auto result = m_current;
+
+		if (is_null || is_leaf || has_reached_stop)
+		{
+			m_current.m_child_num++;
+		}
+		else if (voxelizer::octree::is_address(raw_val))
+		{
+			m_stack.push(m_current);
+
+			m_current.m_node_address = val;
+			m_current.m_child_num = 0;
+			m_current.m_morton_code <<= 3;
+
+			continue;
+		}
+
+		if ((is_leaf || has_reached_stop) && !is_null)
+		{
+			return result;
+		}
+	}
+}
+```
+
+### voxelizer/voxelizer/octree.hpp
+```
+#pragma once
+
+#include <vector>
+#include <memory>
+#include <functional>
+#include <stack>
+
+#include <glm/glm.hpp>
+
+#include "gl.hpp"
+
+namespace voxelizer
+{
+	constexpr uint32_t get_morton_code_from_voxel_position(glm::uvec3 pos)
+	{
+		uint32_t morton = 0;
+
+		while (pos.x != 0 || pos.y != 0 || pos.z != 0)
+		{
+			morton |= pos.x & 1; pos.x >>= 1; morton <<= 1;
+			morton |= pos.y & 1; pos.y >>= 1; morton <<= 1;
+			morton |= pos.z & 1; pos.z >>= 1; morton <<= 1;
+		}
+
+		return morton;
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// octree
+	// ------------------------------------------------------------------------------------------------
+
+	struct octree
+	{
+		GLuint m_buffer = NULL;
+		size_t m_offset;
+		uint32_t m_resolution;
+
+		bool is_valid() const;
+
+		size_t get_size() const;
+		size_t get_bytesize() const;
+
+		static uint32_t get_suitable_resolution_for(glm::vec3 grid);
+		static uint32_t get_octree_side(uint32_t resolution);
+		static constexpr size_t get_octree_size(uint32_t resolution);
+		static constexpr size_t get_octree_bytesize(uint32_t resolution);
+
+		static bool is_null(uint32_t raw_val);
+		static bool is_leaf(uint32_t raw_val);
+		static bool is_address(uint32_t raw_val);
+		static uint32_t get_value(uint32_t raw_val);
+
+		static glm::uvec3 get_voxel_position(uint32_t morton);
+
+		using on_leaf_t = std::function<void(uint32_t morton, uint32_t node_idx)>;
+		static void traverse_r(GLuint const* octree, size_t offset, uint32_t depth, voxelizer::octree::on_leaf_t const& on_leaf, uint32_t parent_morton = 0, uint32_t stop_at_lvl = 0);
+		static void traverse(GLuint const* octree, voxelizer::octree::on_leaf_t const& on_leaf, uint32_t stop_at_lvl = 0);
+	};
+
+	using octree_data_t = GLuint;
+	using octree_data_const_t = GLuint const;
+
+	// ------------------------------------------------------------------------------------------------
+	// octree_struct
+	// ------------------------------------------------------------------------------------------------
+
+	template<typename _voxel>
+	class octree_struct
+	{
+	protected:
+		uint32_t m_resolution;
+		std::vector<_voxel> m_data;
+
+		uint32_t get_offset_from_morton_code(uint32_t morton)
+		{
+			uint32_t off = 0;
+			for (int i = 0; i < m_resolution; i++)
+			{
+				off = m_data[off + (morton & 7)];
+				morton >>= 3;
+			}
+			return off + (morton & 7);
+		}
+
+	public:
+		explicit octree_struct(uint32_t resolution) :
+			m_resolution(resolution),
+			m_data(octree::get_octree_size(m_resolution))
+		{}
+
+		_voxel* get_data()
+		{
+			return m_data.data();
+		}
+
+		_voxel& get_voxel(glm::uvec3 const& pos) const
+		{
+			uint32_t morton = get_morton_code_from_voxel_position(pos);
+			uint32_t off = get_offset_from_morton_code(morton);
+			return m_data.at(off);
+		}
+
+		void set_voxel(glm::uvec3 const& pos, _voxel&& voxel)
+		{
+			uint32_t morton = get_morton_code_from_voxel_position(pos);
+			uint32_t off = get_offset_from_morton_code(morton);
+			m_data[off] = std::move(voxel);
+		}
+	};
+
+	// ------------------------------------------------------------------------------------------------
+	// octree_traverser
+	// ------------------------------------------------------------------------------------------------
+
+	class octree_traverser
+	{
+	public:
+		struct value
+		{
+			uint32_t m_morton_code;  // The morton_code for the current node obtained during exploration.
+			uint32_t m_node_address; // The address of the node within the octree buffer.
+			uint32_t m_child_num;    // The index of the node within its parent, so [0-7].
+		};
+
+	private:
+		octree_data_const_t* m_octree;
+		value m_current;
+		std::stack<value> m_stack;
+		bool m_finished = false;
+
+	public:
+		octree_traverser(octree_data_const_t* octree, size_t init_node_address = 0);
+
+		bool has_finished();
+		value next(uint32_t stop_at_level = 0);
+	};
+}
+```
+
+### voxelizer/voxelizer/octree_builder.cpp
+```
+#include "octree_builder.hpp"
+
+#include <iostream>
+
+#include <shinji.hpp>
+
+#include "render_doc.hpp"
+
+voxelizer::octree_builder::octree_builder()
+{
+	// node_flag
+	{
+		shader shader(GL_COMPUTE_SHADER);
+		shader.source_from_string(shinji::load_resource_from_bundle("resources/shaders/svo_node_flag.comp").m_data);
+		shader.compile();
+
+		m_node_flag.attach_shader(shader);
+		m_node_flag.link();
+	}
+
+	// node_alloc
+	{
+		shader shader(GL_COMPUTE_SHADER);
+		shader.source_from_string(shinji::load_resource_from_bundle("resources/shaders/svo_node_alloc.comp").m_data);
+		shader.compile();
+
+		m_node_alloc.attach_shader(shader);
+		m_node_alloc.link();
+	}
+
+	// node_init
+	{
+		shader shader(GL_COMPUTE_SHADER);
+		shader.source_from_string(shinji::load_resource_from_bundle("resources/shaders/svo_node_init.comp").m_data);
+		shader.compile();
+
+		m_node_init.attach_shader(shader);
+		m_node_init.link();
+	}
+
+	// store_leaf
+	{
+		shader shader(GL_COMPUTE_SHADER);
+		shader.source_from_string(shinji::load_resource_from_bundle("resources/shaders/svo_store_leaf.comp").m_data);
+		shader.compile();
+
+		m_store_leaf.attach_shader(shader);
+		m_store_leaf.link();
+	}
+}
+
+void voxelizer::octree_builder::clear(voxelizer::octree const& octree, uint32_t start, uint32_t count)
+{
+	printf("[octree_builder] Clearing - start: %d, count: %d\n", start, count);
+
+	m_node_init.use();
+
+	glUniform1ui(m_node_init.get_uniform_location("u_start"), start);
+	glUniform1ui(m_node_init.get_uniform_location("u_count"), count);
+
+	glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 1, octree.m_buffer, (GLintptr)octree.m_offset, (GLintptr)octree.get_bytesize());
+
+	voxelizer::renderdoc::watch(false, [&]
+	{
+		glDispatchCompute(glm::ceil(count / float(32)), 1, 1);
+		glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+	});
+
+	program::unuse();
+}
+
+void voxelizer::octree_builder::build(
+	voxelizer::voxel_list const& voxel_list,
+	uint32_t resolution,
+	GLuint buffer,
+	size_t offset,
+	voxelizer::octree& octree
+)
+{
+	octree.m_buffer = buffer;
+	octree.m_offset = offset;
+	octree.m_resolution = resolution;
+
+	atomic_counter alloc_counter{};
+
+	unsigned int start = 0, count = 8;
+	unsigned int alloc_start = start + count;
+
+	// node init
+	clear(octree, start, count);
+
+	for (int level = 1; level < resolution; level++)
+	{
+		printf("[octree_builder] Level: %d\n", level);
+
+		// node flag
+		m_node_flag.use();
+
+		glUniform1i(m_node_flag.get_uniform_location("u_max_level"), (int)octree.m_resolution);
+		glUniform1i(m_node_flag.get_uniform_location("u_level"), level);
+
+		glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 1, octree.m_buffer, (GLintptr)octree.m_offset, (GLintptr)octree.get_bytesize());
+		voxel_list.bind(2, 3);
+
+		glDispatchCompute(glm::ceil(float(voxel_list.m_size) / float(32)), 1, 1);
+		glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+		program::unuse();
+
+		printf("[octree_builder] Flagging - max_level: %d, level: %d, octree offset: %zu, octree size: %zu\n", octree.m_resolution, level, octree.m_offset, octree.get_bytesize());
+
+		// node alloc
+		m_node_alloc.use();
+
+		glUniform1ui(m_node_alloc.get_uniform_location("u_start"), start);
+		glUniform1ui(m_node_alloc.get_uniform_location("u_count"), count);
+		glUniform1ui(m_node_alloc.get_uniform_location("u_alloc_start"), alloc_start);
+
+		glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 1, octree.m_buffer, (GLintptr)octree.m_offset, (GLintptr)octree.get_bytesize());
+		alloc_counter.bind(2);
+
+		alloc_counter.set_value(0);
+
+		renderdoc::watch(false, [&]
+		{
+			glDispatchCompute(glm::ceil(count / float(32)), 1, 1);
+			glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_ATOMIC_COUNTER_BARRIER_BIT);
+		});
+
+		program::unuse();
+
+		GLuint alloc_count = alloc_counter.get_value();
+		start = alloc_start;
+		count = alloc_count * 8;
+		alloc_start = start + count;
+
+		printf("[octree_builder] Node alloc - start: %d, count: %d, alloc_start: %d, octree offset: %zu, octree size: %zu\n",
+			start,
+			count,
+			alloc_start,
+			octree.m_offset,
+			octree.get_bytesize()
+		);
+
+		// node init
+		clear(octree, start, count);
+	}
+
+	// store leaf
+	m_store_leaf.use();
+
+	glUniform1i(m_store_leaf.get_uniform_location("u_max_level"), octree.m_resolution);
+
+	glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 1, octree.m_buffer, (GLintptr)octree.m_offset, (GLintptr)octree.get_bytesize());
+	voxel_list.bind(2, 3);
+
+	int workgroup_count = glm::ceil(voxel_list.m_size / float(32));
+
+	renderdoc::watch(true, [&] {
+		glDispatchCompute(workgroup_count, 1, 1);
+		glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+	});
+
+
+	printf("[octree_builder] Store leaves - max_level: %d, octree offset: %zu, octree size: %zu\n",
+		octree.m_resolution,
+		octree.m_offset,
+		octree.get_bytesize()
+	);
+
+	program::unuse();
+}
+```
+
+### voxelizer/voxelizer/octree_builder.hpp
+```
+#pragma once
+
+#include "gl.hpp"
+#include "octree.hpp"
+#include "voxel_list.hpp"
+
+namespace voxelizer
+{
+	class octree_builder
+	{
+	private:
+		program m_node_flag;
+		program m_node_alloc;
+		program m_node_init;
+		program m_store_leaf;
+
+	public:
+		octree_builder();
+
+		void clear(
+			voxelizer::octree const& octree,
+			uint32_t start,
+			uint32_t count
+		);
+
+		void build(
+			voxelizer::voxel_list const& voxel_list,
+			uint32_t resolution,
+			GLuint buffer,
+			size_t offset,
+			octree& result
+		);
+	};
+}
+```
+
+### voxelizer/voxelizer/render_doc.cpp
+```
+#include "render_doc.hpp"
+
+#include <cstdio>
+#include <iostream>
+
+#include <renderdoc_app.h>
+#define NOMINMAX
+#include <windows.h>
+
+RENDERDOC_API_1_1_2* g_handle = nullptr;
+
+void renderdoc_init()
+{
+	if (HMODULE module = GetModuleHandleA("renderdoc.dll"))
+	{
+		auto RENDERDOC_GetAPI = (pRENDERDOC_GetAPI) GetProcAddress(module, "RENDERDOC_GetAPI");
+		int result = RENDERDOC_GetAPI(eRENDERDOC_API_Version_1_1_2, (void**) &g_handle);
+		if (result != 1)
+		{
+			std::cerr << "RenderDoc failed to initialize, result: " << result << std::endl;
+			return;
+		}
+
+		printf("Renderdoc module initialized\n");
+	}
+}
+
+void voxelizer::renderdoc::watch(bool capture, std::function<void()> const& f)
+{
+	if (g_handle == nullptr) {
+		renderdoc_init();
+	}
+
+	if (g_handle && capture)
+	{
+		g_handle->StartFrameCapture(NULL, NULL);
+	}
+
+	f();
+
+	if (g_handle && capture)
+	{
+		g_handle->EndFrameCapture(NULL, NULL);
+	}
+}
+```
+
+### voxelizer/voxelizer/render_doc.hpp
+```
+#pragma once
+
+#include <iostream>
+#include <functional>
+
+namespace voxelizer::renderdoc
+{
+	void watch(bool capture, std::function<void()> const& f);
+}
+```
+
+### voxelizer/voxelizer/scene.cpp
+```
+#include "scene.hpp"
+
+// ------------------------------------------------------------------------------------------------
+// material
+// ------------------------------------------------------------------------------------------------
+
+voxelizer::material::material()
+{
+	glGenTextures(material::type::Count, m_textures);
+}
+
+voxelizer::material::~material()
+{
+	glDeleteTextures(material::type::Count, m_textures);
+}
+
+// ------------------------------------------------------------------------------------------------
+// mesh
+// ------------------------------------------------------------------------------------------------
+
+voxelizer::mesh::mesh()
+{
+	glGenVertexArrays(1, &m_vao);
+	glGenBuffers(mesh::attribute::Count, m_vbos.data());
+	glGenBuffers(1, &m_ebo);
+}
+
+voxelizer::mesh::mesh(voxelizer::mesh&& other) noexcept :
+	m_valid(true),
+
+	m_vao(other.m_vao),
+	m_vbos(other.m_vbos),
+	m_ebo(other.m_ebo),
+	m_triangle_count(other.m_triangle_count),
+	m_element_count(other.m_element_count),
+	m_transform(other.m_transform),
+	m_material(other.m_material),
+	m_transformed_min(other.m_transformed_min),
+	m_transformed_max(other.m_transformed_max)
+{
+	other.m_valid = false;
+}
+
+voxelizer::mesh::~mesh()
+{
+	if (m_valid)
+	{
+		glDeleteVertexArrays(1, &m_vao);
+		glDeleteBuffers(mesh::attribute::Count, m_vbos.data());
+		glDeleteBuffers(1, &m_ebo);
+	}
+}
+```
+
+### voxelizer/voxelizer/scene.hpp
+```
+#pragma once
+
+#include <array>
+#include <memory>
+#include <vector>
+
+#include <glad/glad.h>
+
+#include <glm/glm.hpp>
+
+namespace voxelizer
+{
+	// ------------------------------------------------------------------------------------------------
+	// material
+	// ------------------------------------------------------------------------------------------------
+
+	class material
+	{
+	public:
+		enum type
+		{
+			NONE,
+			DIFFUSE,
+			AMBIENT,
+			SPECULAR,
+			EMISSIVE,
+
+			Count
+		};
+
+	private:
+		glm::vec4 m_colors[material::type::Count];
+		GLuint m_textures[material::type::Count];
+
+	public:
+		material();
+		material(const material&) = delete;
+		material(const material&&) = delete;
+
+		~material();
+
+		glm::vec4& get_color(material::type type)
+		{
+			return m_colors[type];
+		}
+
+		GLuint get_texture(material::type type) const
+		{
+			return m_textures[type];
+		}
+	};
+
+	// ------------------------------------------------------------------------------------------------
+	// mesh
+	// ------------------------------------------------------------------------------------------------
+
+	struct mesh
+	{
+		enum attribute
+		{
+			POSITION = 0,
+			NORMAL = 1,
+			UV = 2,
+			COLOR = 3,
+
+			Count
+		};
+
+		bool m_valid = true;
+
+		GLuint m_vao;
+		std::array<GLuint, mesh::attribute::Count> m_vbos;
+		GLuint m_ebo;
+
+		size_t m_triangle_count;
+		size_t m_element_count;
+
+		glm::mat4 m_transform;
+
+		std::shared_ptr<material> m_material;
+
+		glm::vec3 m_transformed_min, m_transformed_max;
+
+		mesh();
+		mesh(mesh const&) = delete;
+		mesh(mesh&& other) noexcept;
+
+		~mesh();
+	};
+
+	// ------------------------------------------------------------------------------------------------
+	// scene
+	// ------------------------------------------------------------------------------------------------
+
+	struct scene
+	{
+		glm::vec3 m_transformed_min, m_transformed_max;
+		std::vector<mesh> m_meshes;
+
+		inline glm::vec3 get_transformed_size() const
+		{
+			return m_transformed_max - m_transformed_min;
+		}
+
+		inline size_t get_triangles_count()
+		{
+			size_t triangle_count = 0;
+			for (mesh const& mesh : m_meshes)
+			{
+				triangle_count += mesh.m_triangle_count;
+			}
+			return triangle_count;
+		}
+	};
+}
+```
+
+### voxelizer/voxelizer/voxel_list.cpp
+```
+#include "voxel_list.hpp"
+
+#include <iostream>
+
+voxelizer::voxel_list::voxel_list()
+{}
+
+void voxelizer::voxel_list::alloc(size_t size)
+{
+	m_size = size;
+
+	m_position_buffer.load_data(size * sizeof(GLuint), NULL, GL_DYNAMIC_DRAW);
+	m_position_buffer.set_format(GL_R32UI);
+
+	m_color_buffer.load_data(size * sizeof(GLuint), NULL, GL_DYNAMIC_DRAW);
+	m_color_buffer.set_format(GL_RGBA8);
+}
+
+void voxelizer::voxel_list::bind(GLuint position_binding, GLuint color_binding) const
+{
+	m_position_buffer.bind(position_binding, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGB10_A2UI);
+	m_color_buffer.bind(color_binding, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA8);
+}
+```
+
+### voxelizer/voxelizer/voxel_list.hpp
+```
+#pragma once
+
+#include <glad/glad.h>
+
+#include "gl.hpp"
+
+namespace voxelizer
+{
+	struct voxel_list
+	{
+		voxelizer::texture_buffer m_position_buffer;
+		voxelizer::texture_buffer m_color_buffer;
+		size_t m_size;
+
+		voxel_list();
+
+		void alloc(size_t size);
+		void bind(GLuint position_binding, GLuint color_binding) const;
+	};
+}
+```
+
+### voxelizer/voxelizer/voxelize.cpp
+```
+#include "voxelize.hpp"
+
+#include <iostream>
+
+#include <glm/gtc/type_ptr.hpp>
+#include <shinji.hpp>
+
+#include "render_doc.hpp"
+#include "voxel_list.hpp"
+
+voxelizer::voxelize::voxelize()
+{
+	// Program
+	shader vertex(GL_VERTEX_SHADER);
+	vertex.source_from_string(shinji::load_resource_from_bundle("resources/shaders/voxelize.vert").m_data);
+	vertex.compile();
+	m_program.attach_shader(vertex);
+
+	shader geometry(GL_GEOMETRY_SHADER);
+	geometry.source_from_string(shinji::load_resource_from_bundle("resources/shaders/voxelize.geom").m_data);
+	geometry.compile();
+	m_program.attach_shader(geometry);
+
+	shader fragment(GL_FRAGMENT_SHADER);
+	fragment.source_from_string(shinji::load_resource_from_bundle("resources/shaders/voxelize.frag").m_data);
+	fragment.compile();
+	m_program.attach_shader(fragment);
+
+	m_program.link();
+
+	// Errors counter
+	glGenBuffers(1, &m_errors_counter);
+	glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, m_errors_counter);
+	glBufferStorage(GL_ATOMIC_COUNTER_BUFFER, sizeof(GLuint), nullptr, GL_DYNAMIC_STORAGE_BIT);
+}
+
+glm::uvec3 voxelizer::voxelize::calc_proportional_grid(glm::vec3 size, uint32_t voxels_on_y)
+{
+	glm::uvec3 grid;
+	grid.y = voxels_on_y;
+	grid.x = (uint32_t) glm::ceil((float(voxels_on_y) / size.y) * size.x);
+	grid.z = (uint32_t) glm::ceil((float(voxels_on_y) / size.y) * size.z);
+	return grid;
+}
+
+glm::mat4 voxelizer::voxelize::create_scene_normalization_matrix(glm::vec3 area_position, glm::vec3 area_size)
+{
+	auto result = glm::identity<glm::mat4>();
+	//result = glm::scale(result, glm::vec3(1.0f) / area_size);
+	float max_side = glm::max(area_size.x, glm::max(area_size.y, area_size.z));
+	result = glm::scale(result, glm::vec3(1.0f / max_side));
+	result = glm::translate(result, -area_position);
+	return result;
+}
+
+void voxelizer::voxelize::create_projection_matrices(glm::mat4 m[3])
+{
+	glm::mat4 ortho = glm::ortho(0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 2.0f);
+	m[0] = ortho * glm::lookAt(glm::vec3(-1.0f, 0, 0), glm::vec3(0), glm::vec3(0, 1.0f, 0));
+	m[1] = ortho * glm::lookAt(glm::vec3(0, -1.0f, 0), glm::vec3(0), glm::vec3(0, 0, 1.0f));
+	m[2] = ortho * glm::lookAt(glm::vec3(0, 0, +2.0f), glm::vec3(0), glm::vec3(0, 1.0f, 0));
+}
+
+void voxelizer::voxelize::invoke(voxelizer::scene const& scene)
+{
+	size_t voxel_list_offset = 0;
+
+	for (uint32_t mesh_idx = 0; mesh_idx < scene.m_meshes.size(); mesh_idx++)
+	{
+		voxelizer::mesh const& mesh = scene.m_meshes[mesh_idx];
+
+		// Transform
+		glUniformMatrix4fv(m_program.get_uniform_location("u_mesh_transform"), 1, GL_FALSE, glm::value_ptr(mesh.m_transform));
+
+		// Color
+		glm::vec4 color = mesh.m_material->get_color(material::type::DIFFUSE);
+		glUniform4fv(m_program.get_uniform_location("u_color"), 1, glm::value_ptr(color));
+
+		GLuint texture = mesh.m_material->get_texture(material::type::DIFFUSE);
+		glBindTexture(GL_TEXTURE_2D, texture);
+
+		glBindVertexArray(mesh.m_vao);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.m_ebo);
+
+		// Reset errors counter
+		glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, m_errors_counter);
+		glClearBufferSubData(GL_ATOMIC_COUNTER_BUFFER, GL_R32UI, 0, sizeof(GLuint), GL_RED, GL_UNSIGNED_INT, nullptr);
+
+		glBindBufferBase(GL_ATOMIC_COUNTER_BUFFER, 4, m_errors_counter);
+
+		voxelizer::renderdoc::watch(true, [&]
+		{
+			glDrawElements(GL_TRIANGLES, (GLsizei) mesh.m_element_count, GL_UNSIGNED_INT, nullptr);
+		});
+
+		glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_ATOMIC_COUNTER_BARRIER_BIT);
+
+		size_t current_voxel_list_offset = m_atomic_counter.get_value();
+
+		printf("[voxelize] Mesh %d voxelized, voxels: %zu, offset: %zu\n",
+			mesh_idx,
+			(current_voxel_list_offset - voxel_list_offset),
+			current_voxel_list_offset
+		);
+
+		voxel_list_offset = current_voxel_list_offset;
+
+		GLuint errors_count{};
+		glBindBuffer(GL_ATOMIC_COUNTER_BUFFER, m_errors_counter);
+		glGetBufferSubData(GL_ATOMIC_COUNTER_BUFFER, 0, sizeof(GLuint), &errors_count);
+
+		if (errors_count > 0)
+		{
+			fprintf(stderr, "[voxelize] Errors: %d\n", errors_count);
+			fflush(stderr);
+		}
+	}
+
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+	glBindVertexArray(0);
+}
+
+void voxelizer::voxelize::operator()(
+	voxelizer::voxel_list& voxel_list,
+	voxelizer::scene const& scene,
+	uint32_t voxels_on_y,
+	glm::vec3 area_position,
+	glm::vec3 area_size
+)
+{
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_ALPHA_TEST);
+	glDisable(GL_CULL_FACE);
+
+	m_program.use();
+
+	// Prepares a matrix responsible of framing the model in the said area.
+	// The min point will correspond to (0, 0, 0) while the max point to (1, 1, 1).
+
+	glm::mat4 scene_norm_mtx = voxelizer::voxelize::create_scene_normalization_matrix(area_position, area_size);
+	glUniformMatrix4fv(m_program.get_uniform_location("u_transform"), 1, GL_FALSE, glm::value_ptr(scene_norm_mtx));
+
+	// Creates the matrices that will project the triangles to the plane that gives
+	// out their widest area (to achieve Conservative Rasterization).
+
+	glm::mat4 proj[3];
+	create_projection_matrices(proj);
+
+	glUniformMatrix4fv(m_program.get_uniform_location("u_x_ortho_projection"), 1, GL_FALSE, glm::value_ptr(proj[0]));
+	glUniformMatrix4fv(m_program.get_uniform_location("u_y_ortho_projection"), 1, GL_FALSE, glm::value_ptr(proj[1]));
+	glUniformMatrix4fv(m_program.get_uniform_location("u_z_ortho_projection"), 1, GL_FALSE, glm::value_ptr(proj[2]));
+
+	// Finds out the size of the grid given just the number of voxels along the Y axis,
+	// other dimensions are found proportionally to that.
+
+	glm::uvec3 grid = voxelizer::voxelize::calc_proportional_grid(area_size, voxels_on_y);
+
+	uint32_t max_side = glm::max(grid.x, glm::max(grid.y, grid.z)); // The viewport is always a square, its side is the max side of the grid.
+	glUniform1ui(m_program.get_uniform_location("u_viewport"), max_side);
+
+	glUniform3uiv(m_program.get_uniform_location("u_grid"), 1, glm::value_ptr(grid));
+
+	printf("[voxelize] Viewport of size (%d, %d)\n", max_side, max_side);
+
+	GLuint framebuffer{};
+	glGenFramebuffers(1, &framebuffer);
+	glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+	glFramebufferParameteri(GL_FRAMEBUFFER, GL_FRAMEBUFFER_DEFAULT_WIDTH, max_side);
+	glFramebufferParameteri(GL_FRAMEBUFFER, GL_FRAMEBUFFER_DEFAULT_HEIGHT, max_side);
+
+	glViewport(0, 0, (GLsizei) max_side, (GLsizei) max_side);
+
+	// COUNT
+	// Runs the program and counts how many voxels are generated in order to allocate the buffer first
+	// and then fill it with the voxels.
+
+	glUniform1ui(m_program.get_uniform_location("u_can_store"), 0);
+
+	m_atomic_counter.set_value(0);
+	m_atomic_counter.bind(3);
+
+	invoke(scene);
+
+	GLuint voxel_count = m_atomic_counter.get_value();
+
+	printf("[voxelize] Allocating a voxel-list of %d (~%zu bytes)\n", voxel_count, voxel_count * sizeof(GLuint) * 2);
+
+	voxel_list.alloc(voxel_count);
+
+	// STORE
+	// Now we can actually store the voxel list inside of the just-allocated buffer.
+
+	glUniform1ui(m_program.get_uniform_location("u_can_store"), 1);
+
+	m_atomic_counter.set_value(0);
+	m_atomic_counter.bind(3);
+
+	voxel_list.bind(1, 2);
+
+	invoke(scene);
+
+	glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+	printf("[voxelize] Voxel-list stored\n");
+
+	//
+
+	voxelizer::program::unuse();
+
+	glDeleteFramebuffers(1, &framebuffer);
+}
+```
+
+### voxelizer/voxelizer/voxelize.hpp
+```
+#pragma once
+
+#include <optional>
+
+#include <glm/glm.hpp>
+
+#include "gl.hpp"
+#include "scene.hpp"
+#include "voxel_list.hpp"
+
+namespace voxelizer
+{
+	struct voxelize
+	{
+	private:
+		void invoke(voxelizer::scene const& scene);
+
+	public:
+		program m_program;
+		atomic_counter m_atomic_counter;
+		GLuint m_errors_counter;
+
+		voxelize();
+
+		static glm::uvec3 calc_proportional_grid(glm::vec3 size, uint32_t voxels_on_y);
+		static glm::mat4 create_scene_normalization_matrix(glm::vec3 area_position, glm::vec3 area_size);
+		static void create_projection_matrices(glm::mat4 matrices[3]);
+
+		/**
+		 * @param voxel_list  The resulting list of voxels generated.
+		 * @param scene       The scene to voxelize.
+		 * @param voxels_on_y Number of voxels along the Y axis.
+		 * @param offset      Where to start taking the voxelization area.
+		 * @param size        The size of the voxelization area.
+		 */
+		void operator()(
+			voxelizer::voxel_list& voxel_list,
+			voxelizer::scene const& scene,
+			uint32_t voxels_on_y,
+			glm::vec3 area_position,
+			glm::vec3 area_size
+		);
+	};
+}
+```
+
+### viewer/resources/shaders/scene.frag
+```
+#version 430
+
+in vec2 v_tex_coord;
+in vec4 v_color;
+
+uniform vec4 u_color;
+uniform sampler2D u_texture2d;
+
+out vec4 f_color;
+
+void main()
+{
+	f_color = u_color * v_color * texture(u_texture2d, vec2(v_tex_coord.x, 1 - v_tex_coord.y));
+}
+```
+
+### viewer/resources/shaders/scene.vert
+```
+#version 430
+
+layout(location = 0) in vec3 position;
+layout(location = 1) in vec3 normal;
+layout(location = 2) in vec2 tex_coord;
+layout(location = 3) in vec4 color;
+
+uniform mat4 u_scene_transform;
+uniform mat4 u_transform;
+uniform mat4 u_camera_projection;
+uniform mat4 u_camera_view;
+
+out vec2 v_tex_coord;
+out vec4 v_color;
+
+void main()
+{
+	gl_Position = u_camera_projection * u_camera_view * u_scene_transform * u_transform * vec4(position, 1.0);
+	v_tex_coord = tex_coord;
+	v_color = color;
+}
+```
+
+### viewer/resources/shaders/screen_quad.vert
+```
+#version 330
+
+layout(location = 0) in vec2 u_position;
+
+void main()
+{
+	gl_Position = vec4(u_position, 0.0, 1.0);
+}
+```
+
+### viewer/resources/shaders/svo_tracer.frag
+```
+#version 460
+
+#define EPS 3.552713678800501e-15
+
+#define MAX_DEPTH 32
+
+uniform uvec2 u_screen;
+
+uniform vec3 u_position;
+uniform mat4 u_projection;
+uniform mat4 u_view;
+
+layout(std430, binding = 0) buffer ssbo_octree { uint b_octree[]; };
+uniform uint u_start_address; // The starting index within the octree, this is useful whether we need to render a sub-portion of the octree.
+
+uniform vec3 u_octree_from;
+uniform vec3 u_octree_size;
+
+out vec4 f_color;
+
+void swap(inout float a, inout float b)
+{
+	float tmp = a;
+	a = b;
+	b = tmp;
+}
+
+vec4 octree_unpack_color(uint value)
+{
+	return vec4(value & 0xFFu, (value >> 8u) & 0xFFu, (value >> 16u) & 0xFFu, (value >> 24u) & 0x7Fu);
+}
+
+vec4 _3BIT_DEBUG[] = vec4[](
+	vec4(0, 0, 0, 1), // 000
+	vec4(0, 0, 1, 1), // 001
+	vec4(0, 1, 0, 1), // 010
+	vec4(0, 1, 1, 1), // 011
+	vec4(1, 0, 0, 1), // 100
+	vec4(1, 0, 1, 1), // 101
+	vec4(1, 1, 0, 1), // 110
+	vec4(1, 1, 1, 1)  // 111
+);
+
+// https://www.scratchapixel.com/lessons/3d-basic-rendering/minimal-ray-tracer-rendering-simple-shapes/ray-box-intersection
+bool ray_intersect(vec3 o, vec3 d, vec3 _min, vec3 _max, out float t_min, out float t_max)
+{
+	// x
+	t_min = (_min.x - o.x) / d.x;
+	t_max = (_max.x - o.x) / d.x;
+
+	if (t_min > t_max)
+		swap(t_min, t_max);
+
+	// y
+	float ty_min = (_min.y - o.y) / d.y;
+	float ty_max = (_max.y - o.y) / d.y;
+
+	if (ty_min > ty_max)
+		swap(ty_min, ty_max);
+
+	if (t_min > ty_max || ty_min > t_max)
+		return false;
+
+    if (ty_min > t_min) t_min = ty_min; 
+    if (ty_max < t_max) t_max = ty_max; 
+
+	// z
+	float tz_min = (_min.z - o.z) / d.z;
+	float tz_max = (_max.z - o.z) / d.z;
+
+	if (tz_min > tz_max)
+		swap(tz_min, tz_max);
+
+	if (t_min > tz_max || tz_min > t_max)
+		return false;
+
+    if (tz_min > t_min) t_min = tz_min; 
+    if (tz_max < t_max) t_max = tz_max;
+
+	return true;
+}
+
+struct Ray
+{
+	vec3 origin;
+	vec3 direction;
+};
+
+void ray_generate(out Ray ray)
+{
+	ray.origin = u_position;
+	
+	vec2 coord = ivec2(gl_FragCoord.xy) / vec2(u_screen);
+	coord = coord * 2.0f - 1.0f;
+	
+	vec3 d;
+
+	d = normalize(
+		mat3(inverse(u_view)) * (inverse(u_projection) * vec4(coord, 1, 1)).xyz
+	);
+	
+	d.x = abs(d.x) > EPS ? d.x : (d.x >= 0 ? EPS : -EPS);
+	d.y = abs(d.y) > EPS ? d.y : (d.y >= 0 ? EPS : -EPS);
+	d.z = abs(d.z) > EPS ? d.z : (d.z >= 0 ? EPS : -EPS);
+
+	ray.direction = d;
+}
+
+struct Stack {
+	uint node_address;
+	uint frontal_mask;
+	float t_min;
+	vec3 t_corner;
+} stack[MAX_DEPTH];
+
+bool ray_trace(Ray ray, vec3 _min, vec3 _max, out vec4 color, out float t_hit)
+{
+	float t_min, t_max;
+	if (!ray_intersect(ray.origin, ray.direction, _min, _max, t_min, t_max)) {
+		return false;
+	}
+
+	t_min = max(t_min, 0);
+
+	uint node_address = u_start_address;
+
+	int depth = 0;
+
+	vec3 size = (_max - _min);
+	
+	uint dir_mask = 0u;
+	if (ray.direction.x > 0) dir_mask ^= 1u;
+	if (ray.direction.y > 0) dir_mask ^= 2u;
+	if (ray.direction.z > 0) dir_mask ^= 4u;
+	
+	float scale = 0.5;
+	vec3 _step = scale * size;
+
+	vec3 center = (_min + _max) / 2;
+
+	vec3 t_center;
+	t_center = (center - ray.origin) / ray.direction; // Gets the t values for the center projected along the three axes.
+
+	uint frontal_mask = 0u;
+	if (t_center.x > t_min) frontal_mask ^= 1u;
+	if (t_center.y > t_min) frontal_mask ^= 2u;
+	if (t_center.z > t_min) frontal_mask ^= 4u;
+	
+	vec3 corner = center;
+	if ((frontal_mask & 1u) == 0) corner.x += sign(ray.direction.x) * _step.x;
+	if ((frontal_mask & 2u) == 0) corner.y += sign(ray.direction.y) * _step.y;
+	if ((frontal_mask & 4u) == 0) corner.z += sign(ray.direction.z) * _step.z;
+
+	uint value = 0;
+
+	vec3 t_corner = (corner - ray.origin) / ray.direction; // Gets the t values for the corner if projected on the ray.
+
+	while (true)
+	{
+		if (value == 0) {
+			value = b_octree[node_address + (frontal_mask ^ dir_mask)];
+		}
+
+		if ((value & 0x80000000u) != 0)
+		{
+			// PUSH
+			stack[depth].node_address = node_address;
+			stack[depth].frontal_mask = frontal_mask;
+			stack[depth].t_min = t_min;
+			stack[depth].t_corner = t_corner;
+
+			depth++;
+			scale /= 2.0;
+			_step = size * scale;
+			
+			node_address = value & 0x7FFFFFFFu;
+			t_center = t_corner - sign(ray.direction) * _step / ray.direction;
+
+			frontal_mask = 0;
+
+			if (t_center.x >= t_min)
+			{
+				frontal_mask ^= 1u;
+				t_corner.x -= sign(ray.direction.x) * _step.x / ray.direction.x;
+			}
+
+			if (t_center.y >= t_min)
+			{
+				frontal_mask ^= 2u;
+				t_corner.y -= sign(ray.direction.y) * _step.y / ray.direction.y;
+			}
+
+			if (t_center.z >= t_min)
+			{
+				frontal_mask ^= 4u;
+				t_corner.z -= sign(ray.direction.z) * _step.z / ray.direction.z;
+			}
+
+			value = 0;
+			continue;
+		} else if (value > 0) {
+			break;
+		}
+
+		while (true)
+		{
+			// ADVANCE
+			float t_corner_max = min(min(t_corner.x, t_corner.y), t_corner.z);
+			t_min = t_corner_max;
+
+			uint step_mask = 0;
+
+			if (t_corner.x <= t_corner_max)
+			{
+				step_mask ^= 1u;
+				t_corner.x += sign(ray.direction.x) * _step.x / ray.direction.x;
+			}
+
+			if (t_corner.y <= t_corner_max)
+			{	
+				step_mask ^= 2u;
+				t_corner.y += sign(ray.direction.y) * _step.y / ray.direction.y;
+			}
+			
+			if (t_corner.z <= t_corner_max)
+			{
+				step_mask ^= 4u;
+				t_corner.z += sign(ray.direction.z) * _step.z / ray.direction.z;
+			}
+
+			frontal_mask ^= step_mask;
+
+			if ((frontal_mask & step_mask) == 0) {
+				break;
+			}
+
+			// POP
+			depth--;
+			if (depth < 0)
+				return false;
+			scale *= 2.0;
+			_step = size * scale;
+
+			node_address = stack[depth].node_address;
+			frontal_mask = stack[depth].frontal_mask;
+			t_min = stack[depth].t_min;
+			t_corner = stack[depth].t_corner;
+		}
+		
+		value = 0;
+	}
+
+	color = octree_unpack_color(value);
+	color.rgb /= 255.0;
+	color.a /= 127.0;
+
+	t_hit = t_min;
+
+	return true;
+}
+
+void main()
+{
+	Ray ray;
+	ray_generate(ray);
+
+	vec4 color;
+	float t_hit;
+	bool hit = ray_trace(ray, u_octree_from, u_octree_from + u_octree_size, color, t_hit);
+
+	vec3 hit_pos = ray.origin + ray.direction * t_hit;
+	vec4 cs_hit_pos = u_projection * u_view * vec4(hit_pos, 1.0); // Hit position in clip space
+	gl_FragDepth = (cs_hit_pos.z / cs_hit_pos.w) / 2 + 0.5;
+	
+	if (!hit)
+	{
+		discard;
+	}
+
+	f_color = color;
+}
+```
+
+### voxelizer/resources/shaders/svo_node_alloc.comp
+```
+#version 430
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 1) buffer ssbo_octree { uint b_octree[]; };
+
+layout(binding = 2) uniform atomic_uint u_alloc_counter; // Counts how many allocations has been done.
+
+uniform uint u_start; // The index where the current level starts.
+uniform uint u_count; // How many nodes this level has.
+
+uniform uint u_alloc_start; // The last free index of the buffer, where to allocate.
+
+void main()
+{
+	uint id = gl_GlobalInvocationID.x;
+	if (id >= u_count)
+		return;
+
+	uint node_addr = u_start + id;
+
+	uint node_val = b_octree[int(node_addr)];
+	if ((node_val & 0x80000000u) != 0) // The node has been flagged.
+	{
+		uint child_addr = atomicCounterIncrement(u_alloc_counter);
+
+		child_addr *= 8;			 // Every node takes 8 cells.
+		child_addr += u_alloc_start; // The position of the child starts from the current free index.
+		child_addr |= 0x80000000u;   // Masks it.
+
+		b_octree[node_addr] = child_addr;
+	}
+}
+```
+
+### voxelizer/resources/shaders/svo_node_flag.comp
+```
+#version 430
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+// ======================================================================
+// Octree
+// ======================================================================
+
+layout(std430, binding = 1) buffer ssbo_octree { uint b_octree[]; };
+
+// ======================================================================
+// Main
+// ======================================================================
+
+layout(binding = 2, rgb10_a2ui) uniform uimageBuffer u_voxel_position;
+layout(binding = 3, rgba8) uniform imageBuffer u_voxel_color;
+
+uniform int u_max_level;
+uniform int u_level;
+
+void main()
+{
+	uint id = gl_GlobalInvocationID.x;
+	if (id >= imageSize(u_voxel_position))
+		return;
+
+	uvec4 position = imageLoad(u_voxel_position, int(id));
+
+	uint idx;
+	uint addr = 0;
+
+	for (int level = 1; level <= u_level; level++)
+	{
+		uint shift = u_max_level - level;
+		idx = 0;
+		idx |= ((position.x >> shift) & 1u);
+		idx |= ((position.y >> shift) & 1u) << 1u;
+		idx |= ((position.z >> shift) & 1u) << 2u;
+
+		if (level < u_level) {
+			addr = b_octree[addr + idx] & 0x7fffffff;
+		}
+	}
+
+	b_octree[addr + idx] = 0x80000000;
+}
+```
+
+### voxelizer/resources/shaders/svo_node_init.comp
+```
+#version 430
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+uniform uint u_start;
+uniform uint u_count;
+
+layout(std430, binding = 1) buffer ssbo_octree { uint b_octree[]; };
+
+void main()
+{
+	uint id = gl_GlobalInvocationID.x;
+	if (id >= u_count) {
+		return;
+	}
+
+	b_octree[u_start + id] = 0;
+}
+```
+
+### voxelizer/resources/shaders/svo_store_leaf.comp
+```
+#version 430
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 1) buffer ssbo_octree { uint b_octree[]; };
+uniform int u_max_level;
+
+layout(binding = 2, rgb10_a2ui) uniform uimageBuffer u_voxel_position;
+layout(binding = 3, rgba8) uniform imageBuffer u_voxel_color;
+
+uint pack_ui32(vec4 val)
+{
+	uint res = 0;
+	res |= (uint(val.r * 255.0) & 0xffu);
+	res |= (uint(val.g * 255.0) & 0xffu) << 8u;
+	res |= (uint(val.b * 255.0) & 0xffu) << 16u;
+	res |= (uint(val.a * 127.0) & 0x7fu) << 24u;
+	return res;
+}
+
+void main()
+{
+	uint id = gl_GlobalInvocationID.x;
+	if (id >= imageSize(u_voxel_position))
+		return;
+
+	uvec3 position = imageLoad(u_voxel_position, int(id)).rgb;
+	vec4 voxel_col = imageLoad(u_voxel_color, int(id));
+
+	uint idx;
+	uint addr = 0;
+	
+	for (int level = 1; level <= u_max_level; level++)
+	{
+		uint shift = u_max_level - level;
+		idx = 0;
+		idx |= ((position.x >> shift) & 1u);
+		idx |= ((position.y >> shift) & 1u) << 1u;
+		idx |= ((position.z >> shift) & 1u) << 2u;
+
+		if (level < u_max_level) {
+			addr = b_octree[addr + idx] & 0x7fffffff;
+		}
+	}
+
+	b_octree[addr + idx] = pack_ui32(voxel_col);
+}
+```
+
+### voxelizer/resources/shaders/svo_tracer.frag
+```
+#version 460
+
+#define EPS 3.552713678800501e-15
+
+#define MAX_DEPTH 32
+
+uniform uvec2 u_screen;
+
+uniform vec3 u_position;
+uniform mat4 u_projection;
+uniform mat4 u_view;
+
+layout(std430, binding = 0) buffer ssbo_octree { uint b_octree[]; };
+uniform uint u_start_address; // The starting index within the octree, this is useful whether we need to render a sub-portion of the octree.
+
+uniform vec3 u_octree_from;
+uniform vec3 u_octree_size;
+
+out vec4 f_color;
+
+void swap(inout float a, inout float b)
+{
+	float tmp = a;
+	a = b;
+	b = tmp;
+}
+
+vec4 octree_unpack_color(uint value)
+{
+	return vec4(value & 0xFFu, (value >> 8u) & 0xFFu, (value >> 16u) & 0xFFu, (value >> 24u) & 0x7Fu);
+}
+
+vec4 _3BIT_DEBUG[] = vec4[](
+	vec4(0, 0, 0, 1), // 000
+	vec4(0, 0, 1, 1), // 001
+	vec4(0, 1, 0, 1), // 010
+	vec4(0, 1, 1, 1), // 011
+	vec4(1, 0, 0, 1), // 100
+	vec4(1, 0, 1, 1), // 101
+	vec4(1, 1, 0, 1), // 110
+	vec4(1, 1, 1, 1)  // 111
+);
+
+// https://www.scratchapixel.com/lessons/3d-basic-rendering/minimal-ray-tracer-rendering-simple-shapes/ray-box-intersection
+bool ray_intersect(vec3 o, vec3 d, vec3 _min, vec3 _max, out float t_min, out float t_max)
+{
+	// x
+	t_min = (_min.x - o.x) / d.x;
+	t_max = (_max.x - o.x) / d.x;
+
+	if (t_min > t_max)
+		swap(t_min, t_max);
+
+	// y
+	float ty_min = (_min.y - o.y) / d.y;
+	float ty_max = (_max.y - o.y) / d.y;
+
+	if (ty_min > ty_max)
+		swap(ty_min, ty_max);
+
+	if (t_min > ty_max || ty_min > t_max)
+		return false;
+
+    if (ty_min > t_min) t_min = ty_min; 
+    if (ty_max < t_max) t_max = ty_max; 
+
+	// z
+	float tz_min = (_min.z - o.z) / d.z;
+	float tz_max = (_max.z - o.z) / d.z;
+
+	if (tz_min > tz_max)
+		swap(tz_min, tz_max);
+
+	if (t_min > tz_max || tz_min > t_max)
+		return false;
+
+    if (tz_min > t_min) t_min = tz_min; 
+    if (tz_max < t_max) t_max = tz_max;
+
+	return true;
+}
+
+struct Ray
+{
+	vec3 origin;
+	vec3 direction;
+};
+
+void ray_generate(out Ray ray)
+{
+	ray.origin = u_position;
+	
+	vec2 coord = ivec2(gl_FragCoord.xy) / vec2(u_screen);
+	coord = coord * 2.0f - 1.0f;
+	
+	vec3 d;
+
+	d = normalize(
+		mat3(inverse(u_view)) * (inverse(u_projection) * vec4(coord, 1, 1)).xyz
+	);
+	
+	d.x = abs(d.x) > EPS ? d.x : (d.x >= 0 ? EPS : -EPS);
+	d.y = abs(d.y) > EPS ? d.y : (d.y >= 0 ? EPS : -EPS);
+	d.z = abs(d.z) > EPS ? d.z : (d.z >= 0 ? EPS : -EPS);
+
+	ray.direction = d;
+}
+
+struct Stack {
+	uint node_address;
+	uint frontal_mask;
+	float t_min;
+	vec3 t_corner;
+} stack[MAX_DEPTH];
+
+bool ray_trace(Ray ray, vec3 _min, vec3 _max, out vec4 color, out float t_hit)
+{
+	float t_min, t_max;
+	if (!ray_intersect(ray.origin, ray.direction, _min, _max, t_min, t_max)) {
+		return false;
+	}
+
+	t_min = max(t_min, 0);
+
+	uint node_address = u_start_address;
+
+	int depth = 0;
+
+	vec3 size = (_max - _min);
+	
+	uint dir_mask = 0u;
+	if (ray.direction.x > 0) dir_mask ^= 1u;
+	if (ray.direction.y > 0) dir_mask ^= 2u;
+	if (ray.direction.z > 0) dir_mask ^= 4u;
+	
+	float scale = 0.5;
+	vec3 _step = scale * size;
+
+	vec3 center = (_min + _max) / 2;
+
+	vec3 t_center;
+	t_center = (center - ray.origin) / ray.direction; // Gets the t values for the center projected along the three axes.
+
+	uint frontal_mask = 0u;
+	if (t_center.x > t_min) frontal_mask ^= 1u;
+	if (t_center.y > t_min) frontal_mask ^= 2u;
+	if (t_center.z > t_min) frontal_mask ^= 4u;
+	
+	vec3 corner = center;
+	if ((frontal_mask & 1u) == 0) corner.x += sign(ray.direction.x) * _step.x;
+	if ((frontal_mask & 2u) == 0) corner.y += sign(ray.direction.y) * _step.y;
+	if ((frontal_mask & 4u) == 0) corner.z += sign(ray.direction.z) * _step.z;
+
+	uint value = 0;
+
+	vec3 t_corner = (corner - ray.origin) / ray.direction; // Gets the t values for the corner if projected on the ray.
+
+	while (true)
+	{
+		if (value == 0) {
+			value = b_octree[node_address + (frontal_mask ^ dir_mask)];
+		}
+
+		if ((value & 0x80000000u) != 0)
+		{
+			// PUSH
+			stack[depth].node_address = node_address;
+			stack[depth].frontal_mask = frontal_mask;
+			stack[depth].t_min = t_min;
+			stack[depth].t_corner = t_corner;
+
+			depth++;
+			scale /= 2.0;
+			_step = size * scale;
+			
+			node_address = value & 0x7FFFFFFFu;
+			t_center = t_corner - sign(ray.direction) * _step / ray.direction;
+
+			frontal_mask = 0;
+
+			if (t_center.x >= t_min)
+			{
+				frontal_mask ^= 1u;
+				t_corner.x -= sign(ray.direction.x) * _step.x / ray.direction.x;
+			}
+
+			if (t_center.y >= t_min)
+			{
+				frontal_mask ^= 2u;
+				t_corner.y -= sign(ray.direction.y) * _step.y / ray.direction.y;
+			}
+
+			if (t_center.z >= t_min)
+			{
+				frontal_mask ^= 4u;
+				t_corner.z -= sign(ray.direction.z) * _step.z / ray.direction.z;
+			}
+
+			value = 0;
+			continue;
+		} else if (value > 0) {
+			break;
+		}
+
+		while (true)
+		{
+			// ADVANCE
+			float t_corner_max = min(min(t_corner.x, t_corner.y), t_corner.z);
+			t_min = t_corner_max;
+
+			uint step_mask = 0;
+
+			if (t_corner.x <= t_corner_max)
+			{
+				step_mask ^= 1u;
+				t_corner.x += sign(ray.direction.x) * _step.x / ray.direction.x;
+			}
+
+			if (t_corner.y <= t_corner_max)
+			{	
+				step_mask ^= 2u;
+				t_corner.y += sign(ray.direction.y) * _step.y / ray.direction.y;
+			}
+			
+			if (t_corner.z <= t_corner_max)
+			{
+				step_mask ^= 4u;
+				t_corner.z += sign(ray.direction.z) * _step.z / ray.direction.z;
+			}
+
+			frontal_mask ^= step_mask;
+
+			if ((frontal_mask & step_mask) == 0) {
+				break;
+			}
+
+			// POP
+			depth--;
+			if (depth < 0)
+				return false;
+			scale *= 2.0;
+			_step = size * scale;
+
+			node_address = stack[depth].node_address;
+			frontal_mask = stack[depth].frontal_mask;
+			t_min = stack[depth].t_min;
+			t_corner = stack[depth].t_corner;
+		}
+		
+		value = 0;
+	}
+
+	color = octree_unpack_color(value);
+	color.rgb /= 255.0;
+	color.a /= 127.0;
+
+	t_hit = t_min;
+
+	return true;
+}
+
+void main()
+{
+	Ray ray;
+	ray_generate(ray);
+
+	vec4 color;
+	float t_hit;
+	bool hit = ray_trace(ray, u_octree_from, u_octree_from + u_octree_size, color, t_hit);
+
+	vec3 hit_pos = ray.origin + ray.direction * t_hit;
+	vec4 cs_hit_pos = u_projection * u_view * vec4(hit_pos, 1.0); // Hit position in clip space
+	gl_FragDepth = (cs_hit_pos.z / cs_hit_pos.w) / 2 + 0.5;
+
+	if (!hit) {
+		discard;
+	}
+
+	f_color = color;
+}
+```
+
+### voxelizer/resources/shaders/voxelize.frag
+```
+#version 460
+
+in vec3 g_position;
+in vec3 g_normal;
+in vec2 g_uv;
+in vec4 g_color;
+
+flat in int g_axis;
+
+layout (pixel_center_integer) in vec4 gl_FragCoord;
+
+layout(location = 6) uniform vec4 u_color;
+layout(location = 7) uniform sampler2D u_texture2d;
+
+uniform uint u_viewport;
+uniform uvec3 u_grid;
+
+uniform uint u_can_store;
+
+layout(binding = 1, rgb10_a2ui) uniform uimageBuffer u_voxel_list_position;
+layout(binding = 2, rgba8) uniform imageBuffer u_voxel_list_color;
+layout(binding = 3) uniform atomic_uint u_voxels_count;
+layout(binding = 4) uniform atomic_uint atomic_errors_counter;
+
+void assert(bool test)
+{
+	if (!test) {
+		atomicCounterIncrement(atomic_errors_counter);
+	}
+}
+
+bool is_inside_grid(uvec3 pos)
+{
+	return pos.x < u_grid.x && pos.y < u_grid.y && pos.z < u_grid.z;
+}
+
+void push_voxel(uvec3 pos, vec4 col)
+{
+	uint loc = atomicCounterIncrement(u_voxels_count);
+	if (u_can_store == 1)
+	{
+		imageStore(u_voxel_list_position, int(loc), uvec4(pos, 0));
+		imageStore(u_voxel_list_color, int(loc), col);
+	}
+}
+
+void main()
+{
+	uvec3 pos = uvec3(gl_FragCoord.xy, gl_FragCoord.z * u_viewport);
+
+	switch (g_axis)
+	{
+		case 0: // X
+			pos.xyz = pos.zyx;
+			break;
+		case 1: // Y
+			pos.xyz = pos.xzy;
+			break;
+		case 2: // Z
+			pos.xyz = uvec3(pos.xy, u_viewport - pos.z);
+			break;
+		default:
+			assert(false);
+			break;
+	}
+
+	// TODO color could be calculated better
+	// TODO uv y is inverted
+	vec4 col = g_color * u_color * texture(u_texture2d, vec2(g_uv.x, 1 - g_uv.y));
+
+	if (is_inside_grid(pos))
+	{
+		push_voxel(pos, vec4(col.xyz, 1));
+	}
+}
+```
+
+### voxelizer/resources/shaders/voxelize.geom
+```
+#version 460
+
+// Reference:
+// https://github.com/otaku690/SparseVoxelOctree/blob/master/WIN/SVO/shader/voxelize.geom.glsl
+
+layout (triangles) in;
+layout (triangle_strip, max_vertices = 3) out;
+
+in vec3 v_position[];
+in vec3 v_normal[];
+in vec2 v_uv[];
+in vec4 v_color[];
+
+out vec3 g_position;
+out vec3 g_normal;
+out vec2 g_uv;
+out vec4 g_color;
+
+flat out int g_axis;
+
+uniform mat4 u_x_ortho_projection;
+uniform mat4 u_y_ortho_projection;
+uniform mat4 u_z_ortho_projection;
+
+void main()
+{
+	// Project
+	vec3 face_normal = abs(normalize(cross(v_position[1] - v_position[0], v_position[2] - v_position[0])));
+	mat4 projection;
+
+	if (face_normal.x > face_normal.y && face_normal.x > face_normal.z)
+    {
+	    projection = u_x_ortho_projection;
+		g_axis = 0;
+	}
+	else if (face_normal.y > face_normal.x && face_normal.y > face_normal.z)
+    {
+	    projection = u_y_ortho_projection;
+		g_axis = 1;
+    }
+	else
+    {
+	    projection = u_z_ortho_projection;
+		g_axis = 2;
+	}
+
+	vec3 p0 = (projection * vec4(v_position[0], 1)).xyz;
+	vec3 p1 = (projection * vec4(v_position[1], 1)).xyz;
+	vec3 p2 = (projection * vec4(v_position[2], 1)).xyz;
+
+	// Emit
+	gl_Position = vec4(p0, 1);
+	g_position = p0;
+	g_normal = v_normal[0];
+	g_uv = v_uv[0];
+	g_color = v_color[0];
+	EmitVertex();
+	
+	gl_Position = vec4(p1, 1);
+	g_position = p1;
+	g_normal = v_normal[1];
+	g_uv = v_uv[1];
+	g_color = v_color[1];
+	EmitVertex();
+	
+	gl_Position = vec4(p2, 1);
+	g_position = p2;
+	g_normal = v_normal[2];
+	g_uv = v_uv[2];
+	g_color = v_color[2];
+	EmitVertex();
+
+	EndPrimitive();
+}
+```
+
+### voxelizer/resources/shaders/voxelize.vert
+```
+#version 460
+
+layout(location = 0) in vec3 position;
+layout(location = 1) in vec3 normal;
+layout(location = 2) in vec2 uv;
+layout(location = 3) in vec4 color;
+
+uniform mat4 u_mesh_transform;
+uniform mat4 u_transform;
+
+out vec3 v_position;
+out vec3 v_normal;
+out vec2 v_uv;
+out vec4 v_color;
+
+void main()
+{
+    gl_Position = u_transform * u_mesh_transform * vec4(position, 1);
+
+	v_position = gl_Position.xyz;
+	v_normal = normal;
+	v_uv = uv;
+	v_color = color;
+}
+```

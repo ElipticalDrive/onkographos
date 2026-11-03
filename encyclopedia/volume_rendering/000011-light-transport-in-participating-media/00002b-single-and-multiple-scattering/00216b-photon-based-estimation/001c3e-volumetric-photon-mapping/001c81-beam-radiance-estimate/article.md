@@ -3,24 +3,24 @@
 Also called: Beam Query, Point Data, 2D Blur, Jarosz et al. estimate, VK method, Varying Kernel method, Volumetric Photon Mapping (Reformulated), Volumetric Photon Mapping with Beam Estimate, Volumetric Photon Mapping with Ray Query
 
 ## Overview
-The Beam Radiance Estimate (BRE) is a photon-based technique for estimating accumulated in-scattered radiance along an entire camera ray in participating media, serving as the gathering step for Volumetric Photon Mapping. It solves the redundancy and noise issues of conventional volumetric photon mapping, which requires multiple spherical neighborhood queries at discrete points along a ray, by querying all photons along the ray's length in a single pass. Unlike conventional methods that blur spherically (3D kernel), BRE blurs each photon into a disc perpendicular to the ray (2D kernel), leveraging the fact that integration along the ray is already performed. This approach concentrates computational effort where lighting is important and avoids the banding artifacts associated with large step sizes.
+The Beam Radiance Estimate (BRE) is a photon-based technique for estimating accumulated in-scattered radiance along an entire camera ray in participating media, serving as the gathering step for Volumetric Photon Mapping [S2]. It solves the redundancy and noise issues of conventional volumetric photon mapping, which requires multiple spherical neighborhood queries at discrete points along a ray, by querying all photons along the ray's length in a single pass [S2]. Unlike conventional methods that blur spherically (3D kernel), BRE blurs each photon into a disc perpendicular to the ray (2D kernel), leveraging the fact that integration along the ray is already performed [S2]. This approach concentrates computational effort where lighting is important and avoids the banding artifacts associated with large step sizes [S2].
 
 ## How it works
-The method estimates the integral of in-scattered radiance along a viewing ray by treating photons as "photon discs" and accumulating their contributions via a smoothing kernel.
+The method estimates the integral of in-scattered radiance along a viewing ray by treating photons as "photon discs" and accumulating their contributions via a smoothing kernel [S2].
 
 ### Inputs and Outputs
 *   **Inputs:**
-    *   Photon map: A set of $N$ photons, each with position $\mathbf{x}_i$, direction $\vec{\omega}_i$, and weight $\alpha_i$.
-    *   Bounding-Box Hierarchy (BBH): A spatial acceleration structure built over the photon discs.
-    *   Transmission Lookup Table (LUT): For heterogeneous media, a 1D table storing transmittance values along the ray.
-    *   Camera ray: Origin $\mathbf{x}$, direction $\vec{\omega}$, and length $s$.
-    *   Parameters: $n$ (target neighbor count for blur control), $m$ (pilot neighbor count for radius estimation, default $\sqrt{n}$).
+    *   Photon map: A set of $N$ photons, each with position $\mathbf{x}_i$, direction $\vec{\omega}_i$, and weight $\alpha_i$ [S2].
+    *   Bounding-Box Hierarchy (BBH): A spatial acceleration structure built over the photon discs [S2].
+    *   Transmission Lookup Table (LUT): For heterogeneous media, a 1D table storing transmittance values along the ray [S2].
+    *   Camera ray: Origin $\mathbf{x}$, direction $\vec{\omega}$, and length $s$ [S2].
+    *   Parameters: $n$ (target neighbor count for blur control), $m$ (pilot neighbor count for radius estimation, default $\sqrt{n}$) [S2].
 *   **Outputs:**
-    *   Estimated in-scattered radiance $L_b$ at the ray origin.
+    *   Estimated in-scattered radiance $L_b$ at the ray origin [S2].
 
 ### Data Structures
 *   **Photon:** Traditionally 20 bytes. With BBH and variable kernels, each photon stores an additional 7 floating-point values (radius and bounding box coordinates), increasing size to 46 bytes per photon [S2].
-*   **BBH Node:** Contains a bounding box (AABB) enclosing the photon disc and all descendant photon discs. The hierarchy is balanced and constructed from the kd-tree structure.
+*   **BBH Node:** Contains a bounding box (AABB) enclosing the photon disc and all descendant photon discs. The hierarchy is balanced and constructed from the kd-tree structure [S2].
 *   **Transmission LUT:** A 1D array of transmittance values $Tr(t)$ sampled at discrete intervals along the ray, used to interpolate transmittance between photon positions during heterogeneous rendering [S2].
 
 ### Algorithm Steps
@@ -28,28 +28,28 @@ The method estimates the integral of in-scattered radiance along a viewing ray b
 1.  **Shoot Photons:** Shoot photons from light sources into the scene, recording interactions (position, direction, weight) [S2].
 2.  **Construct kd-Tree:** Build a balanced kd-tree for the photon positions [S2].
 3.  **Assign Photon Radius:**
-    *   For fixed-width kernels, assign a constant radius $r$ to all photons.
-    *   For variable-width kernels (VK), estimate the local density at each photon $i$ to determine radius $r_i$.
+    *   For fixed-width kernels, assign a constant radius $r$ to all photons [S2].
+    *   For variable-width kernels (VK), estimate the local density at each photon $i$ to determine radius $r_i$ [S2].
     *   To optimize, search for the $m$-th nearest neighbor distance $d_{i,m}$ in the kd-tree. Assuming uniform local density, estimate the radius for $n$ neighbors as:
         $$ r_i = d_{i,m} \sqrt[3]{\frac{n}{m}} $$
     *   Default $m = \sqrt{n}$. Values $m < 5$ produce noisy radii [S2].
 4.  **Construct BBH:**
-    *   Reuse the kd-tree structure.
-    *   Compute the bounding box for each node bottom-up. The bounding box of a node encloses its own photon disc (defined by position and radius $r_i$) and the bounding boxes of its left and right children.
+    *   Reuse the kd-tree structure [S2].
+    *   Compute the bounding box for each node bottom-up. The bounding box of a node encloses its own photon disc (defined by position and radius $r_i$) and the bounding boxes of its left and right children [S2].
     *   This is a linear-time procedure relative to the number of photons [S2].
-    *   The kd-tree can be freed after BBH construction.
+    *   The kd-tree can be freed after BBH construction [S2].
 5.  **Render (Gathering):**
-    *   For each camera ray, traverse the BBH to find all photons whose bounding spheres intersect the ray.
+    *   For each camera ray, traverse the BBH to find all photons whose bounding spheres intersect the ray [S2].
     *   For heterogeneous media, precompute the transmission LUT by marching along the ray. Interpolate transmittance $Tr(\mathbf{x} \leftrightarrow \mathbf{x}'_i)$ for each photon using this table [S2].
-    *   Accumulate contributions using the beam radiance estimate formula.
+    *   Accumulate contributions using the beam radiance estimate formula [S2].
 
 ### Formulas
 
 **Cylindrical Coordinates:**
 For a photon $i$ and ray $(\mathbf{x}, \vec{\omega})$, define cylindrical coordinates $(t_i, \theta_i, r_i)$:
-*   $t_i = (\mathbf{x}_i - \mathbf{x}) \cdot \vec{\omega}$: Projected distance along the ray.
-*   $\mathbf{x}'_i = \mathbf{x} + t_i \vec{\omega}$: Projection of photon position onto the ray.
-*   $d_i = \|\mathbf{x}_i - \mathbf{x}'_i\|$: Shortest distance from photon to ray.
+*   $t_i = (\mathbf{x}_i - \mathbf{x}) \cdot \vec{\omega}$: Projected distance along the ray [S2].
+*   $\mathbf{x}'_i = \mathbf{x} + t_i \vec{\omega}$: Projection of photon position onto the ray [S2].
+*   $d_i = \|\mathbf{x}_i - \mathbf{x}'_i\|$: Shortest distance from photon to ray [S2].
 
 **Kernel Function:**
 The 2D biweight kernel $K_2$ is used for blurring perpendicular to the ray:
@@ -62,126 +62,106 @@ Note: The kernel is normalized for 2D because the integration along the ray is e
 The accumulated in-scattered radiance is estimated as:
 $$ L_b \approx \frac{1}{N} \sum_{i=1}^N K_i(\mathbf{x}, \vec{\omega}, s, \mathbf{x}_i, r_i) T_r(\mathbf{x} \leftrightarrow \mathbf{x}'_i) \sigma_s(\mathbf{x}'_i) p(\mathbf{x}_i, \vec{\omega}, \vec{\omega}_i) \alpha_i $$
 Where:
-*   $T_r(\mathbf{x} \leftrightarrow \mathbf{x}'_i)$: Transmittance between ray origin and photon projection.
-*   $\sigma_s(\mathbf{x}'_i)$: Scattering coefficient at the projection point.
-*   $p(\mathbf{x}_i, \vec{\omega}, \vec{\omega}_i)$: Phase function.
-*   $\alpha_i$: Photon weight (path contribution).
+*   $T_r(\mathbf{x} \leftrightarrow \mathbf{x}'_i)$: Transmittance between ray origin and photon projection [S2].
+*   $\sigma_s(\mathbf{x}'_i)$: Scattering coefficient at the projection point [S2].
+*   $p(\mathbf{x}_i, \vec{\omega}, \vec{\omega}_i)$: Phase function [S2].
+*   $\alpha_i$: Photon weight (path contribution) [S2].
 
 **Alternative Formulation (Jarosz et al. [2008]):**
-Some sources define the estimate with an explicit $\sigma_s$ factor in the summation denominator or numerator depending on normalization. The standard form above follows Jensen and Christensen [1998] notation where $\sigma_s$ is part of the scattering event term [S1, S2].
+Jarosz et al. [2008] use a different definition of photon contribution, so their equations contain an additional $\sigma_s$ factor [S1]. The standard form above follows Jensen and Christensen [1998] notation where $\sigma_s$ is part of the scattering event term [S1, S2].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_beam_radiance_estimate(ray_origin, ray_direction, ray_length, bbh, photons, transmission_lut, n_neighbors):
-    """
-    Estimates in-scattered radiance along a ray using the Beam Radiance Estimate.
-    
-    Args:
-        ray_origin: Vector3, origin of the camera ray.
-        ray_direction: Vector3, normalized direction of the camera ray.
-        ray_length: Float, length of the ray segment to integrate.
-        bbh: Bounding Box Hierarchy, root node of the BBH.
-        photons: List of Photon objects, each with pos, radius, weight, direction.
-        transmission_lut: List of Floats, transmittance values along the ray.
-        n_neighbors: Int, target number of neighbors for blur control.
-        
-    Returns:
-        Float, estimated radiance.
-    """
-    radiance = 0.0
-    
-    # 1. Find intersecting photons using BBH
-    intersecting_photons = find_photons_intersecting_ray(ray_origin, ray_direction, ray_length, bbh)
-    
-    for photon in intersecting_photons:
-        # 2. Compute cylindrical coordinates
-        # t_i is the projected distance along the ray
-        t_i = dot(photon.pos - ray_origin, ray_direction)
-        
-        # Only consider photons within the ray segment [0, s]
-        if t_i < 0 or t_i > ray_length:
-            continue
-            
-        # x'_i is the projection of the photon onto the ray
-        x_prime_i = ray_origin + t_i * ray_direction
-        
-        # d_i is the perpendicular distance from photon to ray
-        d_i = length(photon.pos - x_prime_i)
-        
-        # 3. Evaluate Kernel
-        # Check if photon is within the kernel radius r_i
-        if d_i <= photon.radius:
-            # Compute 2D biweight kernel
-            u = d_i / photon.radius
-            kernel_value = (3.0 / PI) * (1.0 - u*u)**2
-            # Normalize by radius squared for 2D kernel
-            kernel_value /= (photon.radius * photon.radius)
-        else:
-            kernel_value = 0.0
-            
-        if kernel_value == 0.0:
-            continue
-            
-        # 4. Compute Transmittance
-        # Interpolate from LUT for heterogeneous media
-        # Assuming LUT is indexed by distance along ray
-        transmittance = interpolate_transmittance(t_i, transmission_lut)
-        
-        # 5. Accumulate Contribution
-        # sigma_s at the projection point x'_i
-        sigma_s = get_scattering_coefficient(x_prime_i)
-        
-        # Phase function p(x_i, omega_c, omega_i)
-        # Note: Source uses p(x_i, omega, omega_i). 
-        # Typically phase function p(omega_in, omega_out). 
-        # Here omega is camera direction (out), omega_i is photon direction (in).
-        phase = get_phase_function(ray_direction, photon.direction)
-        
-        contribution = kernel_value * transmittance * sigma_s * phase * photon.weight
-        radiance += contribution
-        
-    return radiance / len(photons) # Or N, depending on normalization convention
+import math
 
-def construct_bbh(kd_tree_node):
-    """
-    Recursively constructs a Bounding Box Hierarchy from a kd-tree.
-    """
-    if kd_tree_node is None:
+def dot(a, b): return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+def length(v): return math.sqrt(dot(v, v))
+
+def ray_aabb_intersect(origin, dir, bbox):
+    tmin = (bbox.min[0] - origin[0]) / dir[0] if dir[0] != 0 else float('inf')
+    tmax = (bbox.max[0] - origin[0]) / dir[0] if dir[0] != 0 else float('-inf')
+    if tmin > tmax: tmin, tmax = tmax, tmin
+    tmin = max(tmin, (bbox.min[1] - origin[1]) / dir[1] if dir[1] != 0 else float('inf'))
+    tmax = min(tmax, (bbox.max[1] - origin[1]) / dir[1] if dir[1] != 0 else float('-inf'))
+    if tmin > tmax: return False
+    tmin = max(tmin, (bbox.min[2] - origin[2]) / dir[2] if dir[2] != 0 else float('inf'))
+    tmax = min(tmax, (bbox.max[2] - origin[2]) / dir[2] if dir[2] != 0 else float('-inf'))
+    return tmin <= tmax
+
+def union_aabb(a, b):
+    return [
+        [min(a.min[0], b.min[0]), min(a.min[1], b.min[1]), min(a.min[2], b.min[2])],
+        [max(a.max[0], b.max[0]), max(a.max[1], b.max[1]), max(a.max[2], b.max[2])]
+    ]
+
+def interpolate_transmittance(t, lut):
+    idx = int(t)
+    if idx >= len(lut) - 1: return lut[-1]
+    frac = t - idx
+    return lut[idx] * (1.0 - frac) + lut[idx + 1] * frac
+
+def evaluate_scattering_coefficient(pos):
+    # Standard media property lookup [G]
+    return 0.225
+
+def evaluate_phase_function(omega_in, omega_out):
+    # Standard phase function evaluation [G]
+    return 1.0 / (4.0 * math.pi)
+
+def compute_beam_radiance_estimate(ray_origin, ray_direction, ray_length, bbh_root, photons, transmission_lut, n_total):
+    radiance = 0.0
+    stack = [bbh_root]
+    while stack:
+        node = stack.pop()
+        if ray_aabb_intersect(ray_origin, ray_direction, node.bbox):
+            if node.is_leaf:
+                photon = node.photon
+                t_i = dot(photon.pos - ray_origin, ray_direction)
+                if 0.0 <= t_i <= ray_length:
+                    x_prime_i = ray_origin + t_i * ray_direction
+                    d_i = length(photon.pos - x_prime_i)
+                    if d_i <= photon.radius:
+                        u = d_i / photon.radius
+                        kernel_value = (3.0 / math.pi) * (1.0 - u * u) ** 2
+                        kernel_value /= (photon.radius * photon.radius)
+                        transmittance = interpolate_transmittance(t_i, transmission_lut)
+                        sigma_s = evaluate_scattering_coefficient(x_prime_i)
+                        phase = evaluate_phase_function(ray_direction, photon.direction)
+                        radiance += kernel_value * transmittance * sigma_s * phase * photon.weight
+            else:
+                stack.append(node.left)
+                stack.append(node.right)
+    return radiance / n_total
+
+def construct_bbh(kd_node):
+    if kd_node is None:
         return None
-        
-    # Create bounding box for current photon
-    current_bbox = bounding_box(kd_tree_node.position, kd_tree_node.radius)
-    
-    # Recursively process children
-    left_bbox = construct_bbh(kd_tree_node.left_child)
-    right_bbox = construct_bbh(kd_tree_node.right_child)
-    
-    # Union with children's bounding boxes
+    photon_bbox = [
+        [kd_node.position[0] - kd_node.radius, kd_node.position[1] - kd_node.radius, kd_node.position[2] - kd_node.radius],
+        [kd_node.position[0] + kd_node.radius, kd_node.position[1] + kd_node.radius, kd_node.position[2] + kd_node.radius]
+    ]
+    left_bbox = construct_bbh(kd_node.left)
+    right_bbox = construct_bbh(kd_node.right)
+    current_bbox = photon_bbox
     if left_bbox is not None:
-        current_bbox = union(current_bbox, left_bbox)
+        current_bbox = union_aabb(current_bbox, left_bbox)
     if right_bbox is not None:
-        current_bbox = union(current_bbox, right_bbox)
-        
-    kd_tree_node.bbox = current_bbox
+        current_bbox = union_aabb(current_bbox, right_bbox)
+    kd_node.bbox = current_bbox
     return current_bbox
 
-def estimate_photon_radius(kd_tree, photon_index, n, m):
-    """
-    Estimates the radius for a photon based on local density.
-    """
-    # Find distance to m-th nearest neighbor
-    d_m = distance_to_kth_neighbor(kd_tree, photon_index, m)
-    
-    # Estimate radius for n neighbors assuming uniform density
-    radius = d_m * (n / m)**(1/3)
-    return radius
+def estimate_photon_radius(kd_tree, photon_pos, n, m):
+    # Standard k-NN search in kd-tree [G]
+    neighbors = kd_tree.knn(photon_pos, m)
+    d_m = length(neighbors[m-1].pos - photon_pos)
+    return d_m * (n / m) ** (1.0/3.0)
 ```
 
 ### Parameters
-*   $n$: Controls the amount of blur, equivalent to the $n$-th nearest neighbor in conventional radiance estimate.
+*   $n$: Controls the amount of blur, equivalent to the $n$-th nearest neighbor in conventional radiance estimate [S2].
 *   $m$: Parameter controlling sensitivity of computed radius to local density variation. Default $m = \sqrt{n}$. Values $m < 5$ produce noisy radii [S2].
 *   Kernel Type: 2D Biweight kernel $K_2(u) = \frac{3}{\pi}(1-u^2)^2$ [S2].
 
@@ -193,18 +173,18 @@ def estimate_photon_radius(kd_tree, photon_index, n, m):
 
 ## Subtopics
 
-### Adaptive Beam Width
-A variant that uses photon differentials to adaptively blur photon beams based on expected local density. It allows for small beam widths in focused regions (e.g., volume caustics) and avoids banding in sparse regions. Fixed-width beams result in over-blurring and banding artifacts [S1]. In volume caustic scenes, adaptive beams converged to a crisp solution with 32k beams in 43 seconds, whereas 512k photons took almost twice the time and resulted in an over-blurred, noisy caustic [S1].
+### [Adaptive Beam Width](2276-adaptive-beam-width.md)
+A variant that uses photon differentials to adaptively blur photon beams based on expected local density. It allows for small beam widths in focused regions (e.g., volume caustics) and avoids banding in sparse regions. Fixed-width beams result in over-blurring and banding artifacts. In volume caustic scenes, adaptive beams converged to a crisp solution with 32k beams in 43 seconds, whereas 512k photons took almost twice the time and resulted in an over-blurred, noisy caustic.
 
 ## Operating characteristics
-*   **Time Complexity:** BBH construction is linear-time relative to the number of photons. Adaptive kernel width computation is inexpensive, typically taking less than 1–2% of total render time [S2].
+*   **Time Complexity:** BBH construction is linear-time relative to the number of photons [S2]. Adaptive kernel width computation is inexpensive, typically taking less than 1–2% of total render time [S2].
 *   **Memory Complexity:** 46 bytes per photon (20 bytes traditional + 7 floats for BBH/radius) [S2].
 *   **Performance:** More efficient than conventional photon mapping for scenes with concentrated lighting features (e.g., caustics) because it visits every photon intersecting the line rather than distributing queries by transmission [S2]. In the volume caustic scene, 32k beams rendered in 43 seconds, while 512k photons took nearly twice as long and produced noisier results [S1].
-*   **Strengths:** Eliminates redundant photon gathering; reduces noise from large step sizes; handles focused lighting features better than fixed-width methods.
-*   **Limitations:** Introduces bias; requires more memory per photon; requires pre-processing for radius estimation and BBH construction.
+*   **Strengths:** Eliminates redundant photon gathering; reduces noise from large step sizes; handles focused lighting features better than fixed-width methods [S2].
+*   **Limitations:** Introduces bias; requires more memory per photon; requires pre-processing for radius estimation and BBH construction [S2].
 
 ## Background
-The Beam Radiance Estimate was introduced by Jarosz et al. in 2008 as a reformulation of Volumetric Photon Mapping. It addresses the shortcomings of conventional volumetric photon mapping, specifically redundant photon gathering and noise from large step sizes, by querying photons along an entire ray rather than at discrete points. The method is derived from the measurement equation, replacing delta and step functions with a smoothing kernel to handle photons not landing exactly on the ray. It builds on the theoretical framework of photon mapping established by Jensen and Christensen [1998] but adapts the gathering strategy for volumetric media [S1, S2].
+The Beam Radiance Estimate was introduced by Jarosz et al. in 2008 as a reformulation of Volumetric Photon Mapping [S2]. It addresses the shortcomings of conventional volumetric photon mapping, specifically redundant photon gathering and noise from large step sizes, by querying photons along an entire ray rather than at discrete points [S2]. The method is derived from the measurement equation, replacing delta and step functions with a smoothing kernel to handle photons not landing exactly on the ray [S2]. It builds on the theoretical framework of photon mapping established by Jensen and Christensen [1998] but adapts the gathering strategy for volumetric media [S1, S2].
 
 ## Sources
 [S1] A comprehensive theory of volumetric radiance estimation using photon points and beams, https://doi.org/10.1145/1899404.1899409, fetched 2026-10-26

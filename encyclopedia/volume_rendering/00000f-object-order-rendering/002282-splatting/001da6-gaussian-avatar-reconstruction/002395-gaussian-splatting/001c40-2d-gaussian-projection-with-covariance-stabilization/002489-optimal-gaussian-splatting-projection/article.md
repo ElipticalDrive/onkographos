@@ -1,0 +1,281 @@
+# Optimal Gaussian Splatting Projection
+
+Also called: Central Radial Projection, Optimal Projection, Optimal Projection Strategy, Tangent Plane Projection
+
+## Overview
+Optimal Gaussian Splatting Projection is a method for rendering 3D Gaussians that minimizes projection error by projecting each Gaussian onto a plane tangent to the line connecting the Gaussian mean to the camera center, rather than a fixed image plane [S1]. It sets itself apart from standard 3D-GS [17] by using a unique tangent plane for each Gaussian based on its position relative to the camera, significantly reducing artifacts like blurriness and needle-like structures, particularly in wide-field-of-view or short focal length scenarios [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 3D Gaussians, each defined by a mean position $\boldsymbol{\mu} \in \mathbb{R}^3$, a covariance matrix $\boldsymbol{\Sigma} \in \mathbb{R}^{3 \times 3}$, and other attributes (opacity, color). The camera parameters (center $\mathbf{C}$, orientation, and projection model) are also required.
+*   **Output:** A 2D screen-space covariance matrix $\boldsymbol{\Sigma}_{2D}$ and a 2D mean position $\mathbf{m}_{2D}$ for each Gaussian, ready for rasterization.
+
+**Data Structures:**
+The method operates on the standard 3D Gaussian representation. No new complex data structures are introduced, but the processing pipeline requires temporary storage for the tangent plane basis vectors and the projected 2D covariance before transforming back to screen space.
+
+**Steps:**
+1.  **Compute Direction Vector:** For each Gaussian with mean $\boldsymbol{\mu}$ and camera center $\mathbf{C}$, compute the direction vector $\mathbf{d}$ from the Gaussian to the camera:
+    $$ \mathbf{d} = \mathbf{C} - \boldsymbol{\mu} $$
+2.  **Define Tangent Plane:** Construct a projection plane that is perpendicular to $\mathbf{d}$ and passes through $\boldsymbol{\mu}$. This plane is tangent to the line connecting $\boldsymbol{\mu}$ and $\mathbf{C}$ [S1].
+3.  **Project to Tangent Plane:** Project the 3D Gaussian's covariance $\boldsymbol{\Sigma}$ onto this tangent plane. This involves transforming $\boldsymbol{\Sigma}$ into the local coordinate system of the tangent plane. Let $\mathbf{J}$ be the Jacobian of the projection from the tangent plane to the image plane (or camera space, depending on the specific camera model implementation). The projected 2D covariance $\boldsymbol{\Sigma}'_{2D}$ in the tangent plane's local coordinates is approximated by:
+    $$ \boldsymbol{\Sigma}'_{2D} = \mathbf{J} \boldsymbol{\Sigma} \mathbf{J}^T $$
+    *Note: The sources describe the projection as minimizing error by projecting along the direction $\mathbf{d}$ onto the perpendicular plane [S1]. The exact transformation from the 3D covariance to the 2D tangent plane covariance follows the standard linearization of the projection function, but applied to this specific tangent plane geometry rather than the standard z=1 plane.*
+4.  **Transform to Image/Camera Space:** Transform the projected Gaussian from the tangent plane back to the standard image or camera coordinate system for rasterization. This step involves applying the inverse of the tangent plane's local basis transformation and then the standard camera projection matrix [S1].
+5.  **Stabilize Covariance:** Apply covariance stabilization (e.g., adding a small epsilon $\epsilon$ to the diagonal) to ensure positive definiteness, as described in the parent method [1198-2d-gaussian-projection-with-covariance-stabilization.md].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def optimal_gaussian_projection(gaussian_means, gaussian_covariances, camera_center, camera_matrix):
+    """
+    Projects 3D Gaussians onto tangent planes to minimize projection error.
+    
+    Args:
+        gaussian_means: Tensor of shape (N, 3), positions of N Gaussians.
+        gaussian_covariances: Tensor of shape (N, 3, 3), covariances of N Gaussians.
+        camera_center: Tensor of shape (3,), camera center position C.
+        camera_matrix: Tensor of shape (3, 3), intrinsic camera matrix K.
+        
+    Returns:
+        means_2d: Tensor of shape (N, 2), projected 2D means.
+        covs_2d: Tensor of shape (N, 2, 2), projected 2D covariances.
+    """
+    N = gaussian_means.shape[0]
+    means_2d = torch.zeros((N, 2), device=gaussian_means.device)
+    covs_2d = torch.zeros((N, 2, 2), device=gaussian_means.device)
+    
+    # Step 1: Compute direction vector from Gaussian mean to camera center
+    # d = C - mu
+    directions = camera_center - gaussian_means  # Shape (N, 3)
+    
+    # Step 2 & 3: Project onto tangent plane
+    # The tangent plane is perpendicular to 'directions' and passes through 'gaussian_means'.
+    # We need to construct a local basis for this tangent plane for each Gaussian.
+    # Let the normal to the tangent plane be n = directions / ||directions||.
+    
+    norms = torch.norm(directions, dim=1, keepdim=True)
+    normals = directions / norms  # Shape (N, 3)
+    
+    # Construct local basis vectors (u, v) for the tangent plane.
+    # We need two orthogonal vectors to u, v that are also orthogonal to n.
+    # A simple way is to use the cross product with a reference vector.
+    # Reference vector: avoid parallelism with n. Use (0,0,1) unless n is close to it.
+    ref = torch.tensor([0.0, 0.0, 1.0], device=gaussian_means.device).unsqueeze(0).expand(N, -1)
+    
+    # Check if n is parallel to ref
+    dot_ref = torch.abs(torch.sum(normals * ref, dim=1, keepdim=True))
+    # If dot_ref is close to 1, use a different reference, e.g., (0,1,0)
+    # For simplicity in this generic implementation, we assume general position or handle edge case.
+    # [G] In practice, one might use a robust basis construction like Gram-Schmidt.
+    
+    tangent_u = torch.cross(normals, ref)
+    tangent_u = tangent_u / torch.norm(tangent_u, dim=1, keepdim=True)
+    tangent_v = torch.cross(normals, tangent_u)
+    tangent_v = tangent_v / torch.norm(tangent_v, dim=1, keepdim=True)
+    
+    # Local basis matrix B: columns are u, v, n. Shape (N, 3, 3)
+    # B = [u, v, n]
+    B = torch.stack([tangent_u, tangent_v, normals], dim=1) # Shape (N, 3, 3)
+    
+    # Transform covariance to local tangent plane coordinates
+    # Sigma_local = B^T * Sigma * B
+    # This rotates the covariance into the frame where the third axis is the normal n.
+    # The projection onto the tangent plane effectively discards the component along n.
+    # However, the standard 3D-GS projection linearizes the projection function.
+    # Here, we project the 3D Gaussian onto the 2D tangent plane.
+    # The 2D covariance in the tangent plane is the top-left 2x2 block of Sigma_local?
+    # No, the projection is orthogonal onto the plane. The covariance on the plane is the projection of the 3D covariance.
+    # If we align the plane with the XY axes of the local frame, the 2D covariance is the top-left 2x2 of B^T Sigma B.
+    
+    # Compute B^T @ Sigma @ B for all Gaussians
+    # Sigma is (N, 3, 3). B is (N, 3, 3).
+    # Sigma_local = B^T @ Sigma @ B
+    Sigma_local = torch.bmm(torch.bmm(B.transpose(1, 2), gaussian_covariances), B)
+    
+    # The 2D covariance in the tangent plane is the top-left 2x2 block
+    covs_tangent = Sigma_local[:, :2, :2] # Shape (N, 2, 2)
+    
+    # Step 4: Transform to Image Space
+    # The tangent plane is at distance ||d|| from the camera center.
+    # We need to project these 2D points from the tangent plane to the image plane.
+    # The tangent plane is perpendicular to the view direction for each Gaussian.
+    # This is a central projection from C to the image plane.
+    # However, the standard 3D-GS assumes a perspective projection from C to the image plane.
+    # The "Optimal" method projects to the tangent plane first, then to the image plane.
+    # The transformation from the tangent plane to the image plane is a perspective projection.
+    # Let the tangent plane be at distance Z_t = ||d|| from C.
+    # The 2D coordinates on the tangent plane (u, v) correspond to 3D points P_t = mu + u*u_vec + v*v_vec.
+    # We then project P_t to the image plane using K.
+    # But wait, the mean mu is already on the tangent plane.
+    # The 2D mean on the tangent plane is (0,0) in the local basis?
+    # No, the Gaussian mean mu is the center. In the local basis, mu is at (0,0,0) relative to itself?
+    # The local basis is centered at mu. So the mean in the tangent plane is (0,0).
+    # We need to project the point mu to the image plane to get the 2D mean.
+    
+    # Project mean mu to image plane
+    # Homogeneous coordinates of mu relative to camera
+    # Assuming camera center is origin for simplicity of projection logic, or use world-to-camera transform.
+    # Let's assume gaussian_means are in world space and we have a world-to-camera transform.
+    # For this pseudocode, we assume gaussian_means are already in camera space (C at origin).
+    # If C is not at origin, we must transform mu to camera space first.
+    # [G] Standard 3D-GS transforms points to camera space. We assume inputs are in camera space.
+    
+    # If inputs are in camera space, C = (0,0,0).
+    # Then directions = -mu.
+    # normals = -mu / ||mu||.
+    # The tangent plane passes through mu and is perpendicular to -mu (i.e., normal is -mu).
+    # The projection of mu to the image plane is standard perspective projection.
+    
+    # Let's assume standard camera space: C=(0,0,0).
+    # mu = gaussian_means
+    # d = -mu
+    # normals = -mu / ||mu||
+    
+    # Re-calculate normals if C is not origin (not implemented here for brevity, assuming camera space)
+    # If C is not origin, transform mu to camera space: mu_cam = R * mu + t
+    # d_cam = -mu_cam
+    # normals_cam = -mu_cam / ||mu_cam||
+    
+    # For this pseudocode, we assume gaussian_means are in camera space.
+    mu_cam = gaussian_means
+    d_cam = -mu_cam
+    norms_cam = torch.norm(d_cam, dim=1, keepdim=True)
+    normals_cam = -d_cam / norms_cam
+    
+    # Reconstruct basis for camera space
+    ref = torch.tensor([0.0, 0.0, 1.0], device=gaussian_means.device).unsqueeze(0).expand(N, -1)
+    tangent_u_cam = torch.cross(normals_cam, ref)
+    tangent_u_cam = tangent_u_cam / torch.norm(tangent_u_cam, dim=1, keepdim=True)
+    tangent_v_cam = torch.cross(normals_cam, tangent_u_cam)
+    tangent_v_cam = tangent_v_cam / torch.norm(tangent_v_cam, dim=1, keepdim=True)
+    B_cam = torch.stack([tangent_u_cam, tangent_v_cam, normals_cam], dim=1)
+    
+    # Sigma_local_cam = B_cam^T @ Sigma @ B_cam
+    Sigma_local_cam = torch.bmm(torch.bmm(B_cam.transpose(1, 2), gaussian_covariances), B_cam)
+    covs_tangent_cam = Sigma_local_cam[:, :2, :2]
+    
+    # Project mean to image plane
+    # mu_cam = (x, y, z). Image plane is z=1 (or focal length f).
+    # x_img = x / z * f, y_img = y / z * f
+    # [G] Assuming unit focal length for simplicity, or incorporate f into K.
+    # Let's use K.
+    # Homogeneous point: [x, y, z, 1]
+    # Projected: K * [x/z, y/z, 1]^T ? No, K * [x, y, z]^T then divide by z.
+    
+    # Homogeneous coordinates in camera space
+    ones = torch.ones((N, 1), device=gaussian_means.device)
+    mu_hom = torch.cat([mu_cam, ones], dim=1) # (N, 4)
+    
+    # Project to image plane
+    # P_img = K @ mu_cam_hom
+    # But mu_cam_hom is (N, 4). K is (3,3).
+    # We need to handle the homogeneous division.
+    # x_img = (K[0,0]*x + K[0,1]*y + K[0,2]*z) / z
+    # y_img = (K[1,0]*x + K[1,1]*y + K[1,2]*z) / z
+    
+    # Simplified: assume K is diagonal [f, 0, cx; 0, f, cy; 0, 0, 1]
+    # x_img = f * x / z + cx
+    # y_img = f * y / z + cy
+    
+    # Extract x, y, z
+    x = mu_cam[:, 0]
+    y = mu_cam[:, 1]
+    z = mu_cam[:, 2]
+    
+    # Avoid division by zero
+    z_safe = torch.clamp(z, min=1e-5)
+    
+    # Get focal length and principal point from K
+    f_x = camera_matrix[0, 0]
+    f_y = camera_matrix[1, 1]
+    c_x = camera_matrix[0, 2]
+    c_y = camera_matrix[1, 2]
+    
+    means_2d[:, 0] = f_x * (x / z_safe) + c_x
+    means_2d[:, 1] = f_y * (y / z_safe) + c_y
+    
+    # Transform covariance to image plane
+    # The covariance on the tangent plane is covs_tangent_cam.
+    # This covariance is in the basis (u, v) of the tangent plane.
+    # We need to map this to the image plane.
+    # The mapping from the tangent plane to the image plane is a perspective projection.
+    # The Jacobian of the projection from the tangent plane to the image plane is needed.
+    # Let the tangent plane point be P_t = mu + u*u + v*v.
+    # Project P_t to image: P_img = K * P_t / P_t.z
+    # The Jacobian J = d(P_img) / d(u, v) at u=0, v=0.
+    # P_t = mu + u*u + v*v.
+    # d(P_t)/du = u, d(P_t)/dv = v.
+    # d(P_img)/d(P_t) = (1/z) * (K - P_img * [0,0,1]) ?
+    # Standard perspective projection Jacobian for a point (x,y,z) to (x/z, y/z):
+    # J_proj = [1/z, 0, -x/z^2; 0, 1/z, -y/z^2]
+    # But we are projecting from the tangent plane basis.
+    # The 3D point on the tangent plane corresponding to 2D coords (u,v) is P_t(u,v) = mu + u*u_vec + v*v_vec.
+    # The image point is P_img(u,v) = K * P_t(u,v) / P_t(u,v).z
+    # We need the Jacobian of P_img with respect to (u,v) at (0,0).
+    # dP_img/du = (dP_img/dP_t) * (dP_t/du) = J_proj * u_vec
+    # dP_img/dv = J_proj * v_vec
+    
+    # J_proj for point mu_cam = (x,y,z):
+    # J_proj = [1/z, 0, -x/z^2; 0, 1/z, -y/z^2]
+    # u_vec = tangent_u_cam
+    # v_vec = tangent_v_cam
+    
+    # Compute J_proj for each Gaussian
+    # J_proj is (2, 3)
+    # [G] Constructing J_proj explicitly
+    J_proj = torch.zeros((N, 2, 3), device=gaussian_means.device)
+    J_proj[:, 0, 0] = 1 / z_safe
+    J_proj[:, 1, 1] = 1 / z_safe
+    J_proj[:, 0, 2] = -x / (z_safe**2)
+    J_proj[:, 1, 2] = -y / (z_safe**2)
+    
+    # u_vec and v_vec are (N, 3)
+    # J_tangent_to_image = J_proj @ B_cam[:, :, :2]  # (N, 2, 3) @ (N, 3, 2) = (N, 2, 2)
+    # B_cam[:, :, :2] contains u and v columns
+    J_tangent = torch.bmm(J_proj, B_cam[:, :, :2])
+    
+    # Final 2D covariance in image space
+    # Sigma_2D = J_tangent @ covs_tangent_cam @ J_tangent^T
+    covs_2d = torch.bmm(torch.bmm(J_tangent, covs_tangent_cam), J_tangent.transpose(1, 2))
+    
+    # Step 5: Stabilize
+    # Add epsilon to diagonal
+    epsilon = 1e-3
+    covs_2d[:, 0, 0] += epsilon
+    covs_2d[:, 1, 1] += epsilon
+    
+    return means_2d, covs_2d
+```
+
+**Parameters:**
+*   **Focal Length:** The method is tested with focal lengths scaled to 0.2 and 0.3 times the original focal length to simulate wide-field-of-view scenarios [S1].
+*   **Epsilon:** A small value added to the diagonal of the 2D covariance for numerical stability (value not specified in sources, typical values in 3D-GS are around $10^{-3}$) [S1, 1198-2d-gaussian-projection-with-covariance-stabilization.md].
+
+**Edge Cases and Pitfalls:**
+*   **Training Time:** The method incurs a slight increase in training time due to the additional transformation step from the tangent plane to the image plane [S1].
+*   **Parallel Normals:** When constructing the tangent plane basis, if the direction vector $\mathbf{d}$ is parallel to the reference vector (e.g., z-axis), the cross product becomes zero. A robust implementation must handle this by choosing a different reference vector [G].
+*   **Division by Zero:** The perspective projection involves division by the z-coordinate. Points with $z \le 0$ (behind the camera) must be handled or excluded [G].
+
+## Operating characteristics
+*   **Time Complexity:** The algorithm's time complexity remains unchanged compared to 3D-GS because it avoids dense point sampling [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** The method significantly reduces blurriness and artifacts compared to the original projection method, particularly in settings with short focal lengths [S1]. It outperforms original 3D-GS across various scenes in terms of PSNR, SSIM, and LPIPS metrics when tested with focal length reduction ratios of $\times 0.2$ and $\times 0.3$ [S1].
+*   **Strengths:** Reduces projection error, minimizes artifacts like needle-like structures and cloud-like large Gaussians at image edges, and is adaptable to various camera models (pinhole, fisheye, panorama) [S1].
+*   **Limitations:** Slight increase in training time due to the additional transformation step [S1].
+
+## Background
+*   **Origin:** The method was proposed in the paper "On the Error Analysis of 3D Gaussian Splatting and an Optimal Projection Strategy" [S1].
+*   **History:** It was developed to address the issue of projection errors in 3D Gaussian Splatting (3D-GS) [17], which tend to escalate with the expansion of the field of view and reduction in focal length [S1].
+*   **Usage:** Implemented in PyTorch based on 3D-GS [17] with custom CUDA kernels for rasterization [S1]. Tested on 13 real scenes from the 3D-GS dataset, including Mip-NeRF360 [2], Tanks & Temples [18], and others [S1].
+
+## Subtopics
+
+### Adaptive Bounding Box Computation
+Computes the bounding box for each Gaussian splat to optimize rasterization. [Adaptive Bounding Box Computation](1206-adaptive-bounding-box-computation.md)
+
+### Render Means
+Renders the final image using the projected Gaussians. [Render Means](2070-render-means.md)
+
+## Sources
+[S1] On the Error Analysis of 3D Gaussian Splatting and an Optimal Projection Strategy, https://doi.org/10.1007/978-3-031-72643-9_15, fetched 2026-10-29
