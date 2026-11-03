@@ -1,0 +1,832 @@
+5. GPU Ray Marching - Free download as PDF File (.pdf), Text File (.txt) or view presentation slides online. 
+
+GPU Ray Marching Techniques | PDF | Shader | Computer Graphics
+Skip to main content
+Open navigation menu
+enChange Language, English
+Upload
+Sign in
+Sign in
+GPU Ray Marching Techniques
+0 ratings0% found this document useful (0 votes)
+24 views23 pages
+AI-enhanced title
+Uploaded by
+huwkigane
+License
+© All Rights Reserved
+We take content rights seriously. If you suspect this is your content, claim it here.
+Available Formats
+Download as PDF, TXT or read online on Scribd
+Download
+Advanced Graphics
+GPU Ray Marching
+Alex Benton, University of Cambridge – alex@[Link]
+1
+Supported in part by Google UK, Ltd
+GPU Ray-tracing
+Ray tracing 101: “Choose the color of
+the pixel by firing a ray through and
+seeing what it hits.”
+Ray tracing 102:
+“Let the pixel make up
+its own mind.”
+2
+GPU Ray-tracing
+1. Use a minimal fragment shader
+(no transforms)
+2. Set up OpenGL with minimal
+geometry, a single quad
+3. Bind a vec2 to each vertex
+specifying ‘texture’ coordinates
+4. Implement raytracing in GLSL
+per pixel:
+a. For each pixel, compute the ray
+from the eye through the pixel,
+using the interpolated texture
+coordinate to identify the pixel
+b. Run the ray tracing algorithm
+for every ray
+3
+GPU Ray-tracing
+// Window dimensions vec3 getRayDir(
+uniform vec2 iResolution; vec3 camDir,
+vec3 camUp,
+// Camera position vec2 texCoord) {
+uniform vec3 iRayOrigin; vec3 camSide = normalize(
+cross(camDir, camUp));
+// Camera facing direction vec2 p = 2.0 * texCoord - 1.0;
+uniform vec3 iRayDir; p.x *= iResolution.x
+/ iResolution.y;
+// Camera up direction return normalize(
+uniform vec3 iRayUp; p.x * camSide
++ p.y * camUp
+// Distance to viewing plane + iPlaneDist * camDir);
+uniform float iPlaneDist; }
+// ‘Texture’ coordinate of each
+// vertex, interpolated across
+// fragments (0,0) → (1,1)
+in vec2 texCoord;
+4
+GPU Ray-tracing
+Hit traceSphere(vec3 rayorig, vec3 raydir, vec3 pos, float radius) {
+float OdotD = dot(rayorig - pos, raydir);
+float OdotO = dot(rayorig - pos, rayorig - pos);
+float base = OdotD * OdotD - OdotO + radius * radius;
+if (base >= 0) {
+float root = sqrt(base);
+float t1 = -OdotD + root;
+float t2 = -OdotD - root;
+if (t1 >= 0 || t2 >= 0) {
+float t = (t1 < t2 && t1 >= 0) ? t1 : t2;
+vec3 pt = rayorig + raydir * t;
+vec3 normal = normalize(pt - pos);
+return Hit(pt, normal, t);
+}
+}
+return Hit(vec3(0), vec3(0), -1);
+}
+5
+An alternative to raytracing:
+Ray-marching
+An alternative to classic ray-tracing is
+ray-marching, in which we take a
+series of finite steps along the ray until
+we strike an object or exceed the
+number of permitted steps.
+● Also sometimes called ray casting
+● Scene objects only need to answer,
+“has this ray hit you? y/n”
+● Great solution for data like height fields
+● Unfortunately…
+○ often involves many steps
+○ too large a step size can lead to lost
+intersections (step over the object)
+○ an if() test in the heart of a for() loop
+is very hard for the GPU to optimize
+6
+GPU Ray-marching:
+Signed Distance Fields
+Ray-marching can be dramatically
+improved, to impressive realtime
+GPU performance, using signed
+distance fields:
+1. Fire ray into scene
+2. At each step, measure distance field
+function: d(p) = [distance to nearest
+object in scene]
+3. Advance ray along ray heading by
+distance d, because the nearest
+intersection can be no closer than d
+This is also sometimes called ‘sphere tracing’. Early paper:
+[Link]
+7
+Signed distance functions
+An SDF returns the minimum possible float sphere(vec3 p, float r) {
+distance from point p to the surface return length(p) - r;
+}
+it describes.
+The sphere, for instance, is the distance float cube(vec3 p, vec3 dim) {
+from p to the center of the sphere, vec3 d = abs(p) - dim;
+minus the radius. return min(max(d.x,
+max(d.y, d.z)), 0.0)
+Negative values indicate a sample + length(max(d, 0.0));
+inside the surface, and still express }
+absolute distance to the surface.
+float cylinder(vec3 p, vec3 dim)
+{
+return length([Link] - [Link])
+- dim.z;
+}
+float torus(vec3 p, vec2 t) {
+vec2 q = vec2(
+length([Link]) - t.x, p.y);
+return length(q) - t.y;
+}
+[Link] 8
+Raymarching signed distance fields
+vec3 raymarch(vec3 pos, vec3 raydir) {
+int step = 0;
+float d = getSdf(pos);
+while (abs(d) > 0.001 && step < 50) {
+pos = pos + raydir * d;
+d = getSdf(pos); // Return sphere(pos) or any other
+step++;
+}
+return
+(step < 50) ? illuminate(pos, rayorig) : background;
+}
+9
+Visualizing step count
+Final image Distance field
+Brighter = more steps, up to 50
+10
+Combining SDFs
+We combine SDF models by choosing
+which is closer to the sampled point.
+● Take the union of two SDFs by
+taking the min() of their
+functions.
+● Take the intersection of two
+SDFs by taking the max() of their
+functions.
+● The max() of function A and the
+negative of function B will return
+the difference of A - B.
+By combining these binary operations
+we can create functions which describe
+very complex primitives.
+11
+Combining SDFs
+min(A, B)
+(union)
+max(-A, B)
+(difference)
+max(A, B)
+(intersection)
+12
+Blending SDFs
+Taking the min(), max(), etc of two SDFs yields a
+sharp discontinuity. Interpolating the two SDFs with
+a smooth polynomial yields a smooth distance curve,
+blending the models:
+Sample blending function (Quilez)
+float blend(float a, float b, float k) {
+a = pow(a, k);
+b = pow(b, k);
+return pow((a * b) / (a + b), 1.0 / k);
+}
+13
+Transforming SDF geometry
+To rotate, translate or scale an SDF model, apply the inverse transform to the
+input point within your distance function.
+Ex:
+float sphere(vec3 pt, float radius) {
+return length(pt) - radius;
+}
+float f(vec3 pt) {
+return sphere(pt - vec3(0, 3, 0));
+}
+This renders a sphere centered at (0, 3, 0).
+More prosaically, assemble your local-to-world transform as usual, but apply its
+inverse to the pt within your distance function.
+14
+Transforming SDF geometry
+float fScene(vec3 pt) {
+// Scale 2x along X
+mat4 S = mat4(
+vec4(2, 0, 0, 0),
+vec4(0, 1, 0, 0),
+vec4(0, 0, 1, 0),
+vec4(0, 0, 0, 1));
+// Rotation in XY
+float t = sin(time) * PI / 4;
+mat4 R = mat4(
+vec4(cos(t), sin(t), 0, 0),
+vec4(-sin(t), cos(t), 0, 0),
+vec4(0, 0, 1, 0),
+vec4(0, 0, 0, 1));
+// Translate to (3, 3, 3)
+mat4 T = mat4(
+vec4(1, 0, 0, 3),
+vec4(0, 1, 0, 3),
+vec4(0, 0, 1, 3),
+vec4(0, 0, 0, 1));
+pt = (vec4(pt, 1) * inverse(S * R * T)).xyz;
+return sdSphere(pt, 1);
+}
+15
+Transforming SDF geometry
+The previous example modified ‘all
+of space’ with the same transform,
+so its distance functions retain
+their local linearity.
+We can also apply non-uniform
+spatial distortion, such as by
+choosing how much we’ll modify
+space as a function of where in
+space we are.
+float fScene(vec3 pt) {
+pt.y -= 1;
+float t = (pt.y + 2.5) * sin(time);
+return sdCube(vec3(
+pt.x * cos(t) - pt.z * sin(t),
+pt.y / 2,
+pt.x * sin(t) + pt.z * cos(t)), vec3(1));
+}
+16
+Find the normal to an SDF
+Finding the normal: local gradient
+float d = getSdf(pt);
+vec3 normal = normalize(vec3(
+getSdf(vec3(pt.x + 0.0001, pt.y, pt.z)) - d,
+getSdf(vec3(pt.x, pt.y + 0.0001, pt.z)) - d,
+getSdf(vec3(pt.x, pt.y, pt.z + 0.0001)) - d));
+The distance function is locally linear and
+changes most as the sample moves directly
+away from the surface. At the surface, the
+direction of greatest change is therefore
+equivalent to the normal to the surface.
+Thus the local gradient (the normal) can be
+approximated from the distance function.
+17
+SDF shadows
+Ray-marched shadows are
+straightforward: march a ray
+towards each light source, don’t
+illuminate if the SDF ever drops
+too close to zero.
+Unlike ray-tracing, soft shadows are
+almost free with SDFs: attenuate
+illumination by a linear function of
+the ray marching near to another
+object.
+18
+Soft SDF shadows
+float shadow(vec3 pt) {
+vec3 lightDir = normalize(lightPos - pt);
+float kd = 1;
+int step = 0;
+for (float t = 0.1;
+t < length(lightPos - pt)
+&& step < renderDepth && kd > 0.001; ) {
+float d = abs(getSDF(pt + t * lightDir));
+if (d < 0.001) {
+kd = 0;
+} else {
+kd = min(kd, 16 * d / t);
+}
+t += d;
+By dividing d by t, we
+step++;
+attenuate the strength
+}
+of the shadow as its
+return kd;
+source is further from
+}
+the illuminated point.
+19
+Repeating SDF geometry
+If we take the modulus of a point’s
+position along one or more axes
+before computing its signed
+distance, then we segment space
+into infinite parallel regions of
+repeated distance. Space near the
+origin ‘repeats’.
+With SDFs we get infinite repetition
+of geometry for no extra cost.
+float fScene(vec3 pt) {
+vec3 pos;
+pos = vec3( mod(pt.x + 2, 4) - 2, pt.y, mod(pt.z + 2, 4) - 2);
+return sdCube(pos, vec3(1));
+}
+20
+Repeating SDF geometry
+float sphere(vec3 pt, float radius) {
+return length(pt) - radius;
+}
+● sdSphere(4, 4)
+= √(4*4+4*4) - 1
+= ~4.5
+● sdSphere(
+((4 + 2) % 4) - 2, 4)
+= √(0*0+4*4) - 1
+= 3
+● sdSphere(
+((4 + 2) % 4) - 2,
+((4 + 2) % 4) - 2)
+= √(0*0+0*0) - 1
+= -1 // Inside surface
+21
+SDF - Live demo
+22
+Recommended reading
+Seminal papers:
+● John C. Hart et al., “Ray Tracing Deterministic 3-D Fractals”,
+[Link]
+● John C. Hart, “Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit
+Surfaces”, [Link]
+Special kudos to Inigo Quilez and his amazing blog:
+● [Link]
+● [Link]
+Other useful sources:
+● Johann Korndorfer, “How to Create Content with Signed Distance Functions”,
+[Link]
+● Daniel Wright, “Dynamic Occlusion with Signed Distance Fields”,
+[Link]
+● 9bit Science, “Raymarching Distance Fields”,
+[Link]
+23
+You might also like
+Ray Marching with Signed Distance Fields
+PDF
+No ratings yet
+Ray Marching with Signed Distance Fields
+23 pages
+Ray Marching for Flat Surface Visualization
+PDF
+No ratings yet
+Ray Marching for Flat Surface Visualization
+13 pages
+Ray Tracing Basics in One Weekend
+PDF
+No ratings yet
+Ray Tracing Basics in One Weekend
+10 pages
+OpenGL 2D Boilerplate Code Example
+PDF
+No ratings yet
+OpenGL 2D Boilerplate Code Example
+9 pages
+Ray Tracing The Next Week v4 0 0-Alpha 1
+PDF
+No ratings yet
+Ray Tracing The Next Week v4 0 0-Alpha 1
+69 pages
+Ray Marching with Three.js Guide
+PDF
+No ratings yet
+Ray Marching with Three.js Guide
+20 pages
+Electronics 10 02730
+PDF
+No ratings yet
+Electronics 10 02730
+26 pages
+Neural Computer Graphics
+PDF
+No ratings yet
+Neural Computer Graphics
+31 pages
+Implementing a Reference Path Tracer
+PDF
+No ratings yet
+Implementing a Reference Path Tracer
+27 pages
+Distance Functions for SDF Primitives
+PDF
+No ratings yet
+Distance Functions for SDF Primitives
+15 pages
+Advanced Ray Tracing Techniques
+PDF
+No ratings yet
+Advanced Ray Tracing Techniques
+50 pages
+Ray Tracing Techniques and Concepts
+PDF
+No ratings yet
+Ray Tracing Techniques and Concepts
+39 pages
+12 RayTracing
+PDF
+No ratings yet
+12 RayTracing
+32 pages
+Ray Tracing Signed Distance Function Grids
+PDF
+No ratings yet
+Ray Tracing Signed Distance Function Grids
+20 pages
+Ray Tracing Concepts and Techniques
+PDF
+No ratings yet
+Ray Tracing Concepts and Techniques
+6 pages
+Raytracing Techniques in Computer Graphics
+PDF
+No ratings yet
+Raytracing Techniques in Computer Graphics
+22 pages
+Ray Tracing - The Next Week
+PDF
+No ratings yet
+Ray Tracing - The Next Week
+50 pages
+A Raytracer in MATLAB
+PDF
+No ratings yet
+A Raytracer in MATLAB
+4 pages
+Ray Tracing Techniques and Geometry
+PDF
+No ratings yet
+Ray Tracing Techniques and Geometry
+57 pages
+Screen Space Glossy Reflections Guide
+PDF
+No ratings yet
+Screen Space Glossy Reflections Guide
+33 pages
+Hidden Surface Algorithms Overview
+PDF
+No ratings yet
+Hidden Surface Algorithms Overview
+8 pages
+Efficient GPU Screen-Space Ray Tracing
+PDF
+No ratings yet
+Efficient GPU Screen-Space Ray Tracing
+13 pages
+Hidden Surface Elimination Techniques
+PDF
+No ratings yet
+Hidden Surface Elimination Techniques
+33 pages
+Real-Time Ray Tracing Overview
+PDF
+No ratings yet
+Real-Time Ray Tracing Overview
+50 pages
+Assignment 1: Ray Casting: SECV 4543: Advanced Computer Graphics
+PDF
+No ratings yet
+Assignment 1: Ray Casting: SECV 4543: Advanced Computer Graphics
+8 pages
+Appunti Interactive Graphics
+PDF
+No ratings yet
+Appunti Interactive Graphics
+17 pages
+Ray Tracing Basics and Implementation Guide
+PDF
+100% (1)
+Ray Tracing Basics and Implementation Guide
+38 pages
+Ray Tracing: The Next Week Overview
+PDF
+No ratings yet
+Ray Tracing: The Next Week Overview
+118 pages
+Raytracing Techniques in Computer Graphics
+PDF
+No ratings yet
+Raytracing Techniques in Computer Graphics
+42 pages
+SFML Coordinate System in Projectile Simulation
+PDF
+No ratings yet
+SFML Coordinate System in Projectile Simulation
+11 pages
+Fatal Ay
+PDF
+No ratings yet
+Fatal Ay
+13 pages
+Ray Tracing Basics: Tick 1 Exercise
+PDF
+No ratings yet
+Ray Tracing Basics: Tick 1 Exercise
+11 pages
+Godot SDFGI Plan For 4.1
+PDF
+No ratings yet
+Godot SDFGI Plan For 4.1
+48 pages
+OpenGL Basics: Polygons and Rendering
+PDF
+No ratings yet
+OpenGL Basics: Polygons and Rendering
+2 pages
+Complex Projectile Motion Simulation
+PDF
+No ratings yet
+Complex Projectile Motion Simulation
+11 pages
+Introduction to Ray Tracing Techniques
+PDF
+No ratings yet
+Introduction to Ray Tracing Techniques
+24 pages
+Introduction to Ray Tracing Techniques
+PDF
+100% (1)
+Introduction to Ray Tracing Techniques
+43 pages
+Peter Shirley - Ray Tracing in One Weekend (2016)
+PDF
+No ratings yet
+Peter Shirley - Ray Tracing in One Weekend (2016)
+38 pages
+Efficient Impostor Rendering Technique
+PDF
+No ratings yet
+Efficient Impostor Rendering Technique
+7 pages
+GPU Ray Marching for Ambient Occlusion
+PDF
+No ratings yet
+GPU Ray Marching for Ambient Occlusion
+79 pages
+Ray Tracing in One Weekend
+PDF
+No ratings yet
+Ray Tracing in One Weekend
+79 pages
+Assignment 2: Ray Tracing: SECV 4543: Advanced Computer Graphics
+PDF
+No ratings yet
+Assignment 2: Ray Tracing: SECV 4543: Advanced Computer Graphics
+10 pages
+Vector Spaces and Graphics Matrix Transformations
+PDF
+No ratings yet
+Vector Spaces and Graphics Matrix Transformations
+10 pages
+Rasterization Pipeline in Computer Graphics
+PDF
+No ratings yet
+Rasterization Pipeline in Computer Graphics
+40 pages
+Visible Surface Detection Techniques
+PDF
+No ratings yet
+Visible Surface Detection Techniques
+13 pages
+GPU Clay Simulation in Claybook
+PDF
+No ratings yet
+GPU Clay Simulation in Claybook
+70 pages
+Parallax Occlusion Mapping in Direct3D 11
+PDF
+No ratings yet
+Parallax Occlusion Mapping in Direct3D 11
+12 pages
+Explicit vs. Implicit Geometry Models
+PDF
+No ratings yet
+Explicit vs. Implicit Geometry Models
+56 pages
+Advanced Ray Tracing Techniques
+PDF
+No ratings yet
+Advanced Ray Tracing Techniques
+26 pages
+Ray Tracing in One Weekend: Chapter 0: Overview
+PDF
+No ratings yet
+Ray Tracing in One Weekend: Chapter 0: Overview
+41 pages
+GPU Ray Tracing Implementation Guide
+PDF
+No ratings yet
+GPU Ray Tracing Implementation Guide
+44 pages
+WWW - Codeproject - OpenGL
+PDF
+No ratings yet
+WWW - Codeproject - OpenGL
+20 pages
+Computer Graphics Exam Review Guide
+PDF
+No ratings yet
+Computer Graphics Exam Review Guide
+10 pages
+3D Clipping and Rendering Techniques
+PDF
+No ratings yet
+3D Clipping and Rendering Techniques
+7 pages
+Ray Tracing Techniques and Models
+PDF
+No ratings yet
+Ray Tracing Techniques and Models
+21 pages
+Ray Tracing in One Weekend v4 0 0-Alpha 1
+PDF
+No ratings yet
+Ray Tracing in One Weekend v4 0 0-Alpha 1
+73 pages
+Procedural Story Generation in Games
+PDF
+No ratings yet
+Procedural Story Generation in Games
+19 pages
+L-Systems for Procedural Vegetation Generation
+PDF
+No ratings yet
+L-Systems for Procedural Vegetation Generation
+26 pages
+Terrain Generation Techniques in Games
+PDF
+No ratings yet
+Terrain Generation Techniques in Games
+16 pages
+Generating Game Rules and Mechanics
+PDF
+No ratings yet
+Generating Game Rules and Mechanics
+23 pages
+Shaders Excerpt
+PDF
+No ratings yet
+Shaders Excerpt
+51 pages
+Search-Based Procedural Content Generation
+PDF
+No ratings yet
+Search-Based Procedural Content Generation
+14 pages
+函数插值与拟合方法概述
+PDF
+No ratings yet
+函数插值与拟合方法概述
+11 pages
+Rigid Body Simulation Pixar
+PDF
+No ratings yet
+Rigid Body Simulation Pixar
+69 pages
+OpenGL Lighting Implementation Lab 9
+PDF
+No ratings yet
+OpenGL Lighting Implementation Lab 9
+20 pages
+Cornell University CS 569: Interactive Computer Graphics
+PDF
+No ratings yet
+Cornell University CS 569: Interactive Computer Graphics
+4 pages
+Open Rails Log File for Bug Reports
+PDF
+No ratings yet
+Open Rails Log File for Bug Reports
+7 pages
+Computer Graphics Techniques Overview
+PDF
+No ratings yet
+Computer Graphics Techniques Overview
+19 pages
+GPU Verification Checklist Sample
+PDF
+No ratings yet
+GPU Verification Checklist Sample
+9 pages
+Efficient GPU Path Rendering Using Scanline Rasterization
+PDF
+No ratings yet
+Efficient GPU Path Rendering Using Scanline Rasterization
+12 pages
+The Binding of Isaac: Mod Initialization Log
+PDF
+No ratings yet
+The Binding of Isaac: Mod Initialization Log
+843 pages
+Binding of Isaac Mod Initialization Logs
+PDF
+No ratings yet
+Binding of Isaac Mod Initialization Logs
+8 pages
+Understanding Texture Mapping in OpenGL
+PDF
+No ratings yet
+Understanding Texture Mapping in OpenGL
+21 pages
+Data-Oriented Design Overview
+PDF
+No ratings yet
+Data-Oriented Design Overview
+217 pages
+Java in Game Development Insights
+PDF
+No ratings yet
+Java in Game Development Insights
+23 pages
+Material Script Definitions and Usage
+PDF
+No ratings yet
+Material Script Definitions and Usage
+5 pages
+Mini Project on Bricks Breaker Game
+PDF
+No ratings yet
+Mini Project on Bricks Breaker Game
+35 pages
+Managing Vulkan Swapchains Effectively
+PDF
+No ratings yet
+Managing Vulkan Swapchains Effectively
+34 pages
+Global Mapper Display Configuration Guide
+PDF
+No ratings yet
+Global Mapper Display Configuration Guide
+17 pages
+Meshmixer Initialization Log
+PDF
+No ratings yet
+Meshmixer Initialization Log
+2 pages
+Hallway AI - Custom Avatar Requirements
+PDF
+No ratings yet
+Hallway AI - Custom Avatar Requirements
+27 pages
+OpenGL Graphics Pipeline Overview
+PDF
+No ratings yet
+OpenGL Graphics Pipeline Overview
+77 pages
+Resetting Trace Camera Instructions
+PDF
+No ratings yet
+Resetting Trace Camera Instructions
+166 pages
+Sandy Bridge Intel HD Graphics DirectX Developers Guide
+PDF
+No ratings yet
+Sandy Bridge Intel HD Graphics DirectX Developers Guide
+68 pages
+Android Camera Media Processing Log
+PDF
+No ratings yet
+Android Camera Media Processing Log
+483 pages
+Line Drawing: CMPT 361 Introduction To Computer Graphics Torsten Möller
+PDF
+No ratings yet
+Line Drawing: CMPT 361 Introduction To Computer Graphics Torsten Möller
+31 pages
+The Binding of Isaac: Game Log Analysis
+PDF
+No ratings yet
+The Binding of Isaac: Game Log Analysis
+3 pages
+Binding of Isaac: Repentance Log
+PDF
+No ratings yet
+Binding of Isaac: Repentance Log
+112 pages
+OpenGL Train Signal Simulation
+PDF
+100% (2)
+OpenGL Train Signal Simulation
+44 pages
+Whatsnew Maya65
+PDF
+No ratings yet
+Whatsnew Maya65
+202 pages
+Shrek: Behind the Animation Process
+PDF
+No ratings yet
+Shrek: Behind the Animation Process
+108 pages
+Mixed Reality Spatial Detection Effects
+PDF
+No ratings yet
+Mixed Reality Spatial Detection Effects
+16 pages
+Real-Time Rendering - Akenine-Moeller - 3rd Ed PDF
+PDF
+100% (2)
+Real-Time Rendering - Akenine-Moeller - 3rd Ed PDF
+1,047 pages
+Mudbox - Reference
+PDF
+No ratings yet
+Mudbox - Reference
+98 pages

@@ -1,0 +1,626 @@
+# **Marching Tetrahedra Project**
+
+## **Description:**
+The marching tetrahedra algorithm is inspired by the marching cubes algorithm. The objective of this marching cubes algorithm is to reconstruct the surface of some sort of shape or object. By defining a grid of cubes or tetrahedra, one can create triangles in each one that maintain connectivity, forming a 3d mesh. The objective isn't a perfect/even mesh, but one that merely resembles the shape. See my project `remesher-3d` for ways we can make this new mesh better.
+
+## **Building:**
+1. This project was built in `flux`. This geometric library can be downloaded at https://gitlab.com/csci422-s22/flux-base
+2. Build `flux` and then create a new folder in the projects section
+3. Download `marching-tetrahedra` into this new folder
+4. Build/make `flux` again and go to `build/debug/projects/marching-tets`
+5. Run command `make marchingtets_exe` to make and `./marchingtets_exe` to run
+
+## **The Algorithm:**
+The initial step of this algorithm is to define a grid of tetrahedra. Looping through each tetrahedra, we will inspect to see which edges are divided by the objective function (that defines some sort of 3D shape). We can determine the case of the tetrahedra by inspecting the tetrahedron's vertices' isovalues. This step is much easier than marching cubes as there are only 16 cases as opposed to 256. Once the case is determined, we know which edges of the tetrehdron are intersected by the function and where our triangle/triangles will go. We find the intersection points on each edge and add them to this mesh if they aren't already there. We then save their indices, check the orientation of the triangle, and then add this new triangle. In performing these steps on every tetrahedron, we will create a watertight mesh that resembles the given shape function.  
+  
+**In simpler terms:**
+1. Initialize hashtables that correspond to the specific case the edges are in and what triangles that each case should produce as a result
+2. Perform preprocessing for each vertex's isovalue
+3. Loop through each tetrahedra:
+   1. Retrieve vector of isovalues for each vertex in tetrahedra
+   2. Determine which case the tetrahedra is in
+   3. If tetrahedra does intersect with sphere, add intersections to the mesh and create a triangle/triangles
+  
+***Corner Cases:***  
+One corner case that occurred was if a vertex had an isovalue of 0. This means the analytic function crossed paths with this vertex. This would create problems as sometimes, you would want to create triangles using this point, but other times you did not. You did not if the triangle had two or more points that resolved to intersect with this said vertex. This would mean that there is a triangle with negative area.  
+
+The way I solved this problem was using a map that mapped tet vertex (int) to its corresponding vertex in the new triangle mesh (int). In `preprocess_isovalues`, I added entries into this map with indices of -1. Then, when I went to create vertices for my triangles in my algorithm, I checked if the two vertices of the tet edge I was looking at had isovalues of 0. If so, I would check my map and see if this triangle mesh vertex that intersected with this exact point had been created already. Then, when I finished accumulating the three vertex indices in my triangle mesh to create a triangle, I would make sure there were no repeat triangles. This solved my issue as no ghost vertices remained hidden in my mesh.
+
+Another small corner case/issue I had to deal with was orientation. This was solved by creating the functions `check_orientation` and `change_orientation`. Using `orient3d`, I was able to check whether the new triangle that was about to be added created negative area. If so, I would switch vertices 0 and 2 to reverse the order the of the triangle, correcting the orientation.
+
+## **Results:**
+These results will only be focused on a sphere function as our analytic function. With this, our only input that changes is the dimensions of the tetrahedron grid that assists in the creation of the sphere. The higher number of tetrahedra, the higher number of triangles in the resulting sphere mesh.
+
+### **2x2x2 Tet Grid**
+![2x2x2](./marching-meshes/2x2x2.png)
+
+### **3x3x3 Tet Grid**
+![3x3x3](./marching-meshes/3x3x3.png)
+
+### **5x5x5 Tet Grid**
+![5x5x5](./marching-meshes/5x5x5.png)
+
+### **10x10x10 Tet Grid**
+![10x10x10](./marching-meshes/10x10x10.png)
+
+### **20x20x20 Tet Grid**
+![20x20x20](./marching-meshes/20x20x20.png)
+
+### **50x50x50 Tet Grid**
+![50x50x50](./marching-meshes/50x50x50.png)
+
+### main.cpp
+```
+#include "element.h"
+#include "grid.h"
+#include "webgl.h"
+#include "marchingtet.h"
+#include "tet-functions.h"
+
+#include "halfedges.h"
+
+using namespace flux;
+
+int
+main(int argc, char *argv[]) {
+    Grid<Tet> tet_grid({10,10,10});
+
+    // Defining function
+    double center[3] = {0.5, 0.5, 0.5};
+    SphereTetFunction function(0.40, center);
+
+    // Creating marchingtet and performing operation
+    MarchingTet m_tet(tet_grid, function);
+    m_tet.marching_tets();
+    Mesh<Triangle>& mesh = m_tet.get_mesh();
+    
+    m_tet.run_viewer();
+}
+```
+
+### marchingtet.cpp
+```
+#include "marchingtet.h"
+#include "halfedges.h"
+#include "webgl.h"
+#include "predicates.h"
+#include <cmath>
+
+namespace flux {
+
+MarchingTet::MarchingTet(Grid<Tet>& tet_grid, TetFunction& function): 
+_tet_grid(tet_grid),
+_function(function),
+_mesh(3) {
+    initialize_edgetable();
+    initialize_triangletable();
+}
+
+void
+MarchingTet::initialize_edgetable() {
+    /**
+     * Initializes table that translates from edgecases to what case of 
+     * trangles to create
+     */
+    _edgetable[1]  = 13;
+    _edgetable[14] = 13;
+
+    _edgetable[2]  = 56;
+    _edgetable[13] = 56;
+
+    _edgetable[4]  = 38;
+    _edgetable[11] = 38;
+
+    _edgetable[8]  = 19;
+    _edgetable[7]  = 19;
+
+    _edgetable[3]  = 53;
+    _edgetable[12] = 53;
+
+    _edgetable[5]  = 43;
+    _edgetable[10] = 43;
+
+    _edgetable[6]  = 30;
+    _edgetable[9]  = 30;
+}
+
+void
+MarchingTet::initialize_triangletable() {
+    /**
+     * Initialize triangle table. This helps with determining the vertices that form 
+     * the triangle(s). It is important to note that edges are pairs of vertices, 
+     * so 6 ints form a triangle
+     */
+    _triangletable[13] = {0,3, 0,1, 0,2};
+    _triangletable[56] = {0,1, 3,1, 1,2};
+    _triangletable[38] = {3,2, 1,2, 0,2};
+    _triangletable[19] = {0,3, 2,3, 1,3};
+
+
+    _triangletable[53] = {0,3, 1,3, 0,2, 0,2, 1,3, 1,2};
+    _triangletable[43] = {0,3, 2,3, 0,1, 2,3, 1,2, 0,1};
+    _triangletable[30] = {2,3, 1,3, 0,2, 0,2, 1,3, 0,1};
+}
+
+void
+MarchingTet::marching_tets() {
+    /**
+     * Performs the harching tet algorithm using the specified grid and function
+     */
+    // Perform preprocessing to get each vertex's isovalue
+    preprocess_isovalues();
+
+    // Loop thru tets
+    int num_tets = _tet_grid.nb();
+    for (int i = 0; i < num_tets; ++i) {
+        // Create triangle(s) in tet
+        reconstruct_tet_surface(i);
+    }
+}
+
+void
+MarchingTet::preprocess_isovalues() {
+    /**
+     * Calculates isovalues for vertices, storing them in _isovalue map
+     */
+    Vertices& vertices = _tet_grid.vertices();
+    int num_vertices = vertices.nb();
+    
+    double function_value;
+
+    for (int i = 0; i < num_vertices; ++i) {
+        function_value = _function(vertices[i]);
+
+        // If there is a driect intersection with the function and vertex, make note
+        if (function_value == 0.0) {
+            _zero_isovalue_points[i] = -1;
+        }
+        _isovalues[i] = function_value;
+    }
+}
+
+void
+MarchingTet::reconstruct_tet_surface(int tet_index) {
+    // Getting isovalues of specific tet
+    std::vector<double> tet_isovalues;
+    get_tet_isovalues(tet_index, tet_isovalues);
+
+    // Getting the case we are in. Returning if no intersections in tet
+    int tet_case;
+    if (!(tet_case = determine_case(tet_isovalues))) return;
+
+    // Retrieve what architecture of triangle(s) to create in tet and creating them
+    std::vector<int> triangles_to_create = _triangletable[tet_case];
+    create_triangles(tet_index, triangles_to_create);
+}
+
+void
+MarchingTet::get_tet_isovalues(int tet_index, std::vector<double>& tet_isovalues) {
+    /**
+     * Accumulates isovalues of specific tet into tet_isovalues vector
+     */
+    for (int i = 0; i < 4; ++i) {
+        int vertex_index = _tet_grid(tet_index, i);
+        double vertex_isovalue = _isovalues[vertex_index];
+        tet_isovalues.push_back(vertex_isovalue);
+    }
+}
+
+int
+MarchingTet::determine_case(std::vector<double>& tet_isovalues) {
+    /**
+     * Determines case represented by the integer whose bits store which edges are 
+     * intersected. Uses _edgetable to assist in this
+     * 
+     * \returns: the case if one. If there is no intersection, then it returns 0
+     */
+    flux_assert(tet_isovalues.size() == 4);
+    int res = 0;
+
+    if (tet_isovalues[0] < 0) res |= 1;
+    if (tet_isovalues[1] < 0) res |= 2;
+    if (tet_isovalues[2] < 0) res |= 4;
+    if (tet_isovalues[3] < 0) res |= 8;
+
+    if (_edgetable.find(res) == _edgetable.end()) return 0;
+    int tet_case = _edgetable[res];
+
+    return tet_case;
+}
+
+vec3d
+MarchingTet::get_intersection_point(int v0_index, int v1_index) {
+    /**
+     * Gets intersection point of edge with analytic function (_function)
+     */
+    // Getting coordinates of vertices
+    Vertices& vertices =_tet_grid.vertices();
+    vec3d v0(vertices[v0_index]);
+    vec3d v1(vertices[v1_index]);
+
+    // Getting function values and abs'ing them
+    double f0 = _isovalues[v0_index];
+    double f1 = _isovalues[v1_index];
+
+    double d0 = std::abs(f0);
+    double d1 = std::abs(f1);
+
+    // Calculating w0 and w1
+    double w0 = (d1) / (d0 + d1);
+    double w1 = (d0) / (d0 + d1);
+
+    // intersection point = w0*ev + w1*v1
+    for ( int i = 0; i < 3; ++i) {
+        v0[i] *= w0;
+        v1[i] *= w1;
+    }
+    vec3d intersection_point = v0 + v1;
+
+    return intersection_point;
+}
+
+void
+MarchingTet::create_triangles(int tet_index, std::vector<int>& triangles_to_create) {
+    /**
+     * Create triangles in tet (denoted by tet_index). Triangle framework determined by
+     * triangles_to_create
+     */
+    // Performing checks for size of triangles to create
+    int size_ttc = triangles_to_create.size();
+    flux_assert(size_ttc == 6 || size_ttc == 12);
+    flux_assert(size_ttc % 6 == 0);
+
+    // Add triangles to mesh
+    int tri_indices[3];
+    int mesh_index;
+    for (int i = 0; i < size_ttc / 6; i++) { // Thru # of triangles (1 or 2)
+        for (int j = 0; j < 6; j+=2) {
+            // Getting indices from triangles_to_create
+            int index0 = triangles_to_create[(j + (i*6))];
+            int index1 = triangles_to_create[(j + (i*6) + 1)];
+
+            // Translating index to _tet_grid vertex index and then creating new vertex
+            mesh_index = add_vertex_to_mesh(tet_index, index0, index1);
+            tri_indices[j/2] = mesh_index;
+        }
+
+        // If there are repeat vertices, do not create triangle here
+        if (check_repeat_vertices(tri_indices)) continue;
+
+        // Checking orientation and changing it if it creates negative area
+        if (check_orientation(tri_indices)) change_orientation(tri_indices);
+
+        // Adding new triangle to mesh
+        _mesh.add(tri_indices);
+    }
+    // return samson III
+}
+
+int
+MarchingTet::add_vertex_to_mesh(int tet_index, int index0, int index1) {
+    /**
+     * PARAMS:
+     * tet_index: the index that refers to the tet in _tet_grid
+     * index0: the 0th vertex index relative to the tet
+     * index1: the 1st vertex index relative to the tet
+     * 
+     * RETURNS:
+     * index of the new vertex in _mesh
+     */
+    // Getting indices of vertices in _tet_grid
+    int v0_index = _tet_grid(tet_index, index0);
+    int v1_index = _tet_grid(tet_index, index1);
+
+    std::set<int> vertices({v0_index, v1_index});
+
+    // If point has already been created, return its vertex
+    if (_inserted_edges.find(vertices) != _inserted_edges.end())
+        return _inserted_edges[vertices];
+
+    // Get new vertex index
+    int new_vertex_index = _mesh.vertices().nb();
+
+    // If this vertex has an isovalue of 0.0, check to see if point has been created.
+    // If so, get return previous vertex index
+    int res = check_zero_isovalues(v0_index, v1_index, new_vertex_index);
+    if (res > -1) return res;
+
+    // Get intersection point and add new point to _mesh vertices
+    vec3d new_point = get_intersection_point(v0_index, v1_index);
+
+    _mesh.vertices().add(new_point.data());
+
+    // Get new vertex's index, add to _inserted_edges and return
+    _inserted_edges[vertices] = new_vertex_index;
+    return new_vertex_index;
+}
+
+int
+MarchingTet::check_orientation(int *tri_indices) {
+    /**
+     * Checks to see if the triangles are oriented correctly. Uses orient3d to make
+     * sure no negative area is created
+     * 
+     * PARAMS: tri_indices must be an array of length 3 of the three indices of 
+     * vertices for new triangle
+     * 
+     * RETURNS: 0 if oriented correctly and 1 if it isn't
+     */
+    Vertices& vertices = _mesh.vertices();
+
+    // Getting vertex indices
+    int v0_index = tri_indices[0];
+    int v1_index = tri_indices[1];
+    int v2_index = tri_indices[2];
+
+    // Getting pointers to vertices
+    double *v0 = vertices[v0_index];
+    double *v1 = vertices[v1_index];
+    double *v2 = vertices[v2_index];
+    const double *center = _function.get_center();
+
+    if (orient3d(v0, v1, v2, center) >= 0) return 0;
+    return 1;
+}
+
+void
+MarchingTet::change_orientation(int *tri_indices) {
+    /**
+     * Changes the ordering of the vertex indices, altering their orientation
+     */
+    int index0_placeholder = tri_indices[0];
+    tri_indices[0] = tri_indices[2];
+    tri_indices[2] = index0_placeholder;
+}
+
+int
+MarchingTet::check_zero_isovalues(
+    int v0_index,
+    int v1_index,
+    int new_vertex_index
+) {
+    /**
+     * PARAMS:
+     * v0_index: is the first vertex index we are checking that composes this edge
+     * v1_index: is the second vertex index to check
+     * 
+     * RETURNS:
+     * If vertex already exists, return its index in mesh. If vertex intersects but
+     * vertex hasn't been created yet, return -1. If vertex doesn't intersect, return -2
+     */
+    if (_zero_isovalue_points.find(v0_index) != _zero_isovalue_points.end()) {
+        if (_zero_isovalue_points[v0_index] > -1) { // vertex has been created already, return it
+            return _zero_isovalue_points[v0_index];
+        }
+        // Vertex still needs to be created. Change entry in _zero_isovalue_points to 
+        // new index and create new point after
+        _zero_isovalue_points[v0_index] = new_vertex_index;
+        return -1;
+    }
+
+    if (_zero_isovalue_points.find(v1_index) != _zero_isovalue_points.end()) {
+        if (_zero_isovalue_points[v1_index] > -1) { // vertex has been created already, return it
+            return _zero_isovalue_points[v1_index];
+        }
+        // Vertex still needs to be created. Change entry in _zero_isovalue_points to 
+        // new index and create new point after
+        _zero_isovalue_points[v1_index] = new_vertex_index;
+        return -1;
+    }
+    return -1;
+}
+
+int
+MarchingTet::check_repeat_vertices(int *tri_indices) {
+    /**
+     * Checks prosepctive new triangle for _mesh and sees if there are repeating 
+     * vertices. If so, multiple intersections occur at a vertex... do not create 
+     * triangle
+     * 
+     * RETURNS: 1 if there are repeat vertices and 0 if not
+     */
+    int j,k;
+    for (int i = 0; i < 3; ++i) {
+        j = i % 3;
+        k = (i+1) % 3;
+        if (tri_indices[j] == tri_indices[k]) return 1;
+    }
+    return 0;
+}
+
+void
+MarchingTet::run_viewer() {
+    Viewer viewer;
+    viewer.add(_mesh);
+    viewer.run();
+}
+
+Mesh<Triangle>&
+MarchingTet::get_mesh() {
+    return _mesh;
+}
+
+void
+MarchingTet::test_validity() {
+    /**
+     * Test for debugging. Tester in flux not cooperating with me
+     */
+    std::cout << "STATISTICS: " << '\n';
+    std::cout << "triangles: " << _mesh.nb() << '\t';
+    std::cout << "vertices: " << _mesh.vertices().nb() << '\n';
+
+    std::map<int, int> vertex_map;
+    int res;
+    for (int i = 0; i < _mesh.nb(); ++i) {
+        for (int j = 0; j < 3; ++j) {
+            res = _mesh(i, j);
+            if (res == 347) {
+                std::cout << "Triangle caught: ";
+                for (int k = 0; k < 3; ++k) {
+                    std::cout << _mesh(i, k) << '\t';
+                }
+                std::cout << '\n' << '\n';
+            }
+            if (vertex_map.find(res) == vertex_map.end()) {
+                vertex_map[res] = 1;
+            } else {
+                vertex_map[res]++;
+            }
+        }
+    }
+
+    for (auto iter = vertex_map.begin(); iter != vertex_map.end(); iter++) {
+        if (iter->second > 12) {
+            std::cout << iter->first << '\t' << iter->second << std::endl;
+        }
+    }
+
+
+}
+} // flux
+```
+
+### marchingtet.h
+```
+#ifndef FLUX_MARCHING_TETS_H
+#define FLUX_MARCHING_TETS_H
+
+#include "grid.h"
+#include "element.h"
+#include "halfedges.h"
+#include "tet-functions.h"
+#include "mesh.h"
+#include <map>
+
+namespace flux {
+class MarchingTet {
+public:
+MarchingTet(Grid<Tet>& tet_grid, TetFunction& function);
+void marching_tets();
+
+/* Utility Functions */
+Mesh<Triangle>& get_mesh();
+HalfEdgeMesh<Triangle> get_halfmesh();
+void run_viewer();
+void test_validity();
+
+private:
+Grid<Tet>& _tet_grid;
+TetFunction& _function;
+std::map<std::set<int>, double> _inserted_edges; // Maps two vertices(edge) to 
+                                                 // intersection 
+std::map<int,double> _isovalues;                 // Maps tet vertex index to isovalue
+std::map<int, int> _zero_isovalue_points;
+Mesh<Triangle> _mesh;
+
+/* Static Tables */
+std::map<int,int> _edgetable; // Edge case mapped to triangle creation case
+std::map<int, std::vector<int>> _triangletable; // Triangle creation case to vertex pairs
+                                                // (edges) to create new triangle vertex
+                                                // at edge intersection
+
+/* Initialization Functions */
+void initialize_edgetable();
+void initialize_triangletable();
+void preprocess_isovalues();
+
+void reconstruct_tet_surface(int tet_index);
+
+vec3d get_intersection_point(int v0_index, int v1_index);
+int determine_case(std::vector<double>& tet_isovalues);
+void get_tet_isovalues(int tet_index, std::vector<double>& tet_isovalues);
+
+/* Adding Elements to Mesh */
+void create_triangles(int tet_index, std::vector<int>& triangles_to_create);
+int add_vertex_to_mesh(int tet_index, int index0, int index1);
+
+/* Orientating New Triangle */
+int check_orientation(int *tri_indices);
+void change_orientation(int *tri_indices);
+
+/* Other Checks */
+int check_zero_isovalues(int v0_index, int v1_index, int new_vertex_index);
+int check_repeat_vertices(int *tri_indices);
+};
+} // flux
+#endif
+```
+
+### tet-functions.cpp
+```
+#include "tet-functions.h"
+#include "vec.hpp"
+
+namespace flux {
+
+double *
+SphereTetFunction::get_center() {
+    return _center;
+}
+
+SphereTetFunction::SphereTetFunction(double radius, double *center) :
+_radius(radius)
+{ 
+    for (int i = 0; i < 3; ++i) 
+        _center[i] = center[i];
+}
+
+double
+SphereTetFunction::operator()(vec3d vertex) {
+    /**
+     * Returns distance from sphere to vertex. Negative if the point is within the
+     * sphere and positive if outside of in.
+     */
+    // Getting center
+    double *center = get_center();
+    vec3d center_vec(center);
+
+    vec3d difference = vertex - center_vec;
+    double center_to_vertex = norm(difference);
+    double dist_to_sphere = center_to_vertex - _radius;
+
+    return dist_to_sphere;
+}
+
+
+} // flux
+```
+
+### tet-functions.h
+```
+#ifndef FLUX_TET_FUNCTIONS_H
+#define FLUX_TET_FUNCTIONS_H
+
+#include "halfedges.h"
+#include "vec.h"
+
+namespace flux {
+
+class TetFunction {
+public:
+    virtual double operator()( vec3d vertex ) = 0;
+    virtual double *get_center() = 0;
+
+    /**
+     * \brief virtual destructor.
+     */
+    virtual ~TetFunction() {}
+
+};
+
+class SphereTetFunction : public TetFunction {
+public:
+    SphereTetFunction(double radius, double *center);
+
+    double operator()(vec3d vertex);
+    double *get_center();
+
+private:
+    double _radius;
+    double _center[3];
+};
+
+}
+
+#endif
+```

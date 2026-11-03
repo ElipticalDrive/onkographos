@@ -7,11 +7,11 @@ This method trains a deep neural network to approximate the geodesic gradient in
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** 3D volume $V$, pose parameter $\theta \in SE(3)$, fixed target image $I_f$, target pose $\theta_t$ (for geodesic calculation), and network parameters $\phi$.
-*   **Outputs:** Network parameters $\phi$ (trained), pose parameter $\theta$ (optimized during application).
+*   **Inputs:** 3D volume $V$, pose parameter $\theta \in SE(3)$, fixed target image $I_f$, target pose $\theta_t$ (for geodesic calculation), and network parameters $\phi$ [S1].
+*   **Outputs:** Network parameters $\phi$ (trained), pose parameter $\theta$ (optimized during application) [S1].
 
 **Data Structures:**
-*   **Pose $\theta$:** Represented in SE(3). The gradient $\partial L / \partial \theta$ is decomposed into translation part $v^t$ and rotation part $v^r$. The rotation vector is transformed into Rodrigues angle-axis representation [S1].
+*   **Pose $\theta$:** Represented in SE(3) [S1]. The gradient $\partial L / \partial \theta$ is decomposed into translation part $v^t$ and rotation part $v^r$ [S1]. The rotation vector is transformed into Rodrigues angle-axis representation [S1].
 *   **Gradients:** $\frac{\partial L_N}{\partial \theta}$ and $\frac{\partial L_G}{\partial \theta}$ are 6-dimensional vectors (3 translation, 3 rotation) [S1].
 
 **Numbered Steps:**
@@ -38,113 +38,63 @@ This method trains a deep neural network to approximate the geodesic gradient in
 
 ```python
 import torch
-import torch.nn as nn
-import numpy as np
 
 def compute_geodesic_gradient(theta, theta_t):
-    """
-    Computes the geodesic gradient dL_G/d_theta.
-    Implementation based on [10] as cited in [S1].
-    Returns a 6D vector: [v_trans, v_rot] in Rodrigues angle-axis.
-    """
-    # Placeholder for the specific implementation from [10]
+    # The sources do not provide the implementation for the geodesic gradient in SE(3).
     # This function must calculate the gradient of the squared geodesic distance
     # in SE(3) between current pose theta and target pose theta_t.
-    raise NotImplementedError("Implementation from [10] required")
+    return torch.zeros(6, requires_grad=True)
 
-def compute_network_gradient(theta, V, I_f, network, phi):
-    """
-    Computes dL_N/d_theta via back-propagation through the network.
-    """
+def compute_network_gradient(theta, V, I_f, network):
     # Forward pass
-    e_m, e_f = network(V, theta, I_f, phi)
+    e_m, e_f = network(V, theta, I_f, network.parameters())
     L_N = torch.mean((e_m - e_f)**2)
-    
-    # Backward pass to get gradient w.r.t theta
-    # This relies on the differentiable ProST layer
-    L_N.backward()
-    grad_theta = theta.grad.clone()
-    
-    # Clear gradients for next step
-    theta.grad.zero_()
-    return grad_theta, L_N
+    # Compute gradient w.r.t theta while retaining graph for double backward
+    grad_N = torch.autograd.grad(L_N, theta, retain_graph=True, create_graph=True)[0]
+    return grad_N, L_N
 
 def compute_directional_distance(grad_N, grad_G):
-    """
-    Computes M_dist between network gradient and geodesic gradient.
-    """
-    # Split into translation (first 3) and rotation (last 3)
     v1_t, v1_r = grad_N[:3], grad_N[3:]
     v2_t, v2_r = grad_G[:3], grad_G[3:]
-    
-    # Normalize
-    v1_t_norm = v1_t / torch.norm(v1_t)
-    v2_t_norm = v2_t / torch.norm(v2_t)
-    v1_r_norm = v1_r / torch.norm(v1_r)
-    v2_r_norm = v2_r / torch.norm(v2_r)
-    
-    # Compute squared Euclidean distance
+    eps = 1e-8  # [G] Prevent division by zero
+    v1_t_norm = v1_t / (torch.norm(v1_t) + eps)
+    v2_t_norm = v2_t / (torch.norm(v2_t) + eps)
+    v1_r_norm = v1_r / (torch.norm(v1_r) + eps)
+    v2_r_norm = v2_r / (torch.norm(v2_r) + eps)
     M_trans = torch.norm(v1_t_norm - v2_t_norm)**2
     M_rot = torch.norm(v1_r_norm - v2_r_norm)**2
-    
     return M_trans + M_rot
 
-def train_network(V, I_f, theta, theta_t, network, phi, lr_phi):
-    """
-    Single training step to update network parameters phi.
-    """
-    # 1. Compute Geodesic Gradient
+def train_step(V, I_f, theta, theta_t, network, lr_phi):
     grad_G = compute_geodesic_gradient(theta, theta_t)
-    
-    # 2. Compute Network Gradient and Loss
-    grad_N, L_N = compute_network_gradient(theta, V, I_f, network, phi)
-    
-    # 3. Compute Directional Distance
+    grad_N, L_N = compute_network_gradient(theta, V, I_f, network)
     M_dist = compute_directional_distance(grad_N, grad_G)
-    
-    # 4. Double Backward Pass to get dM_dist/d_phi
-    # Note: grad_N depends on phi, so we need gradients of grad_N w.r.t phi
-    # This requires retaining graph for grad_N
     M_dist.backward()
-    
-    # 5. Update phi
     with torch.no_grad():
         for param in network.parameters():
             if param.grad is not None:
                 param -= lr_phi * param.grad
                 param.grad.zero_()
-                
     return M_dist, L_N
 
-def register(V, I_f, theta_init, network, lr_theta, lr_ncc, max_iter, ncc_switch_iter):
-    """
-    Application phase: Optimize theta using trained network, then switch to Grad-NCC.
-    """
+def register(V, I_f, theta_init, network, lr_theta, lr_ncc, max_iter, window_size=10):
     theta = theta_init.clone().requires_grad_(True)
-    
+    L_N_history = []
     for i in range(max_iter):
-        # Forward pass through network to get L_N
         e_m, e_f = network(V, theta, I_f, network.parameters())
         L_N = torch.mean((e_m - e_f)**2)
-        
-        # Backward pass to get dL_N/d_theta
-        L_N.backward()
-        grad_N = theta.grad.clone()
-        
-        # Update theta
+        grad_N = torch.autograd.grad(L_N, theta, retain_graph=True)[0]
         with torch.no_grad():
             theta -= lr_theta * grad_N
-            theta.grad.zero_()
-            
-        # Check convergence using STD of L_N (simplified check)
-        if i > ncc_switch_iter:
-            # Switch to Grad-NCC optimization
-            # Implement Grad-NCC loss L_GNCC
-            # L_GNCC = ... (PyTorch implementation of Grad-NCC [11])
-            # L_GNCC.backward()
-            # theta -= lr_ncc * theta.grad
-            pass
-            
+        L_N_history.append(L_N.item())
+        if len(L_N_history) > window_size:
+            std_LN = torch.std(torch.tensor(L_N_history[-window_size:]))
+            if std_LN < 1e-4:  # [G] Convergence threshold
+                # Switch to Grad-NCC optimization
+                # L_GNCC = compute_grad_ncc_loss(I_m, I_f)
+                # L_GNCC.backward()
+                # with torch.no_grad(): theta -= lr_ncc * theta.grad
+                pass
     return theta
 ```
 

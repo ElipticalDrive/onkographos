@@ -1,0 +1,63 @@
+# Flattened Gaussian Ellipsoid Rendering
+
+Also called: VoGE
+
+## Overview
+Flattened Gaussian Ellipsoid Rendering (VoGE) is a technique that approximates 2D Gaussian ellipses by flattening 3D Gaussian ellipsoids, enabling stable rendering of surface-like representations [S1]. It distinguishes itself from standard 3D Gaussian splatting by enforcing a zero-determinant covariance, effectively reducing volumetric kernels to surface-adjacent disks, and from 2D Gaussian Splatting by operating within a differentiable volume rendering framework that natively supports anisotropic ellipsoidal kernels [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of Gaussian kernels, each defined by a 3x3 symmetric spatial covariance matrix $\Sigma_k$ and other attributes (position, opacity, color).
+*   **Output:** A rendered image where surface-like structures are represented by flattened ellipsoids.
+
+**Data Structures:**
+*   **Covariance Matrix ($\Sigma_k$):** A 3x3 symmetric matrix representing the spatial variance of the $k$-th kernel.
+    $$
+    \Sigma_k = \begin{bmatrix} \sigma_{k,xx} & \sigma_{k,xy} & \sigma_{k,xz} \\ \sigma_{k,xy} & \sigma_{k,yy} & \sigma_{k,yz} \\ \sigma_{k,xz} & \sigma_{k,yz} & \sigma_{k,zz} \end{bmatrix}
+    $$
+    *   $\sigma_{k,ii}$: Variance along axis $i$.
+    *   $\sigma_{k,ij}$: Covariance between axes $i$ and $j$.
+
+**Steps:**
+1.  **Initialize Kernels:** Define each kernel with a 3x3 symmetric covariance matrix $\Sigma_k$.
+2.  **Flatten Ellipsoids:** To approximate 2D Gaussian ellipses, constrain the determinant of the covariance matrix to approach zero:
+    $$
+    \det(\Sigma_k) \to 0
+    $$
+    This flattening reduces the 3D ellipsoid into a surface-like representation [S1].
+3.  **Render:** Project the flattened ellipsoids onto the image plane using the VoGE rendering pipeline. The pipeline handles the anisotropic nature of the kernels natively [S1].
+
+**Parameters:**
+*   **Determinant Threshold:** The value to which $\det(\Sigma_k)$ is constrained. The sources indicate it approaches zero ($\to 0$) but do not specify a numerical epsilon or threshold for implementation [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Hyperbolic Kernels:** If the spatial covariances exceed the square root of the dot product of the two variances, the kernel becomes a hyperbola instead of an ellipsoid. Specifically, for any pair of axes (e.g., $x$ and $y$), the condition must hold:
+    $$
+    \sigma_{k,xy} \le \sqrt{\sigma_{k,xx}\sigma_{k,yy}}
+    $$
+    Violation of this condition results in invalid geometry (hyperbolas) [S1].
+
+## Subtopics
+
+### Anisotropic Ellipsoid Rendering Constraints
+Native support for rendering anisotropic ellipsoidal Gaussian kernels where spatial variance is represented by a 3x3 symmetric matrix $\Sigma_k$. The primary constraint is that spatial covariances (e.g., $\sigma_{k,xy}$) cannot exceed the square root of the dot product of the two variances (e.g., $\sqrt{\sigma_{k,xx}\sigma_{k,yy}}$); otherwise, the kernel becomes a hyperbola instead of an ellipsoid [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+Not given in the sources.
+
+**Measured Performance:**
+Not given in the sources.
+
+**Strengths and Limitations:**
+*   **Strengths:** Allows rendering surface-like representations in a stable manner compared to other methods, as demonstrated by flattened ellipsoids [S1].
+*   **Limitations:** The method is noted as still being worked on for converting triangles into anisotropic Gaussian ellipsoids, suggesting potential instability or incompleteness in mesh-to-Gaussian conversion [S1].
+
+**When to use it:**
+Use when stable rendering of surface-like representations is required using Gaussian ellipsoids within a differentiable volume rendering context [S1].
+
+## Background
+VoGE (VoGE: A Differentiable Volume Renderer using Gaussian Ellipsoids for Analysis-by-Synthesis) was introduced to provide a differentiable volume rendering approach using Gaussian ellipsoids. It builds on the concept of Gaussian splatting but adapts it for surface representation by flattening 3D Gaussians. The method was demonstrated on CAD models from The Stanford 3D Scanning Repository (Bunny, Dragon, Armadillo) [S1].
+
+## Sources
+[S1] VoGE: A Differentiable Volume Renderer using Gaussian Ellipsoids for Analysis-by-Synthesis, https://doi.org/10.48550/arxiv.2205.15401, fetched 2026-10-26

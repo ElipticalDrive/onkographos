@@ -3,17 +3,17 @@
 Also called: Fine Sampling, Hierarchical Importance Sampling, Inverse CDF Sampling
 
 ## Overview
-Hierarchical Sampling (Inverse CDF Sampling) generates importance samples along a ray in volume rendering by inverting the cumulative distribution function (CDF) of the rendering contribution [S1, S2]. It solves the problem of finding the ray parameter $t$ corresponding to a target cumulative density value $y$, allowing samples to be drawn directly from transmittance estimates rather than computing expensive integrals [S2]. Unlike standard NeRF hierarchical sampling, which interpolates exponentiated densities (probabilities) and requires auxiliary losses, this method interpolates the density field directly (piecewise linear or constant), offering better numerical stability for end-to-end optimization [S1]. It enables Monte Carlo estimates with fewer ray points and allows gradients to back-propagate through the sampling process to the density field parameters [S1].
+Hierarchical Sampling (Inverse CDF Sampling) generates fine-grained depth samples along a ray by sampling from a probability density function (PDF) derived from coarse rendering weights [S3, S4, S5]. It uses inverse transform sampling on the cumulative distribution function (CDF) to concentrate samples in high-density regions, improving density estimation and reducing variance compared to uniform sampling [S2, S8]. It builds on [Sampling and Jittering](2516-sampling-and-jittering.md) by using importance sampling to refine coarse passes [G].
 
 ## How it works
 **Inputs:**
-*   `coarse_z_vals`: 1D tensor of depth coordinates for coarse samples, shape `(N_c,)` or `(batch, N_c)` [S4].
-*   `coarse_weights`: 1D tensor of unnormalized importance weights (typically derived from volume density or opacity) corresponding to the coarse samples, shape `(N_c,)` or `(batch, N_c)` [S4].
+*   `bins`: 1D tensor of depth coordinates or midpoints for coarse samples, shape `(N_c,)` or `(batch, N_c)` [S4, S8].
+*   `weights`: 1D tensor of unnormalized importance weights (typically volume density or opacity) corresponding to the coarse samples, shape `(N_c,)` or `(batch, N_c)` [S4, S8]. Note: leading and trailing columns are often excluded before passing to this method [S8].
 *   `N_samples`: Integer specifying the number of fine samples to generate per ray [S1, S5].
 *   `deterministic`: Boolean flag. If `True`, uses deterministic uniform spacing; otherwise uses random jitter [S1].
 
 **Outputs:**
-*   `fine_z_vals`: 1D tensor of interpolated depth coordinates for the fine samples, shape `(N_samples,)` or `(batch, N_samples)` [S4].
+*   `fine_z_vals`: 1D tensor of interpolated depth coordinates for the fine samples, shape `(N_samples,)` or `(batch, N_samples)` [S4, S8].
 
 **Data Structures:**
 *   The method operates on 1D tensors representing the ray's depth interval [G].
@@ -22,11 +22,11 @@ Hierarchical Sampling (Inverse CDF Sampling) generates importance samples along 
 
 **Steps:**
 
-1.  **Compute PDF:** Normalize the coarse weights to form a probability density function. To prevent division by zero or NaNs, add a small epsilon ($\epsilon = 10^{-5}$) to all weights before normalization [S1, S2, S5, S7].
+1.  **Compute PDF:** Normalize the coarse weights to form a probability density function. To prevent division by zero or NaNs, add a small epsilon ($\epsilon = 10^{-5}$) to all weights before normalization [S4].
     $$ \text{pdf}_i = \frac{\text{weights}_i + \epsilon}{\sum_{j} (\text{weights}_j + \epsilon)} $$
     where $\text{weights}$ are the `coarse_weights` [S4].
 
-2.  **Compute CDF:** Calculate the cumulative distribution function by taking the cumulative sum of the PDF. Prepend a zero tensor to the CDF to represent the start of the first bin (index 0) [S1, S2, S4, S5, S7].
+2.  **Compute CDF:** Calculate the cumulative distribution function by taking the cumulative sum of the PDF. Prepend a zero tensor to the CDF to represent the start of the first bin (index 0) [S7].
     $$ \text{cdf}_0 = 0 $$
     $$ \text{cdf}_i = \text{cdf}_{i-1} + \text{pdf}_{i-1} \quad \text{for } i > 0 $$
     In code, this is often implemented as `cdf = torch.cat([torch.zeros_like(cdf[..., :1]), torch.cumsum(pdf, -1)], -1)` [S1, S4, S5].
@@ -39,7 +39,7 @@ Hierarchical Sampling (Inverse CDF Sampling) generates importance samples along 
     $$ \text{inds} = \text{searchsorted}(\text{cdf}, u, \text{side}=\text{'right'}) $$
     This returns the index $k$ such that $\text{cdf}_{k-1} \le u < \text{cdf}_k$ [S1, S2, S4, S5, S7].
 
-5.  **Determine Bin Boundaries:** Identify the lower (`below`) and upper (`above`) bin indices for interpolation. Clamp these indices to valid ranges $[0, \text{len}(\text{cdf})-1]$ [S1, S2, S4, S5, S7].
+5.  **Determine Bin Boundaries:** Identify the lower (`below`) and upper (`above`) bin indices for interpolation. Clamp these indices to valid ranges $[0, \text{len}(\text{cdf})-1]$ [S2].
     $$ \text{below} = \max(0, \text{inds} - 1) $$
     $$ \text{above} = \min(\text{len}(\text{cdf}) - 1, \text{inds}) $$
 
@@ -62,13 +62,13 @@ Hierarchical Sampling (Inverse CDF Sampling) generates importance samples along 
 ```python
 import torch
 
-def hierarchical_sampling(coarse_z_vals, coarse_weights, N_samples, deterministic=True):
+def hierarchical_sampling(bins, weights, N_samples, deterministic=True):
     """
     Perform hierarchical sampling using inverse CDF.
     
     Args:
-        coarse_z_vals: Tensor of shape (N_c,) or (batch, N_c) containing coarse depth samples.
-        coarse_weights: Tensor of shape (N_c,) or (batch, N_c) containing unnormalized weights.
+        bins: Tensor of shape (N_c,) or (batch, N_c) containing coarse depth samples.
+        weights: Tensor of shape (N_c,) or (batch, N_c) containing unnormalized weights.
         N_samples: int, number of fine samples to generate.
         deterministic: bool, if True uses linspace, else random uniform.
         
@@ -77,7 +77,7 @@ def hierarchical_sampling(coarse_z_vals, coarse_weights, N_samples, deterministi
     """
     # Step 1: Compute PDF with epsilon to prevent NaNs
     eps = 1e-5
-    weights = coarse_weights + eps
+    weights = weights + eps
     pdf = weights / torch.sum(weights, dim=-1, keepdim=True)
     
     # Step 2: Compute CDF and prepend zero
@@ -87,15 +87,10 @@ def hierarchical_sampling(coarse_z_vals, coarse_weights, N_samples, deterministi
     # Step 3: Generate query values u
     if deterministic:
         u = torch.linspace(0., 1., steps=N_samples).to(cdf.device)
-        # Handle batch dimension if present
         if cdf.dim() > 1:
             u = u.unsqueeze(0).expand(cdf.shape[0], -1)
     else:
-        u = torch.rand_like(cdf[..., :1]).expand_as(cdf[..., :1]).reshape(cdf.shape[:-1] + (N_samples,))
-        # Note: In batched case, u shape should be (batch, N_samples)
-        # Simplified for single ray or assuming batch dim is handled by broadcasting in torch.rand
-        if cdf.dim() > 1:
-            u = torch.rand(cdf.shape[0], N_samples).to(cdf.device)
+        u = torch.rand(cdf.shape[:-1] + (N_samples,)).to(cdf.device)
             
     # Step 4: Find bin indices
     inds = torch.searchsorted(cdf, u, right=True)
@@ -105,16 +100,13 @@ def hierarchical_sampling(coarse_z_vals, coarse_weights, N_samples, deterministi
     above = torch.clamp(inds, max=cdf.shape[-1] - 1)
     
     # Step 6: Gather CDF and bin values
-    # Expand indices for gathering
     inds_g = torch.stack([below, above], dim=-1)
     
     # Gather CDF values
     cdf_g = torch.gather(cdf.unsqueeze(1).expand_as(inds_g), 2, inds_g).squeeze(1)
     
     # Gather depth values (bins)
-    # Assuming coarse_z_vals has shape (N_c,) or (batch, N_c)
-    # We need to gather from coarse_z_vals using below and above indices
-    bins_g = torch.gather(coarse_z_vals.unsqueeze(1).expand_as(inds_g), 2, inds_g).squeeze(1)
+    bins_g = torch.gather(bins.unsqueeze(1).expand_as(inds_g), 2, inds_g).squeeze(1)
     
     # Step 7: Interpolate
     denom = cdf_g[..., 1] - cdf_g[..., 0]
@@ -144,20 +136,20 @@ Inverse Opacity Calculation is a differentiable method for generating importance
 Proposal Network Sampling is a method for importance sampling in volume rendering that directly estimates the Probability Density Function (PDF) along a ray using a coarse neural network, known as the proposal network. It solves the problem of inefficient uniform sampling by concentrating samples on high-contribution areas (such as surfaces) while spreading them in empty or occluded regions, providing more accurate transmittance estimation than spatial skipping methods. It builds on [Hierarchical Sampling (Inverse CDF Sampling)](973-hierarchical-sampling-inverse-cdf-sampling.md) by learning the sampling distribution dynamically rather than relying on static weights [G].
 
 ### [RangeFineSampler](3141-rangefinesampler.md)
-RangeFineSampler is a hierarchical sampling technique for direct volume ray casting that refines coarse samples by generating a dense uniform grid around the coarse sample with the highest weight, supplemented by random samples across the full ray extent. It addresses the problem of missing high-frequency details between coarse samples by concentrating computational effort near the most significant signal while maintaining global coverage through random jittering. Unlike [Inverse Opacity Calculation](1099-inverse-opacity-calculation.md) which derives samples from opacity gradients, or [Proposal Network Sampling](1589-proposal-network-sampling.md) which uses learned neural networks to predict sample locations, RangeFineSampler relies on a deterministic geometric expansion around the peak weight index combined with stochastic uniform sampling.
+RangeFineSampler is a hierarchical sampling technique for direct volume ray casting that refines coarse samples by generating a dense uniform grid around the coarse sample with the highest weight, supplemented by random samples across the full ray extent. It addresses missing high-frequency details between coarse samples by concentrating computational effort near the most significant signal while maintaining global coverage through random jittering. Unlike [Inverse Opacity Calculation](1099-inverse-opacity-calculation.md) which derives samples from opacity gradients, or [Proposal Network Sampling](1589-proposal-network-sampling.md) which uses learned neural networks to predict sample locations, RangeFineSampler relies on a deterministic geometric expansion around the peak weight index combined with stochastic uniform sampling.
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-*   **Time:** The method involves computing the PDF and CDF ($O(N_c)$), generating random numbers ($O(N_f)$), binary search ($O(N_f \log N_c)$), and interpolation ($O(N_f)$). Overall complexity is dominated by $O(N_f \log N_c)$, where $N_c$ is the number of coarse samples and $N_f$ is the number of fine samples.
-*   **Memory:** Requires storage for the CDF and intermediate tensors, proportional to $O(N_c + N_f)$.
+*   **Time:** The method involves computing the PDF and CDF ($O(N_c)$), generating random numbers ($O(N_f)$), binary search ($O(N_f \log N_c)$), and interpolation ($O(N_f)$) [G]. Overall complexity is dominated by $O(N_f \log N_c)$, where $N_c$ is the number of coarse samples and $N_f$ is the number of fine samples [G].
+*   **Memory:** Requires storage for the CDF and intermediate tensors, proportional to $O(N_c + N_f)$ [G].
 
 **Measured Performance:**
-*   Performance depends on the hardware and resolution. On a single 2080 Ti, training a NeRF on a low-res scene (e.g., `fern`) takes approximately 8 hours for 200k iterations [S7].
+*   Performance depends on the hardware and resolution [G]. On a single 2080 Ti, training a NeRF on a low-res scene (e.g., `fern`) takes approximately 8 hours for 200k iterations [S7].
 *   The method allows for fewer ray points while maintaining accuracy, reducing the computational load compared to uniform sampling [S1].
 
 **Scaling:**
-*   The method scales linearly with the number of rays and samples.
-*   It is suitable for large-scale volume rendering due to its efficiency in concentrating samples in high-density regions.
+*   The method scales linearly with the number of rays and samples [G].
+*   It is suitable for large-scale volume rendering due to its efficiency in concentrating samples in high-density regions [G].
 
 **Strengths and Limitations:**
 *   **Strengths:** Differentiable, allowing gradients to back-propagate through the sampling process [S1]. Numerically stable with proper epsilon handling [S1, S7]. Efficient importance sampling [S1].
@@ -172,13 +164,15 @@ RangeFineSampler is a hierarchical sampling technique for direct volume ray cast
 *   Avoid when the scene has very low density variations, making importance sampling less beneficial [S1].
 
 ## Background
-Hierarchical Sampling (Inverse CDF Sampling) originates from the NeRF (Neural Radiance Fields) paper by Mildenhall et al. [S2, S5]. It was introduced to improve the efficiency of volume rendering by concentrating samples in regions of high density. The method has been widely adopted in subsequent works, including [S1, S4, S7]. It is a key component in many modern neural rendering pipelines.
+Hierarchical Sampling (Inverse CDF Sampling) originates from the NeRF (Neural Radiance Fields) paper by Mildenhall et al. [S2, S5]. It was introduced to improve the efficiency of volume rendering by concentrating samples in regions of high density [S8]. The method has been widely adopted in subsequent works, including [S1, S4, S7].
 
 ## Sources
 [S1] GreatDrake/reparameterized-volume-sampling, https://github.com/GreatDrake/reparameterized-volume-sampling, fetched 2026-10-26 (unofficial)
 [S2] bmild/nerf, https://github.com/bmild/nerf, fetched 2026-10-26 (unofficial)
-[S3] damn8daniel/nerf-from-scratch, https://github.com/damn8daniel/nerf-from-scratch, fetched 2026-10-26 (unofficial)
-[S4] albertgassol1/vf-nerf, https://github.com/albertgassol1/vf-nerf, fetched 2026-10-26 (unofficial)
-[S5] dgsmith7/nerf-mlp, https://github.com/dgsmith7/nerf-mlp, fetched 2026-10-27 (unofficial)
-[S6] InanXR/FLASH, https://github.com/InanXR/FLASH, fetched 2026-10-27 (unofficial)
-[S7] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)
+[S3] emmanueladutwum123/nerf-from-scratch, https://github.com/emmanueladutwum123/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+[S4] damn8daniel/nerf-from-scratch, https://github.com/damn8daniel/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+[S5] albertgassol1/vf-nerf, https://github.com/albertgassol1/vf-nerf, fetched 2026-10-26 (unofficial)
+[S6] dgsmith7/nerf-mlp, https://github.com/dgsmith7/nerf-mlp, fetched 2026-10-27 (unofficial)
+[S7] InanXR/FLASH, https://github.com/InanXR/FLASH, fetched 2026-10-27 (unofficial)
+[S8] NeRF: A Volume Rendering Perspective | Yue Yu - GitHub Pages, https://yconquesty.github.io/blog/ml/nerf/nerf_rendering.html, fetched 2026-10-29 (unofficial)
+[S9] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)

@@ -1,105 +1,89 @@
 # Typed Voxels
 
-Also called: Voxel Kind System, Material-Indexed Voxels
 
 ## Overview
-Typed Voxels associate a discrete type identifier (enum) with each voxel in a sparse grid to distinguish between different material kinds, such as dirt or stone [S1, unofficial]. This method solves the problem of representing heterogeneous volumes where a simple binary "exists/empty" flag is insufficient for rendering or simulation logic. It differs from [Multi-type Voxel Storage](1104-multi-type-voxel-storage.md) by implementing type storage via a direct hash map lookup rather than complex multi-channel bit packing, and from [Voxel Flag System & Filled State Logic](2040-voxel-flag-system-filled-state-logic.md) by focusing on material enumeration rather than topological surface classification [S1, unofficial][2040-voxel-flag-system-filled-state-logic.md].
+Typed Voxels associate a discrete type identifier (enum) with each voxel in a sparse grid to distinguish between different material kinds, such as dirt or stone [S1, unofficial]. It differs from [Voxel Flag System & Filled State Logic](2040-voxel-flag-system-filled-state-logic.md) by focusing on material type enumeration rather than binary geometric classification [2040-voxel-flag-system-filled-state-logic.md].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A chunk coordinate system (e.g., 3D integer grid) and a set of voxel placement commands specifying position and material type.
-*   **Output:** A chunk data structure containing a mapping from local voxel coordinates to material types, enabling retrieval of the specific material at any given voxel.
+*   **Input:** A chunk coordinate system and voxel placement commands specifying position and material type [S1, unofficial].
+*   **Output:** A chunk data structure containing a mapping from local voxel coordinates to material types [S1, unofficial].
 
 **Data Structures:**
-The core change is replacing the binary existence set with a typed hash map.
-
-1.  **VoxelKind Enum:** A simple enumeration defining the available material types.
-    *   Fields: Enum variants (e.g., `Dirt`, `Stone`).
-    *   Size: Determined by the number of distinct types; typically small integers or enums.
-2.  **Chunk Structure:**
-    *   Field `voxels`: `HashMap<IVec3, VoxelKind>`.
-    *   Layout: Maps local 3D integer coordinates (`IVec3`) to the corresponding `VoxelKind` enum value.
-    *   Note: The key is the local offset within the chunk, not the global world coordinate.
+The core change is replacing the binary existence set with a typed hash map [S1, unofficial].
+1.  **VoxelKind Enum:** Defines available material types (e.g., `Dirt`, `Stone`) [S1, unofficial].
+2.  **Chunk Structure:** Field `voxels` is a `HashMap<IVec3, VoxelKind>` mapping local 3D integer coordinates to the corresponding enum value [S1, unofficial].
 
 **Steps:**
-1.  **Define Types:** Create an enum `VoxelKind` listing all supported material types (e.g., `Dirt`, `Stone`) [S1, unofficial].
-2.  **Update Chunk Storage:** Replace the previous `HashSet<IVec3>` (which only tracked existence) with a `HashMap<IVec3, VoxelKind>` in the `Chunk` struct [S1, unofficial].
-3.  **Placement:** When placing a voxel at global position `P`:
-    *   Calculate chunk position `C = P / CHUNK_SIZE`.
-    *   Calculate local offset `L = P % CHUNK_SIZE`.
-    *   Insert `(L, Type)` into `Chunk(C).voxels`.
-4.  **Retrieval:** To get the type at `P`:
-    *   Locate `Chunk(C)`.
-    *   Lookup `L` in `Chunk(C).voxels`.
-    *   Return the associated `VoxelKind` or a default "empty" type if not found.
+1.  **Define Types:** Create an enum `VoxelKind` listing supported material types [S1, unofficial].
+2.  **Update Chunk Storage:** Replace `HashSet<IVec3>` with `HashMap<IVec3, VoxelKind>` in the `Chunk` struct [S1, unofficial].
+3.  **Placement:** When placing a voxel at global position `P`, calculate chunk position `C = P / CHUNK_SIZE` and local offset `L = P % CHUNK_SIZE`, then insert `(L, Type)` into `Chunk(C).voxels` [S1, unofficial].
+4.  **Retrieval:** To get the type at `P`, locate `Chunk(C)`, lookup `L` in `Chunk(C).voxels`, and return the associated `VoxelKind` or a default "empty" type if not found [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Define the material types
-class VoxelKind(Enum):
+# IVec3 is a 3-tuple of integers (x, y, z)
+# Define material types
+class VoxelKind:
     Dirt = 0
     Stone = 1
+    Empty = 2
 
-# Define the chunk structure
+# Define chunk structure
 class Chunk:
     def __init__(self):
-        # HashMap mapping local 3D coordinates to material types
-        self.voxels: Dict[IVec3, VoxelKind] = {}
+        self.voxels = {}  # Maps IVec3 tuples to VoxelKind
 
 # Function to place a voxel
-def place_voxel(world: Dict[IVec3, Chunk], global_pos: IVec3, kind: VoxelKind):
+def place_voxel(world, global_pos, kind):
     chunk_size = 32
-    chunk_pos = global_pos // chunk_size
-    local_offset = global_pos % chunk_size
-    
-    # Get or create the chunk
+    chunk_pos = tuple(p // chunk_size for p in global_pos)
+    local_offset = tuple(p % chunk_size for p in global_pos)
+
     if chunk_pos not in world:
         world[chunk_pos] = Chunk()
-    
+
     chunk = world[chunk_pos]
-    
-    # Store the type in the hash map
     chunk.voxels[local_offset] = kind
 
 # Function to retrieve a voxel type
-def get_voxel_type(world: Dict[IVec3, Chunk], global_pos: IVec3) -> VoxelKind:
+def get_voxel_type(world, global_pos):
     chunk_size = 32
-    chunk_pos = global_pos // chunk_size
-    local_offset = global_pos % chunk_size
-    
+    chunk_pos = tuple(p // chunk_size for p in global_pos)
+    local_offset = tuple(p % chunk_size for p in global_pos)
+
     if chunk_pos not in world:
-        return VoxelKind.Empty # [G] Default empty type if chunk doesn't exist
-    
+        return VoxelKind.Empty
+
     chunk = world[chunk_pos]
-    
-    # Lookup in the hash map
-    if local_offset in chunk.voxels:
-        return chunk.voxels[local_offset]
-    else:
-        return VoxelKind.Empty # [G] Voxel not present in this chunk
+    return chunk.voxels.get(local_offset, VoxelKind.Empty)
 ```
 
 **Parameters:**
-*   `CHUNK_SIZE`: Typically 32 (as seen in the source example) [S1, unofficial].
+*   `CHUNK_SIZE`: 32 [S1, unofficial].
 *   `VoxelKind` variants: Defined by the application; the source uses `Dirt` and `Stone` [S1, unofficial].
 
 **Edge Cases:**
-*   **Empty Space:** Voxels not present in the `HashMap` are implicitly empty. The implementation must handle `KeyError` or equivalent map-miss cases by returning a default "empty" type [G].
-*   **Hash Collisions:** Standard hash map behavior applies. Performance depends on the hash function quality for `IVec3` keys.
+*   **Empty Space:** Voxels not present in the `HashMap` are implicitly empty [S1, unofficial].
+*   **Hash Collisions:** Standard hash map behavior applies [G].
 
 ## Subtopics
 
+### [Voxel Flag System & Filled State Logic](2040-voxel-flag-system-filled-state-logic.md)
+Manages topological and geometric state of individual voxels via a compact bitmask of five properties to determine solid, surface, or empty space without separate metadata arrays [2040-voxel-flag-system-filled-state-logic.md]. It differs from Typed Voxels by focusing on binary geometric classification rather than material type enumeration, allowing rapid updates during mesh voxelization [2040-voxel-flag-system-filled-state-logic.md]. Choose it when tracking surface topology and fill state is required instead of material variety. [Voxel Flag System & Filled State Logic](2040-voxel-flag-system-filled-state-logic.md)
+
 ## Operating characteristics
-*   **Time Complexity:** Lookup and insertion are $O(1)$ average case for hash map operations.
-*   **Memory Complexity:** Higher than a simple `HashSet` or bitfield because each voxel stores an additional integer/enum value for the type. The overhead is proportional to the number of *placed* voxels, not the total chunk volume.
-*   **Strengths:** Simple to implement; directly supports material-specific rendering or logic; flexible number of types.
-*   **Limitations:** Hash map overhead (pointers, hash entries) is higher than compact bit arrays. Not suitable if memory is extremely constrained and types are few (bit packing might be better).
-*   **When to use:** When the number of material types is moderate and simplicity of implementation is prioritized over extreme memory density.
+*   **Time Complexity:** Lookup and insertion are $O(1)$ average case for hash map operations [G].
+*   **Memory Complexity:** Higher than a simple `HashSet` or bitfield because each voxel stores an additional integer/enum value for the type [G]. The overhead is proportional to the number of *placed* voxels, not the total chunk volume [G].
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Simple to implement; directly supports material-specific rendering or logic; flexible number of types [G].
+*   **Limitations:** Hash map overhead (pointers, hash entries) is higher than compact bit arrays [G]. Not suitable if memory is extremely constrained and types are few (bit packing might be better) [G].
+*   **When to use:** When the number of material types is moderate and simplicity of implementation is prioritized over extreme memory density [G].
 
 ## Background
-This method originates from the "Voxel Engine THIS weekend" tutorial series, which demonstrates building a basic voxel engine from scratch [S1, unofficial]. It represents a natural evolution from binary voxel grids (where a voxel is either present or not) to typed grids, allowing for more visually and logically diverse worlds. The approach is common in early-stage voxel engine implementations due to its ease of integration with existing hash-based sparse storage structures.
+This method originates from the "Voxel Engine THIS weekend" tutorial series, which demonstrates building a basic voxel engine from scratch [S1, unofficial]. It represents a natural evolution from binary voxel grids to typed grids, allowing for more visually and logically diverse worlds [G]. The approach is common in early-stage voxel engine implementations due to its ease of integration with existing hash-based sparse storage structures [G].
 
 ## Sources
 [S1] Make yourself a Voxel Engine THIS weekend, https://daymare.net/blogs/voxel-engine-in-a-weekend/, fetched 2026-10-26 (unofficial)

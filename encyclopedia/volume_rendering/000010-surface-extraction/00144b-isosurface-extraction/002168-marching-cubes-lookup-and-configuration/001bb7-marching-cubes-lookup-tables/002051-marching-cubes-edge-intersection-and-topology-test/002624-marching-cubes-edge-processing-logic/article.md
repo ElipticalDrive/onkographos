@@ -1,0 +1,128 @@
+# Marching Cubes Edge Processing Logic
+
+Also called: ContourProcessEdge, Edge Processing Logic
+
+## Overview
+This method processes the edges of a voxel grid cell to generate triangle primitives for an isosurface. It operates on four adjacent nodes (typically forming a quad face or a specific edge configuration in an octree context) to determine where the isosurface intersects the edges. It differs from standard Marching Cubes by using a `processEdgeMask` to identify specific edges and a sign-change detection logic to decide triangle connectivity, often used in dual contouring or simplified marching cubes implementations where edge topology is managed via node indices rather than a full 256-case lookup table.
+
+## How it works
+The method iterates over four nodes associated with a specific edge direction. For each node, it identifies the two corners of the voxel edge, checks for a sign change between these corners (indicating an intersection), and tracks the node with the smallest size (resolution) to determine the primary vertex location. Based on the sign change at this "minimum" node and a flip flag, it outputs two triangles.
+
+### Inputs and Outputs
+- **Inputs**:
+  - `nodes`: An array of 4 node pointers/objects. Each node contains `drawInfo->corners` (bitmask of corner signs), `drawInfo->index` (vertex index), and `size` (voxel size/resolution).
+  - `processEdgeMask`: A 3x4 integer array mapping direction and index to edge indices.
+  - `edgevmap`: A 12x2 integer array mapping edge indices to corner indices (0-7).
+  - `MATERIAL_AIR`: A constant representing the "empty" or negative sign state.
+- **Outputs**:
+  - A list of two triangles, each defined by 3 vertex indices.
+
+### Data Structures
+- **`processEdgeMask`**: `int[3][4]`. Maps `(dir, i)` to an edge index.
+  - Values: `{{3, 2, 1, 0}, {7, 5, 6, 4}, {11, 10, 9, 8}}` [S1].
+- **`edgevmap`**: `int[12][2]`. Maps edge index to two corner indices (0-7) within a cube.
+  - Used to extract corner signs from `drawInfo->corners` [S1].
+- **`drawInfo->corners`**: An integer bitmask where bit `k` represents the sign of corner `k`. Bit `k` is 1 if `node->corners & (1 << k)` is non-zero (or specifically `!= MATERIAL_AIR`) [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def process_edge_logic(nodes, process_edge_mask, edgevmap, material_air):
+    """
+    Generates two triangles for an edge based on sign changes between corners 
+    of 4 adjacent nodes.
+    
+    Args:
+        nodes: List of 4 node objects. Each has .drawInfo.corners (int), 
+               .drawInfo.index (int), and .size (float).
+        process_edge_mask: 3x4 array mapping dir and i to edge index.
+        edgevmap: 12x2 array mapping edge index to corner indices.
+        material_air: Constant representing the air/negative sign.
+        
+    Returns:
+        List of two triangles, each a tuple of 3 vertex indices.
+    """
+    min_size = 1000000
+    min_index = 0
+    indices = [-1, -1, -1, -1]
+    flip = False
+    sign_change = [False, False, False, False]
+    
+    # Loop over the 4 nodes associated with the edge direction
+    for i in range(4):
+        # Get the edge index for this node's contribution
+        # Note: The source implies 'dir' is implicit or handled by the caller 
+        # passing the correct mask row. We assume process_edge_mask is indexed 
+        # by [dir][i]. If 'dir' is not passed, it must be determined externally.
+        # Based on S1, the mask is 3x4. We assume 'dir' is fixed for this call.
+        edge = process_edge_mask[dir][i]
+        
+        # Get corner indices for this edge
+        c1 = edgevmap[edge][0]
+        c2 = edgevmap[edge][1]
+        
+        # Extract signs from the node's corner bitmask
+        # m1 is sign of corner c1, m2 is sign of corner c2
+        m1 = (nodes[i].drawInfo.corners >> c1) & 1
+        m2 = (nodes[i].drawInfo.corners >> c2) & 1
+        
+        # Store the node's vertex index
+        indices[i] = nodes[i].drawInfo.index
+        
+        # Track the node with the smallest size (highest resolution)
+        if nodes[i].size < min_size:
+            min_size = nodes[i].size
+            min_index = i
+            # Flip is determined by whether the first corner is air
+            flip = (m1 != material_air)
+            
+        # Compute sign change: true if one corner is air and the other is not
+        sign_change[i] = (m1 == material_air and m2 != material_air) or \
+                         (m1 != material_air and m2 == material_air)
+    
+    # Generate triangles if there is a sign change at the minimum size node
+    if sign_change[min_index]:
+        if not flip:
+            # Push triangles (0,1,3) and (0,3,2)
+            return [(indices[0], indices[1], indices[3]), (indices[0], indices[3], indices[2])]
+        else:
+            # Push triangles (0,3,1) and (0,2,3)
+            return [(indices[0], indices[3], indices[1]), (indices[0], indices[2], indices[3])]
+    else:
+        return []
+```
+
+### Parameters
+- **`processEdgeMask`**: `{{3,2,1,0},{7,5,6,4},{11,10,9,8}}` [S1].
+- **`edgevmap`**: 12x2 array. Specific values not listed in sources, but standard Marching Cubes edge-to-corner mapping is implied [S1].
+- **`MATERIAL_AIR`**: Constant. Value not specified, but compared against extracted bits [S1].
+
+### Edge Cases and Pitfalls
+- **Precision**: The comparison `nodes[i].size < min_size` relies on floating-point precision. If sizes are equal, the first node encountered is kept.
+- **Boundary Conditions**: If `nodes` contains null pointers or invalid indices, the code will crash. The source does not show null checks [S1].
+- **Sign Extraction**: The bit shift `(corners >> c) & 1` assumes `corners` is an integer bitmask. If `corners` is stored differently, this logic fails [S1].
+- **Flip Logic**: The `flip` variable is set based on `m1 != MATERIAL_AIR`. This determines the winding order of the output triangles. Incorrect flip logic leads to inverted normals [S1].
+
+## Subtopics
+
+### Marching Cubes Edge Intersection and Topology Test
+- **What it is**: The parent method that likely calls this logic. It determines which edges intersect the isosurface and tests for topological consistency.
+- **Difference**: This method focuses on the actual triangle generation for a specific edge configuration, whereas the parent handles the broader topology and edge identification.
+- **When to choose**: Use this when you have already identified the intersecting edges and need to generate the mesh primitives.
+- **Link**: [Marching Cubes Edge Intersection and Topology Test](2251-marching-cubes-edge-intersection-and-topology-test.md)
+
+## Operating characteristics
+- **Time Complexity**: O(1) per edge/node group, as it loops over a fixed 4 nodes.
+- **Memory Complexity**: O(1) auxiliary space.
+- **Performance**: Fast, as it avoids large lookup tables and uses simple bitwise operations.
+- **Strengths**: Simple implementation, low memory footprint.
+- **Limitations**: Limited to specific edge configurations (4 nodes). Not a general solution for all 256 Marching Cubes cases unless combined with other logic.
+- **When to use**: In dual contouring or simplified marching cubes where edge processing is decoupled from the full lookup table.
+- **When not to use**: When a full, robust Marching Cubes implementation with all topological cases is required.
+
+## Background
+This logic is part of the Dual Contouring sample by Tao Ju, implemented by Nick Gildea. It is used in the context of octree-based surface extraction, specifically in the `SimplifyOctree` function where nodes are processed to generate mesh geometry. The method is designed to work with the octree's hierarchical structure, using node size to prioritize higher-resolution intersections.
+
+## Sources
+[S1] DualContouringSample, https://github.com/nickgildea/DualContouringSample, fetched 2026-10-26 (unofficial)

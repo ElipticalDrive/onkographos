@@ -1,0 +1,153 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** The depth buffer (from MSAA resolve), camera view/projection matrices, light positions and types (Sun, Lamps), shadow maps (cascaded for sun, cubemaps for lamps), and configuration parameters (`r_volumetric*`).
+-*   **Outputs:** A 3D texture (or compute buffer) storing in-scattered radiance and extinction coefficients, which is later blurred and composited [S1, S2].
++*   **Inputs:** The depth buffer (from MSAA resolve), camera view/projection matrices, light positions and types (Sun, Lamps), shadow maps (cascaded for sun, cubemaps for lamps), and configuration parameters (`r_volumetric*`) [S1, S2].
++*   **Outputs:** A 3D texture storing per-voxel in-scattered radiance and extinction coefficients, which is later blurred and composited [S1, S2].
+ 
+ **Data Structures:**
+@@ -46,81 +46,92 @@
+ 
+ ```python
+-# Pseudocode for the Light Injection Pass Compute Shader
+-# Assumes access to: depth_buffer, shadow_maps_csm, shadow_maps_cubemap, 
+-# light_data (sun, lamps), params (r_volumetric*, etc.)
++# Standard math/vector operations
++def vec4(x, y, z, w): return (x, y, z, w)
++def mat4_mul_vec(M, v): return (M[0][0]*v[0]+M[0][1]*v[1]+M[0][2]*v[2]+M[0][3]*v[3], M[1][0]*v[0]+M[1][1]*v[1]+M[1][2]*v[2]+M[1][3]*v[3], M[2][0]*v[0]+M[2][1]*v[1]+M[2][2]*v[2]+M[2][3]*v[3], M[3][0]*v[0]+M[3][1]*v[1]+M[3][2]*v[2]+M[3][3]*v[3])
++def normalize(v): return (v[0]/v[3], v[1]/v[3], v[2]/v[3])
++def distance(a, b): return ((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2)**0.5
++def add(a, b): return (a[0]+b[0], a[1]+b[1], a[2]+b[2])
++def scale(v, s): return (v[0]*s, v[1]*s, v[2]*s)
++def ray_sphere_intersect(origin, dir, center, radius):
++    oc = (origin[0]-center[0], origin[1]-center[1], origin[2]-center[2])
++    b = oc[0]*dir[0] + oc[1]*dir[1] + oc[2]*dir[2]
++    c = oc[0]**2 + oc[1]**2 + oc[2]**2 - radius**2
++    disc = b*b - c
++    if disc < 0: return -1, None
++    t = -b - disc**0.5
++    return t, add(origin, scale(dir, t))
++def equi_angular_sample(i, steps): return (1.0 - 2.0 * (i + 0.5) / steps) # Kulla & Fajardo 2012
++def sample_csm_shadow(pos, sun_dir): return 1.0 # Standard shadow map lookup
++def sample_cubemap_shadow(pos, lamp_pos): return 1.0 # Standard cubemap lookup
++def evaluate_sun_light(pos, dir): return sun_intensity # Standard light evaluation
++def evaluate_lamp_light(pos, lamp, shadow): return lamp.color * shadow # Standard light evaluation
++def depth_aware_blur(tex): return tex # Standard blur pass
+ 
+-def light_injection_pass():
+-    if not params.r_volumetric or params.r_volumetricDensity == 0:
+-        return
+-
+-    # Resolution is 1/4 of view
+-    res_x = view_width / 4
+-    res_y = view_height / 4
++def light_injection_pass(view_width, view_height, view_proj_inv, camera_eye, sun_direction, lamps, params):
++    res_x = view_width // 4
++    res_y = view_height // 4
++    res_z = params.voxel_depth  # Not given in the sources.
+     
+-    # 3D texture for radiance/extinction
+-    volume_texture = init_3d_texture()
+-
+-    for z in range(voxel_depth):
+-        for y in range(voxel_height):
+-            for x in range(voxel_width):
++    # 3D texture for radiance and extinction
++    volume_texture = [[0.0, 0.0] for _ in range(res_x * res_y * res_z)]
++    
++    for z in range(res_z):
++        for y in range(res_y):
++            for x in range(res_x):
+                 # Step 2: Reconstruct world position
+-                clip_pos = vec4(x, y, z, 1.0) # Simplified grid index mapping
+-                # Actual mapping involves grid dimensions and view/projection
+-                world_pos = reconstruct_world_pos_from_grid(x, y, z)
++                clip_pos = vec4(x / res_x * 2.0 - 1.0, y / res_y * 2.0 - 1.0, z / res_z * 2.0 - 1.0, 1.0)
++                world_pos = mat4_mul_vec(view_proj_inv, clip_pos)
++                world_pos = normalize(world_pos)
+                 
+-                total_radiance = vec3(0.0)
+-                total_extinction = 0.0
++                total_radiance = (0.0, 0.0, 0.0)
+                 
+                 # Step 3: Sun Ray Marching
+                 if params.r_volumetricSun:
+-                    sun_march_steps = 16
++                    sun_steps = 16
+                     max_dist = params.r_volumetricRange
+-                    step_dist = max_dist / sun_march_steps
++                    step_dist = max_dist / sun_steps
+                     
+-                    for i in range(sun_march_steps):
++                    for i in range(sun_steps):
+                         current_dist = i * step_dist
+-                        ray_pos = camera_eye + ray_direction * current_dist
++                        ray_pos = add(camera_eye, scale(sun_direction, current_dist))
+                         
+-                        # Sample finest cascade containing sun
+                         shadow_val = sample_csm_shadow(ray_pos, sun_direction)
+                         
+-                        if shadow_val > 0.0: # Unshadowed
+-                            # Evaluate light
++                        if shadow_val > 0.0:
+                             radiance = evaluate_sun_light(ray_pos, sun_direction)
+-                            total_radiance += radiance * shadow_val
++                            total_radiance = add(total_radiance, scale(radiance, shadow_val))
+                 
+                 # Step 4 & 5: Lamp Ray Marching
+-                for lamp in active_lamps:
+-                    # Ray-sphere test
+-                    hit_dist, hit_normal = ray_sphere_intersect(camera_eye, ray_direction, lamp.position, lamp.radius)
++                for lamp in lamps:
++                    ray_dir = normalize(subtract(world_pos, camera_eye))
++                    
++                    hit_dist, hit_normal = ray_sphere_intersect(camera_eye, ray_dir, lamp.position, lamp.radius)
+                     
+                     if hit_dist > 0:
+-                        # Upper-bound culling
+-                        h = distance(camera_eye, lamp.position) # Or distance from ray to lamp
++                        h = distance(camera_eye, lamp.position)
+                         upper_bound = PI / h
+                         if upper_bound < visible_threshold:
+                             continue
+                             
+-                        # March 4 steps with equi-angular sampling
+                         for i in range(4):
+-                            # Equi-angular sampling logic
+                             angle = equi_angular_sample(i, 4)
+-                            step_pos = lamp_position + direction_from_lamp * distance_from_lamp
++                            step_pos = add(lamp.position, scale(ray_dir, lamp.radius * (0.5 + 0.5 * cos(angle))))
+                             
+-                            # Shadow sample
+                             shadow_val = sample_cubemap_shadow(step_pos, lamp.position)
+                             
+                             if shadow_val > 0.0:
+                                 radiance = evaluate_lamp_light(step_pos, lamp, shadow_val)
+-                                total_radiance += radiance
++                                total_radiance = add(total_radiance, scale(radiance, shadow_val))
+                 
+-                # Store result
+-                volume_texture[x, y, z].radiance = total_radiance
+-                volume_texture[x, y, z].extinction = params.r_volumetricDensity
++                volume_texture[z * res_y * res_x + y * res_x + x][0] = total_radiance
++                volume_texture[z * res_y * res_x + y * res_x + x][1] = params.r_volumetricDensity
+ 
+-    # Step 6: Blur
+     blurred_volume = depth_aware_blur(volume_texture)
+     return blurred_volume
+ ```
++
++**Pitfalls:**
++*   **Lamp Culling:** Lamps whose upper-bound contribution is below the visible threshold are skipped. The upper-bound contribution is calculated as $\pi/h$, where $h$ is the distance from the ray to the lamp center [S1].
++*   **Shadow Map Instability:** Low shadow map resolution or unstable shadow maps cause flickering during cone tracing when the camera moves. Stabilizing the shadow map (e.g., computing directional light position from the view camera) may leave voxels unfilled if the shadow map resolution is low or not fully utilized [S3].
+ 
+ ## Subtopics
+@@ -139,5 +150,4 @@
+ *   **Limitations:** No temporal accumulation or froxels (can lead to noise/steps); no extinction (scene is not dimmed by the haze); dependent on shadow map resolution for quality [S1, S3].
+ *   **When to use:** When sun shafts and lamp glow are desired in real-time scenes with existing shadow map support, and full volumetric path tracing is too expensive [S1].
+-*   **When not to use:** When accurate extinction (darkening of the scene) or high-quality noise-free scattering is required without post-processing blur [S1].
+ 
+ ## Background

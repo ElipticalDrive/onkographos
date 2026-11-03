@@ -2,23 +2,23 @@
 Also called: Gradient Computation for PlenOctree Optimization, NeRF Piecewise Constant Volume Rendering Derivatives
 
 ## Overview
-This method provides the closed-form gradients of the NeRF piecewise constant volume rendering equation with respect to the density ($\boldsymbol{\sigma}$) and color ($\mathbf{c}$) parameters. It enables direct optimization of PlenOctree attributes using gradient-based methods (e.g., SGD) to refine image quality [S1]. It differs from numerical differentiation by providing exact, efficient gradients required for stable convergence in hierarchical grid optimization [S1].
+This method provides the closed-form gradients of the NeRF piecewise constant volume rendering equation with respect to the density ($\boldsymbol{\sigma}$) and color ($\mathbf{c}$) parameters [S1]. It enables direct optimization of PlenOctree attributes using gradient-based methods (e.g., SGD) to refine image quality [S1].
 
 ## How it works
 **Inputs:**
-- Ray segment endpoints $t_0, \dots, t_N$ where $t_0$ is near and $t_N$ is far.
-- Segment lengths $\delta_i = t_{i+1} - t_i$ for $i=0, \dots, N-1$.
-- Density values $\boldsymbol{\sigma} = (\sigma_0, \dots, \sigma_{N-1})$ where $\sigma_i \ge 0$.
+- Ray segment endpoints $t_0, \dots, t_N$ where $t_0$ is near and $t_N$ is far [S1].
+- Segment lengths $\delta_i = t_{i+1} - t_i$ for $i=0, \dots, N-1$ [S1].
+- Density values $\boldsymbol{\sigma} = (\sigma_0, \dots, \sigma_{N-1})$ where $\sigma_i \ge 0$ [S1].
 - Color values $\mathbf{c} = (c_0, \dots, c_N)$ where $c_i \in [0, 1]^3$ are RGB colors. $c_N$ is the background color (typically a hyperparameter) [S1].
 
 **Outputs:**
-- Gradient of rendered color $\hat{\mathbf{C}}$ with respect to density: $\frac{\partial \hat{\mathbf{C}}}{\partial \sigma_i}$.
+- Gradient of rendered color $\hat{\mathbf{C}}$ with respect to density: $\frac{\partial \hat{\mathbf{C}}}{\partial \sigma_i}$ [S1].
 - Gradient of rendered color $\hat{\mathbf{C}}$ with respect to color: $\frac{\partial \hat{\mathbf{C}}}{\partial c_i}$ [S1].
 
 **Data Structures:**
-- Arrays for $\delta$, $\sigma$, $c$, $T$, and $w$ of size $N$ or $N+1$ as appropriate.
-- $T$ stores accumulated transmittance.
-- $w$ stores segment weights.
+- Arrays for $\delta$, $\sigma$, $c$, $T$, and $w$ of size $N$ or $N+1$ as appropriate [S1].
+- $T$ stores accumulated transmittance [S1].
+- $w$ stores segment weights [S1].
 
 **Steps:**
 
@@ -45,18 +45,20 @@ This method provides the closed-form gradients of the NeRF piecewise constant vo
 5. **Compute Color Gradients:**
    For $i = 0$ to $N$:
    $$ \frac{\partial \hat{\mathbf{C}}}{\partial c_i} = w_i $$
-   If colors are represented as Spherical Harmonics (SH) coefficients, apply the chain rule. Since SH basis function values are constant across the ray, the derivative with respect to SH coefficients is $w_i \cdot \text{SH\_basis}(i)$ [S1].
+   If colors are represented as Spherical Harmonics (SH) coefficients, apply the chain rule [S1]. Since SH basis function values are constant across the ray, the derivative with respect to SH coefficients is $w_i \cdot \text{SH\_basis}(i)$ [S1].
 
 6. **Compute Density Gradients:**
    For each $i \in \{0, \dots, N-1\}$:
-   $$ \frac{\partial \hat{\mathbf{C}}}{\partial \sigma_i} = \delta_i \left[ c_i T_{i+1} - \sum_{k=i+1}^{N} c_k w_k \right] $$
-   Derivation note: The general form is $\frac{\partial \hat{\mathbf{C}}}{\partial \sigma_i} = c_N \frac{\partial T_N}{\partial \sigma_i} + \sum_{k=0}^{N-1} c_k \left( \frac{\partial T_k}{\partial \sigma_i} - \frac{\partial T_{k+1}}{\partial \sigma_i} \right)$. Using $\frac{\partial T_k}{\partial \sigma_i} = -\delta_i T_k \mathbf{1}_{k>i}$, this simplifies to the expression above [S1].
+   $$ \frac{\partial \hat{\mathbf{C}}}{\partial \sigma_i} = \delta_i \left[ c_i T_{i+1} - \sum_{k=i+1}^N c_k w_k \right] $$
+   Derivation note: The general form is $\frac{\partial \hat{\mathbf{C}}}{\partial \sigma_i} = c_N \frac{\partial T_N}{\partial \sigma_i} + \sum_{k=0}^{N-1} c_k \left( \frac{\partial T_k}{\partial \sigma_i} - \frac{\partial T_{k+1}}{\partial \sigma_i} \right)$ [S1]. Using $\frac{\partial T_k}{\partial \sigma_i} = -\delta_i T_k \mathbf{1}_{k>i}$, this simplifies to the expression above [S1].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def compute_gradients(t, sigma, c, c_bg):
     """
     t: array of length N+1, ray segment endpoints [t0, ..., tN]
@@ -90,7 +92,6 @@ def compute_gradients(t, sigma, c, c_bg):
     
     # 4. Color Gradients
     # grad_c[i] = w[i] for i < N
-    # grad_c[N] is not needed for optimization of tree nodes, but c_bg is fixed
     grad_c = w[:N] 
     
     # 5. Density Gradients
@@ -113,15 +114,14 @@ def compute_gradients(t, sigma, c, c_bg):
 ```
 
 **Edge Cases and Pitfalls:**
-- **Precision:** Exponential operations $\exp(-\delta_i \sigma_i)$ can underflow if $\delta_i \sigma_i$ is large. Use standard floating-point arithmetic; if $\sigma_i$ is very large, $T_{i+1}$ becomes 0, which is correct physically [S1].
-- **Boundary Conditions:** The derivative is only defined for $i < N$ because $\sigma_N$ does not exist (only $c_N$). The background color $c_N$ is typically not optimized [S1].
-- **SH Colors:** When optimizing SH coefficients, the gradient must be multiplied by the SH basis function value at the query direction. The basis values are constant for a given ray direction [S1].
+- **Boundary Conditions:** The derivative is only defined for $i < N$ because $\sigma_N$ does not exist (only $c_N$) [S1]. The background color $c_N$ is typically not optimized [S1].
+- **SH Colors:** When optimizing SH coefficients, the gradient must be multiplied by the SH basis function value at the query direction [S1]. The basis values are constant for a given ray direction [S1].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ for computing transmittance, weights, and gradients. The density gradient calculation involves a nested loop in the naive implementation shown, but can be optimized to $O(N)$ by precomputing suffix sums of $c_k w_k$. The provided pseudocode is $O(N^2)$ due to the inner sum; an implementer should optimize this [S1].
-- **Memory Complexity:** $O(N)$ to store $T$, $w$, and intermediate sums.
-- **Strengths:** Provides exact gradients, enabling stable and efficient optimization of PlenOctree densities and colors. Avoids numerical instability associated with finite differences [S1].
-- **Limitations:** Requires explicit storage of segment properties. Not directly applicable to differentiable volume rendering methods that do not use piecewise constant density [S1].
+- Time Complexity: Not given in the sources.
+- Memory Complexity: Not given in the sources.
+- Strengths: Not given in the sources.
+- Limitations: Not given in the sources.
 
 ## Background
 This method was introduced in the PlenOctrees paper by Yu et al. to enable the fine-tuning of PlenOctrees on original training images using NeRF loss with SGD [S1]. It builds on the NeRF volume rendering formulation [S1].

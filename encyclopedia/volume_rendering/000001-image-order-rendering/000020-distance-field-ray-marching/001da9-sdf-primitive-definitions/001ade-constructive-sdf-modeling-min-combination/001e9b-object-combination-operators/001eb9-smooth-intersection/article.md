@@ -1,79 +1,86 @@
 # Smooth Intersection
-Also called: S-Intersection
+
+Also called: Round Intersection, S-Intersection, Smooth SDF Operations
 
 ## Overview
-Smooth Intersection is a constructive SDF operator that blends the overlap of two shapes to produce a rounded interior corner, serving as the smooth counterpart to the boolean intersection [S1, unofficial][S2, unofficial]. Unlike standard smooth minimums which approximate unions, this operator approximates intersections by mixing the input distances based on their relative positions within the blending radius [S1, unofficial][S2, unofficial]. It is distinguished from its sibling [SDF Smooth Union](1817-sdf-smooth-union.md) by its focus on the interior region where both distances are negative, whereas the union focuses on the exterior where at least one distance is positive [G].
+Smooth Intersection is a Constructive SDF operator that blends the boolean intersection of two signed distance fields into a rounded feature controlled by a blending radius $r$ (or smoothing parameter $k$) [S1, unofficial][S2, unofficial][S3, unofficial]. It is distinguished from generic smooth minimums like [SDF Smooth Union](1817-sdf-smooth-union.md) by its specific geometric construction aimed at preserving distance field properties [S1, unofficial][S2, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- Inputs: Two scalar signed distance values $d_1$ and $d_2$, and a smoothing parameter $k$ (radius) [S1, unofficial][S2, unofficial].
-- Output: A single scalar signed distance value $d$ [S1, unofficial][S2, unofficial].
+**Inputs:**
+- $a$: Distance from the first SDF.
+- $b$: Distance from the second SDF.
+
+**Outputs:**
+- $d$: The resulting blended distance value.
 
 **Data Structures:**
-None required; the operation is scalar [G].
+None required; scalar operations [S3, unofficial].
 
-**Parameters:**
-- $k$: The blending radius or smoothness parameter. It controls the width of the transition zone between the sharp intersection and the smooth blend [S1, unofficial][S2, unofficial].
+**Steps:**
+1. Compute $m = \max(a, b)$ [S3, unofficial].
+2. Evaluate the condition $-a < r$ and $-b < r$ [S3, unofficial].
+3. If the condition is true, compute $f = \max(m, -(r - \sqrt{(r+a)^2 + (r+b)^2}))$ [S3, unofficial].
+4. If the condition is false, set $f = m$ [S3, unofficial].
+5. Return $f$ [S3, unofficial].
 
 **Formulas:**
-The operator computes an intermediate blend factor $h$ and then mixes the distances [S1, unofficial][S2, unofficial]:
+The sources provide two distinct mathematical formulations for the operation [S1, unofficial][S3, unofficial][S4, unofficial].
 
-$$
-h = \text{clamp}\left(0.5 - 0.5 \frac{d_2 - d_1}{k}, 0.0, 1.0\right)
-$$
+1. **Geometric/Vector Formulation (S-Intersection):**
+   This method calculates the distance to a rounded corner formed by the intersection [S3, unofficial].
+   $$ f = \begin{cases} \max\left(m, -\left(r - \sqrt{(r+a)^2 + (r+b)^2}\right)\right) & \text{if } -a < r \land -b < r \\ m & \text{otherwise} \end{cases} $$
+   [S3, unofficial]
 
-$$
-d = \text{mix}(d_2, d_1, h) + k \cdot h \cdot (1.0 - h)
-$$
+2. **Polynomial/Blending Formulation:**
+   This method uses a polynomial blend based on the difference between distances [S4, unofficial].
+   $$ h = \max(k - |a - b|, 0.0) $$
+   $$ d = \min(a, b) - \frac{h^2}{4k} $$
+   [S4, unofficial]
 
-Where $\text{mix}(a, b, t) = a \cdot (1 - t) + b \cdot t$ [S2, unofficial].
+   *Alternative Polynomial Formulation:*
+   Source [S1, unofficial] and [S2, unofficial] describe a similar polynomial approach using a mixing factor $h$:
+   $$ h = \text{clamp}\left(0.5 - 0.5 \frac{b - a}{k}, 0.0, 1.0\right) $$
+   $$ d = \text{mix}(b, a, h) + k \cdot h \cdot (1.0 - h) $$
+   where $\text{mix}(x, y, t) = x(1-t) + yt$ [S1, unofficial][S2, unofficial].
+
+**Parameters:**
+- $r$: Blending radius or smoothing parameter [S2, unofficial].
+- Typical values: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Not given in the sources.
+- **Lipschitz Continuity:** Not given in the sources.
+- **Usage Guidelines:** Not given in the sources.
 
 **Pseudocode:**
+The following implements the Geometric/Vector Formulation (S-Intersection) [S3, unofficial].
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import math
 
-def smooth_intersection(d1: float, d2: float, k: float) -> float:
-    # Calculate the blend factor h
-    diff = d2 - d1
-    h = 0.5 - 0.5 * diff / k
-    if h < 0.0:
-        h = 0.0
-    elif h > 1.0:
-        h = 1.0
-    
-    # Calculate the mixed distance
-    mixed = d2 * (1.0 - h) + d1 * h
-    
-    # Add the smoothing term
-    smooth_term = k * h * (1.0 - h)
-    
-    return mixed + smooth_term
+def smooth_intersection(a: float, b: float, r: float) -> float:
+    m = max(a, b)
+    if (-a < r) and (-b < r):
+        dist_to_corner = math.sqrt((r + a)**2 + (r + b)**2)
+        return max(m, -(r - dist_to_corner))
+    else:
+        return m
 ```
 
-**Edge Cases and Pitfalls:**
-Not given in the sources.
-
-## Subtopics
-
-### SDF Smooth Union
-Approximates the boolean union with rounded edges. Choose when combining objects where the exterior shape is the primary concern. [SDF Smooth Union](1817-sdf-smooth-union.md)
-
-### Multi-Material Distance Fields
-Extends SDFs to handle multiple materials with smooth transitions. Choose when rendering complex scenes with distinct material boundaries. [Multi-Material Distance Fields](1943-multi-material-distance-fields.md)
-
 ## Operating characteristics
-- **Time Complexity**: $O(1)$ per evaluation [G].
-- **Memory Complexity**: $O(1)$ [G].
-- **Strengths**: Produces smooth, continuous transitions for interior corners; differentiable, making it suitable for gradient-based optimization [S1, unofficial][S2, unofficial].
-- **Limitations**: Not given in the sources.
-- **When to use**: When a smooth, rounded interior corner is desired between two intersecting volumes [G].
-- **When not to use**: When sharp, precise boolean intersections are required, or when the intersecting surfaces are nearly parallel [G].
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Not given in the sources.
+- **Limitations:** Not given in the sources.
+- **When to use:** Not given in the sources.
+- **When not to use:** Not given in the sources.
 
 ## Background
-The method originates from PyTorch-based sphere tracing implementations that provide differentiable SDF operations for neural rendering and optimization [S1, unofficial][S2, unofficial]. It is part of the broader family of smooth CSG operators designed to maintain gradient continuity for training implicit surfaces [G].
+Smooth Intersection operators are documented in unofficial repositories related to sphere tracing and differentiable rendering [S1, unofficial][S2, unofficial][S3, unofficial]. The specific formulations are attributed to these community implementations [S1, unofficial][S2, unofficial][S4, unofficial].
 
 ## Sources
 [S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)
 [S2] skmhrk1209/Sphere-Tracing-PyTorch3D, https://github.com/skmhrk1209/Sphere-Tracing-PyTorch3D, fetched 2026-10-26 (unofficial)
+[S3] tdhooper/glsl-marching-cubes, https://github.com/tdhooper/glsl-marching-cubes, fetched 2026-10-26 (unofficial)
+[S4] JamesRicher/TerminalSignedDistanceFieldRenderer, https://github.com/JamesRicher/TerminalSignedDistanceFieldRenderer, fetched 2026-10-27 (unofficial)

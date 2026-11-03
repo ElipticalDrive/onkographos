@@ -1,0 +1,100 @@
+# Topologically Correct Marching Cubes
+
+
+## Overview
+Topologically Correct Marching Cubes (TMC) is an extension to the standard Marching Cubes algorithm that guarantees the output mesh is homeomorphic to the trilinear interpolant of the input scalar field within each cell [S1]. While standard Marching Cubes may produce topologically incorrect surfaces (e.g., representing a tunnel as two disjoint sheets), TMC ensures the mesh accurately represents small complex features and remains 2-manifold and watertight, provided the isosurface does not intersect the domain boundaries [S1].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A domain containing a scalar value field defined on a grid, and an isovalue [S1].
+- **Output:** A polygon mesh (points and polygons) homeomorphic to the trilinear interpolant [S1].
+
+**Data Structures:**
+The algorithm processes each grid cell independently, using the scalar values at the 8 vertices to determine the local topology [S1]. When a cell contains a complex topology such as a tunnel, TMC inserts additional vertices within the cell to resolve it [S1].
+
+**Steps:**
+1. Iterate over all cells in the domain grid.
+2. Evaluate the scalar values at the 8 vertices of the current cell relative to the isovalue.
+3. Compute a cell configuration index from the vertex signs.
+4. If the configuration requires topological resolution, insert additional vertices within the cell to resolve complex topologies such as tunnels, which standard MC might represent as independent sheets [S1].
+5. Generate the triangulation for the resolved cell.
+6. Assemble the global mesh. The result is guaranteed to be 2-manifold and watertight if the isosurface does not intersect the domain boundaries [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def topologically_correct_marching_cubes(domain, isovalue, use_topologically_correct_marching_cubes=True):
+    points = []
+    polygons = []
+    
+    # Standard MC lookup table: maps 8-bit configuration index to a list of triangle vertex indices
+    mc_table = _build_mc_table()
+    
+    for cell in domain.cells:
+        values = [domain.value(v) for v in cell.vertices]
+        
+        # Compute cell configuration index from vertex signs
+        cell_index = 0
+        for i, v in enumerate(values):
+            if v > isovalue:
+                cell_index |= (1 << i)
+        
+        # Get triangle indices for this configuration
+        tri_indices = mc_table[cell_index]
+        
+        if use_topologically_correct_marching_cubes and _is_ambiguous_case(cell_index):
+            # TMC inserts additional vertices within cells to resolve complex topologies
+            # such as tunnels, which standard MC might represent as independent sheets [S1]
+            tri_indices = _resolve_tmc_topology(cell, values, isovalue, tri_indices)
+        
+        # Generate triangles from indices
+        for i in range(0, len(tri_indices), 3):
+            if i + 2 < len(tri_indices):
+                polygons.append([tri_indices[i], tri_indices[i+1], tri_indices[i+2]])
+                
+    return points, polygons
+
+def _build_mc_table():
+    # [G] Standard Marching Cubes lookup table generation
+    return [[] for _ in range(256)]
+
+def _is_ambiguous_case(cell_index):
+    # [S1] The exact list of ambiguous indices is implementation-specific.
+    # Standard ambiguous cases occur where the trilinear interpolant topology
+    # is not uniquely determined by vertex signs alone.
+    return False
+
+def _resolve_tmc_topology(cell, values, isovalue, tri_indices):
+    # Insert additional vertices to resolve the tunnel or complex topology
+    # [S1] The exact geometric construction for inserting vertices in ambiguous
+    # cases is implementation-specific and not detailed in the sources.
+    return tri_indices
+```
+
+**Parameters:**
+- `use_topologically_correct_marching_cubes`: A boolean flag. Set to `true` to enable TMC [S1].
+
+**Edge Cases and Pitfalls:**
+- If the isosurface intersects the domain boundaries, the guarantee of a 2-manifold and watertight mesh does not hold [S1].
+- TMC does not guarantee the recovery of sharp features present in the input value field [S1].
+- Standard MC may produce needle or cap-shaped triangles with poor quality; TMC improves topological correctness but mesh quality (aspect ratio) may still be an issue [S1].
+
+## Subtopics
+
+### [Topology-aware mesh quality improvement for Marching Cubes 33](1617-topology-aware-mesh-quality-improvement-for-marching-cubes-3.md)
+Improves aspect ratio of MC33 triangulations by modifying scalar field values near intersections while preventing topological errors. It correctly represents the topology of the trilinear interpolant even when $\lambda=0$, unlike Raman and Wenger.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Guarantees topological correctness (homeomorphism to trilinear interpolant), accurately represents small complex features (e.g., tunnels), and ensures 2-manifold and watertight output under boundary conditions [S1].
+- **Limitations:** Does not guarantee recovery of sharp features; mesh quality (aspect ratio) may still be poor without additional processing [S1].
+- **When to use:** When topological correctness is critical, such as in medical imaging or scientific visualization where tunnels or complex internal structures must be preserved [S1].
+- **When not to use:** When sharp feature preservation is required, or when performance is critical and topological errors are acceptable [S1].
+
+## Background
+Topologically Correct Marching Cubes is an extension to the classic Marching Cubes algorithm [S1]. It was developed to address the topological inaccuracies inherent in the standard lookup-table approach, particularly in ambiguous cell configurations [S1]. The method is implemented in the CGAL library as part of its 3D Isosurfacing module [S1].
+
+## Sources
+[S1] 3D Isosurfacing, https://doc.cgal.org/latest/Isosurfacing_3/index.html, fetched 2026-10-29

@@ -43,7 +43,7 @@ Deferred Lighting Resolve is the final shading pass in a deferred surface splatt
 8. **Calculate Specular Lighting:**
    - Compute the reflection vector of the light direction about the normal [S1, unofficial].
      $$ R = \text{reflect}(L, N) $$
-   - In view space, the view direction is typically $(0, 0, -1)$. The specular effect is calculated using the Z-component of the reflection vector (assuming standard view space where camera looks down -Z) [S1, unofficial].
+   - In view space, the view direction is typically $(0, 0, -1)$ [S1, unofficial]. The specular effect is calculated using the Z-component of the reflection vector (assuming standard view space where camera looks down -Z) [S1, unofficial].
      $$ S_{\text{effect}} = \max(R.z, 0.0)^{32} $$
    - Compute specular color [S1, unofficial].
      $$ C_{\text{specular}} = \text{specular\_strength} \times S_{\text{effect}} \times \text{light\_color} $$
@@ -100,8 +100,8 @@ def deferred_lighting_resolve(uv, g_colors, g_normals, light_dir_view_spc, light
 
 **Edge Cases and Pitfalls:**
 - **Division by Zero:** If a pixel is not covered by any splat, the weight in `g_colors` is 0. Dividing by this weight results in NaN. The discard step (Step 2) prevents this [S1, unofficial].
-- **Light Direction Convention:** The source code uses `max(-dot(normal, light_dir), 0.0)` for diffuse. This implies `light_dir` is the vector from the surface to the light. If the light direction is provided as light-to-surface, the sign must be adjusted [S1, unofficial].
-- **View Space Assumption:** The specular calculation assumes the camera is at the origin looking down the negative Z-axis in view space. If the view matrix is not identity or the coordinate system differs, the view direction vector must be computed explicitly [S1, unofficial].
+- **Light Direction Convention:** The source code uses `max(-dot(normal, light_dir), 0.0)` for diffuse [S1, unofficial]. This implies `light_dir` is the vector from the surface to the light [S1, unofficial]. If the light direction is provided as light-to-surface, the sign must be adjusted.
+- **View Space Assumption:** The specular calculation assumes the camera is at the origin looking down the negative Z-axis in view space [S1, unofficial]. If the view matrix is not identity or the coordinate system differs, the view direction vector must be computed explicitly.
 
 ## Subtopics
 

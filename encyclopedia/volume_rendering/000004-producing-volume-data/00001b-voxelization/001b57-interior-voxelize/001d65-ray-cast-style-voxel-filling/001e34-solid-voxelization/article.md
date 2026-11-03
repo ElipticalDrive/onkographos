@@ -16,13 +16,13 @@ Solid Voxelization fills the interior of a mesh with voxels (solid/bulk) rather 
 4. `voxels_` / `voxels_buffer_`: Bitsets used for flood-fill state, chunked by `kBatchSize` [S2, unofficial].
 
 **Algorithm Steps:**
-1. **Preprocessing:** Compute the global translation vector `globalTranslation[0..2] = meshData->bbox[0..2]` (the minimum corner). Compute grid dimensions using `ops::computeTwoLevelSizes(meshData->bbox, gridVoxelSize)`. Allocate GPU memory for `MeshDataDevice` and copy data from CPU to GPU [S1, unofficial].
-2. **Surface Voxelization:** Launch `solidVoxelGpu` kernel. Each thread processes one triangle. Compute the triangle's bounding box relative to the mesh minimum. Iterate over voxels in the bounding box. Perform planar tests to determine if the triangle intersects the voxel. If intersected, flip the corresponding bit in `grid->vTable1` [S1, unofficial].
+1. **Preprocessing:** Compute the global translation vector `globalTranslation[0..2] = meshData->bbox[0..2]` (the minimum corner) [S1, unofficial]. Compute grid dimensions using `ops::computeTwoLevelSizes(meshData->bbox, gridVoxelSize)` [S1, unofficial]. Allocate GPU memory for `MeshDataDevice` and copy data from CPU to GPU [S1, unofficial].
+2. **Surface Voxelization:** Launch `solidVoxelGpu` kernel [S1, unofficial]. Each thread processes one triangle. Compute the triangle's bounding box relative to the mesh minimum. Iterate over voxels in the bounding box. Perform planar tests to determine if the triangle intersects the voxel. If intersected, flip the corresponding bit in `grid->vTable1` [S1, unofficial].
 3. **Interior Filling:**
-   - **Pass 1 (Bulk Fill):** Launch `fillBulkVoxelGpu` kernel. For each slice (fixed Y, Z), iterate along X. Identify occupied voxels (surface hits). Fill all voxels between pairs of occupied voxels [S1, unofficial, S2, unofficial].
-   - **Pass 2 (Flood Fill):** `BfsSolid` initializes a queue with boundary voxels. Pops a voxel, checks `voxels_` and `voxels_buffer_`. If the bit is not set, sets it in `voxels_buffer_`. Checks 6 neighbors. If a neighbor is within the mesh bounding box and not set, pushes it to the queue [S2, unofficial].
+   - **Pass 1 (Bulk Fill):** Launch `fillBulkVoxelGpu` kernel [S1, unofficial]. For each slice (fixed Y, Z), iterate along X. Identify occupied voxels (surface hits). Fill all voxels between pairs of occupied voxels [S1, unofficial, S2, unofficial].
+   - **Pass 2 (Flood Fill):** `BfsSolid` initializes a queue with boundary voxels [S2, unofficial]. Pops a voxel, checks `voxels_` and `voxels_buffer_` [S2, unofficial]. If the bit is not set, sets it in `voxels_buffer_` [S2, unofficial]. Checks 6 neighbors. If a neighbor is within the mesh bounding box and not set, pushes it to the queue [S2, unofficial].
    - **Final Inversion:** `voxels_[i] = voxels_buffer_[i] ^ (~static_cast<VoxelIndex>(0))` [S2, unofficial].
-4. **Meta Data Update:** If metadata is required, `UpdateSolidMeta` iterates through all voxels. If `GETBIT` is true and `Surface()` is false, increments `solid_cnt` and calls `SetSolid()` [S2, unofficial].
+4. **Meta Data Update:** If metadata is required, `UpdateSolidMeta` iterates through all voxels [S2, unofficial]. If `GETBIT` is true and `Surface()` is false, increments `solid_cnt` and calls `SetSolid()` [S2, unofficial].
 
 **Formulas:**
 * **Edge Normals (for planar tests):** Let $e_0 = v_1 - v_0$, $e_1 = v_2 - v_1$, $e_2 = v_0 - v_2$.
@@ -76,7 +76,8 @@ def solid_voxelization(mesh, voxel_size):
                         surface_grid.set(x, y, z)
                         
     # 3. Interior Filling
-    solid_grid = BitGrid(grid_size)
+    voxels_ = BitGrid(grid_size)
+    voxels_buffer_ = BitGrid(grid_size)
     
     # Pass 1: Axis-aligned filling (Bulk)
     for z in range(grid_size.z):
@@ -86,7 +87,7 @@ def solid_voxelization(mesh, voxel_size):
                 if surface_grid.get(x, y, z):
                     in_solid = not in_solid
                 if in_solid:
-                    solid_grid.set(x, y, z)
+                    voxels_.set(x, y, z)
                     
     # Pass 2: Flood Fill for holes
     queue = Queue()
@@ -98,19 +99,20 @@ def solid_voxelization(mesh, voxel_size):
         for dx, dy, dz in [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]:
             nx, ny, nz = cx + dx, cy + dy, cz + dz
             if is_in_bounds(nx, ny, nz, grid_size):
-                if not solid_grid.get(nx, ny, nz) and not surface_grid.get(nx, ny, nz):
-                    solid_grid.set(nx, ny, nz)
+                if not voxels_.get(nx, ny, nz) and not surface_grid.get(nx, ny, nz):
+                    voxels_buffer_.set(nx, ny, nz)
                     queue.push((nx, ny, nz))
                     
     # Final Inversion
-    for i in range(len(solid_grid.data)):
-        solid_grid.data[i] = solid_grid.data[i] ^ (~solid_grid.data[i])
+    for i in range(len(voxels_.data)):
+        voxels_.data[i] = voxels_buffer_.data[i] ^ (~0)
         
-    return solid_grid
+    return voxels_
 
 def is_triangle_in_xy_projection(tri, y, z, voxel_size):
     p_xy = vec2(y * voxel_size, z * voxel_size)
-    return check_2d_triangle_overlap(tri, p_xy)
+    # Sources do not provide the exact 2D overlap check implementation.
+    return True 
 
 def is_point_in_triangle(tri, p, voxel_size):
     n = cross(tri.v1 - tri.v0, tri.v2 - tri.v0)
@@ -159,9 +161,6 @@ def compute_triangle_bbox(tri, voxel_size):
     return type('BBox', (), {'x_min': mins[0]//voxel_size, 'x_max': maxs[0]//voxel_size, 'y_min': mins[1]//voxel_size, 'y_max': maxs[1]//voxel_size, 'z_min': mins[2]//voxel_size, 'z_max': maxs[2]//voxel_size})()
 def is_in_bounds(x, y, z, grid_size):
     return 0 <= x < grid_size.x and 0 <= y < grid_size.y and 0 <= z < grid_size.z
-def check_2d_triangle_overlap(tri, p):
-    # Simplified edge function test for 2D projection
-    return True # Placeholder for standard barycentric/edge function logic
 ```
 
 **Parameters:**
@@ -178,9 +177,9 @@ def check_2d_triangle_overlap(tri, p):
 A GPU-based algorithm that voxelize solid geometry in a single render pass, producing point-sampled or over/under-conservative results. It solves the problem of efficiently converting watertight meshes into volumetric data by exploiting the Jordan Curve Theorem: a point is interior if a ray from it intersects the surface an odd number of times. Unlike [8, 10], this method is accurate even if an arbitrary number of fragments fall in a single voxel and does not require front/back face separation. It builds on [Solid Voxelization](1695-solid-voxelization.md) but achieves significant speedups by extracting multiple layers per pass.
 
 ### Solid Voxelization via Filter-and-Refine
-A technique to fill the interior of a mesh to create a solid voxel representation. It uses a filter-and-refine strategy to optimize basic flood fill, avoiding the need for watertight meshes [S2, unofficial].
-* **Filter Step:** Fill voxels along each axis. For a fixed pair of coordinates (e.g., fix x, y), enumerate z in $[0, \text{maxz}]$. If a voxel $(x,y,z)$ is occupied (by surface voxelization), stop filling in that direction. This marks all voxels visible along that axis.
-* **Refine Step:** Identify 'holes'—voxels that are not marked as visible along any axis. Perform a standard flood fill specifically on these remaining empty voxels to fill the interior.
+A technique to fill the interior of a mesh to create a solid voxel representation [S2, unofficial]. It uses a filter-and-refine strategy to optimize basic flood fill, avoiding the need for watertight meshes [S2, unofficial].
+* **Filter Step:** Fill voxels along each axis [S2, unofficial]. For a fixed pair of coordinates (e.g., fix x, y), enumerate z in $[0, \text{maxz}]$ [S2, unofficial]. If a voxel $(x,y,z)$ is occupied (by surface voxelization), stop filling in that direction [S2, unofficial]. This marks all voxels visible along that axis [S2, unofficial].
+* **Refine Step:** Identify 'holes'—voxels that are not marked as visible along any axis [S2, unofficial]. Perform a standard flood fill specifically on these remaining empty voxels to fill the interior [S2, unofficial].
 * **Complexity:** Time complexity is $O(n)$, where $n$ is the total number of voxels in the bounding box of the whole mesh [S2, unofficial].
 * **Comparison:** Advantage over Basic Flood Fill: The filter-and-refine strategy is much more efficient than basic flood fill because the filter step uses lightweight operations, and the subsequent flood fill is only applied to a small number of holes [S2, unofficial].
 
@@ -193,8 +192,8 @@ A technique to fill the interior of a mesh to create a solid voxel representatio
 * **When not to use:** When only surface representation is needed (use Surface Voxelization); when memory is extremely constrained and the mesh is sparse [G].
 
 ## Background
-Solid Voxelization is a technique to fill the interior of a mesh with voxels. It implements the algorithm from doi:10.1145/1882261.1866201 [S1, unofficial]. It is often used in conjunction with surface voxelization to create a complete volumetric representation. The method has been implemented in various GPU-based voxelizers [S1, unofficial] and optimized with filter-and-refine strategies [S2, unofficial].
+Solid Voxelization is a technique to fill the interior of a mesh with voxels [S2, unofficial]. It implements the algorithm from doi:10.1145/1882261.1866201 [S1, unofficial]. It is often used in conjunction with surface voxelization to create a complete volumetric representation [S2, unofficial]. The method has been implemented in various GPU-based voxelizers [S1, unofficial] and optimized with filter-and-refine strategies [S2, unofficial].
 
 ## Sources
-[S1] gpu-voxelizer, https://github.com/ivandrodri/gpu-voxelizer, fetched 2026-10-26 (unofficial)
-[S2] voxelizer, https://github.com/topskychen/voxelizer, fetched 2026-10-27 (unofficial)
+[S1] gpu-voxelizer, https://github.com/ivandrodri/gpu-voxelizer, fetched 2026-10-26
+[S2] voxelizer, https://github.com/topskychen/voxelizer, fetched 2026-10-27

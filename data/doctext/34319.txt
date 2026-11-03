@@ -1,0 +1,1436 @@
+# A Solid 32³ Cube: 196,608 Quads or 6? — Greedy Meshing
+
+<!-- LINKS:BEGIN — üretildi: scripts/sync-repo-links.py · elle düzenleme -->
+**▶ [Live demo](https://m2-md.github.io/voxel-greedy-meshing-typescript/)** · [Source](https://github.com/m2-md/voxel-greedy-meshing-typescript)
+<!-- LINKS:END -->
+
+The working code for the article "A Solid 32³ Cube: 196,608 Quads or 6? Greedy Meshing
+in TypeScript". A single 32³ voxel chunk goes through three separate meshers:
+
+1. **Naive** (`src/voxel/naive.ts`) — all six faces of every solid voxel, no questions asked.
+2. **Culled** (`src/voxel/culled.ts`) — never emit a face whose neighbor is solid.
+3. **Greedy** (`src/voxel/greedy.ts`) — sweep slice by slice per axis, build a 2D mask,
+   merge neighboring faces under the same key into rectangles.
+
+All three return **the same `Quad` type**; the comparison rests on that. The proof of
+correctness is not the quad **count** but the equality of the **set** of unit faces
+expanded by `faceKeys()` — because a bug that emits the same number of quads while
+covering a different surface really is possible (see `tests/transpose-trap.test.ts`).
+
+No assets are downloaded; the chunk is generated from a seed (`mulberry32` + value noise + fBm).
+**None** of the tests or the bench opens a browser.
+
+## Versions
+
+| Package | Version |
+|---|---|
+| `three` (+ `@types/three`) | 0.185.1 |
+| `vite` | 6.4.3 |
+| `vitest` | 2.1.9 |
+| `typescript` | 5.9.3 |
+
+## Install
+
+```bash
+npm install
+```
+
+## Test (no browser needed)
+
+```bash
+npm test
+```
+
+**31 tests should be green** (7 files, ~1 s):
+
+| File | Tests | What it proves |
+|---|---|---|
+| `tests/surface-equality.test.ts` | 14 | 5 seeds × {greedy ≡ culled set equality, `Σ w·h` = culled quad count} · culled ⊂ naive · `naive = 6 × solidCount` · on a solid 32³ cube `196,608 / 6,144 / 6` · single voxel `6/6/6` · empty chunk `0/0/0` |
+| `tests/winding.test.ts` | 3 | the triangle normal of every greedy quad points the same way as `axis`/`dir` · all six faces of a single voxel point OUTWARD · culled follows the same rule |
+| `tests/merge-key.test.ts` | 3 | a material change stops merging · adding light to the key raises the quad count without changing the surface (ceiling = culled) · single-material chunk ≤ multi-material |
+| `tests/boundary.test.ts` | 3 | under the `solid` policy a solid chunk gives 0 quads · under both policies culled ≡ greedy · `air` > `solid` |
+| `tests/geometry.test.ts` | 3 | the index type switching Uint16 → Uint32 · attribute sizes · normals unit length, axis-aligned, no NaN |
+| `tests/transpose-trap.test.ts` | 3 | **the backbone of the article** — see below |
+| `tests/index-order.test.ts` | 2 | `chunk.index()` addresses the same cell as `get`/`set` · index is one-to-one |
+
+The last two files do not appear as code blocks in the article; they are the repo-side
+guards for the article's claims (why each of them was added is written in the mutation
+table below).
+
+### Why `transpose-trap` exists
+
+The article says "filling the mask as `mask[j + i*s]` instead of `mask[i + j*s]` is a
+silent bug". The test turns that from a claim into proof: the file contains a
+one-character broken copy of `meshGreedy` and shows three things:
+
+1. **On a solid 16³ cube the two versions are identical** — the quad count and the
+   surface set alike. The sentence "I tested it with a solid cube and it held" sees
+   nothing of this bug.
+2. **On an asymmetric shape the broken version emits THE SAME NUMBER of quads while
+   covering a DIFFERENT surface** (`expect(bad.length).toBe(good.length)` green, set
+   equality red). Comparing counters is not proof.
+3. **Set equality** established against the culled reference catches the broken version.
+
+## Mutation run — are the tests really guards?
+
+I verified with mutations that no test is a tautology: make a change that breaks the
+claim, watch the suite go red, revert it. 15 of the 16 mutations were caught on the first
+pass; the single mutation that survived (`M15`) is the reason `tests/index-order.test.ts`
+was written.
+
+| # | Mutation | Result | File(s) that caught it |
+|---|---|---|---|
+| M1 | `greedy`: transposed mask (`x[u]` / `x[v]` loops swapped) | RED | transpose-trap, boundary, surface-equality |
+| M2 | `greedy`: mask sign `-b` → `b` | RED | transpose-trap, winding, boundary, surface-equality |
+| M3 | `greedy`: `x[axis]++` BEFORE the mask | RED | transpose-trap, merge-key, winding, surface-equality, boundary |
+| M4 | `greedy`: consumed mask cells not zeroed | RED | transpose-trap, merge-key, boundary, surface-equality |
+| M5 | `greedy`: height growth disabled (`h` always 1) | RED | transpose-trap, merge-key, boundary, surface-equality |
+| M6 | `greedy`: width growth disabled (`w` always 1) | RED | transpose-trap, merge-key, boundary, surface-equality |
+| M7 | `quad`: `AXIS_U` / `AXIS_V` swapped | RED | winding |
+| M8 | `quad`: `quadTriangleIndices` CCW in both directions | RED | winding |
+| M9 | `culled`: neighbor check removed (no culling) | RED | transpose-trap, merge-key, surface-equality, boundary |
+| M10 | `culled`: boundary policy ignored (always `air`) | RED | boundary |
+| M11 | `geometry`: index type always `Uint16Array` | RED | geometry |
+| M12 | `geometry`: normal component `dir * 0.5` instead of `dir` | RED | geometry |
+| M13 | `naive`: the `-1` face skipped on one axis | RED | surface-equality |
+| M14 | `greedy`: `options.mergeKey` ignored | RED | merge-key |
+| M15 | `chunk`: `index()` axes reversed (`x + z*S + y*S²`) | **GREEN** on the first pass | (none) → `index-order` was written, RED on the second pass |
+| M16 | `greedy`: quad material always `1` | RED | transpose-trap, boundary, surface-equality |
+
+M7 and M8 turning only `winding` red is the expected behavior: a winding bug does not
+change the surface **set**, only the rotation direction of the triangles. The set equality
+test sees nothing of that bug — that is exactly why winding has a test of its own.
+
+There is one more gap that stays open, and I am writing it down honestly: **a mutation
+that breaks the noise functions in `generate.ts` does not turn the suite red.** The tests
+are deliberately relational (greedy ≡ culled ⊂ naive); no test nails down the quad count
+of a particular seed, because that number is a property of the terrain generator, not of
+the algorithm. Change the chunk generator and the numbers in the table change while the
+tests stay green.
+
+## Measurement
+
+```bash
+npm run bench        # 4 tables + bench-results.json
+```
+
+The measurement conditions (the run the article's tables came out of): **Apple M2 Pro
+(macOS 26.5.1), Node v22.22.2**, `three@0.185.1`, chunk `terrainChunk(1337)` (32³,
+4 materials, 17,191 solid voxels). The quad/vertex/triangle columns are **deterministic**;
+the ms columns are 20 warmups per mesher + the **median of 11 runs**, and on top of that
+`npm run bench` itself was run **11 times** and the median of those 11 medians is what
+went into the article:
+
+| Stage | Median (ms) | Band across 11 runs | Spread |
+|---|---|---|---|
+| Naive | 5.60 | 5.12 – 6.30 | 21% |
+| Culled | 2.06 | 2.03 – 2.13 | 5% |
+| Greedy | 1.74 | 1.71 – 1.76 | 3% |
+
+The naive column is visibly jumpy — it allocates hundreds of thousands of quad objects
+and the GC steps in. The dirty edit scenario (1 voxel changes, one single remesh) gave
+naive 4.72 ms · culled 2.10 ms · greedy 1.73 ms over 8 runs.
+
+The measurement was taken with Chrome and desktop apps open on the machine (1-minute load
+average ~6.8). In the first assessment we wrote that this did not visibly inflate a
+single-threaded measurement — **that was wrong.** After the audit the same `npm run bench`
+was run back to back under load and the naive median came out 4.911 · 5.670 · 7.197 ·
+8.722 ms; the greedy median climbed as high as 1.930. So the time bands hold only for a
+QUIET machine, and the naive column can go to twice its band.
+
+**What is portable?** The count columns (quad / vertex / triangle) are deterministic —
+identical on every run, on every machine. The ordering of the three stages also held on
+every run we tried. Absolute times are NOT portable; measure them yourself on your own
+machine, preferably with nothing else running.
+
+The core of the expected output (count columns identical on the same machine, ms columns different):
+
+```
+1. TERRAIN CHUNK (policy: air)
+  Naive   103,146 quad · 412,584 vertex · 206,292 triangle
+  Culled    6,654 quad ·  26,616 vertex ·  13,308 triangle
+  Greedy    2,416 quad ·   9,664 vertex ·   4,832 triangle
+
+2. DATA MODEL EXPERIMENT (same solid/empty pattern, culled = 6,654 quads)
+  single material, key = material         → 2,129 quads  (32.0% of culled)
+  4 materials,     key = material         → 2,416 quads  (36.3% of culled)
+  4 materials,     key = material + light → 6,262 quads  (94.1% of culled)
+
+3. BOUNDARY POLICY
+  air   → culled 6,654 · greedy 2,416
+  solid → culled 3,578 · greedy 2,171
+```
+
+For the time columns I do not lean on the decimals of a single run; the table in the
+article carries the median of 11 runs and the run-to-run spread is written out plainly in
+the article too.
+
+## Demo (light)
+
+```bash
+npm run dev          # → http://localhost:5217/
+```
+
+> **Do NOT open it with `file://`.** Double-click `index.html` and the ES modules will not
+> resolve and you will see a blank screen. The Vite dev server is mandatory.
+
+The demo is deliberately light: the scene holds **a single 32³ chunk**. No world, no chunk
+streaming, no LOD, no post-processing, no shadows, no automatic sweep. The render loop only
+draws; **a remesh is triggered by a key press only**.
+
+| Key | What it does |
+|---|---|
+| `1` `2` `3` | NAIVE · CULLED · GREEDY — one single remesh |
+| `4` | merge key: `MATERIAL` ↔ `MATERIAL + LIGHT` |
+| `W` | quad outline wireframe on/off |
+| `B` | boundary policy `AIR` ↔ `SOLID` |
+| `E` | carve a random sphere out of the chunk + one single remesh |
+| `R` | advance the seed, generate a new chunk |
+
+The wireframe has a threshold: if the quad count goes past **25,000** the wireframe is not
+drawn and the HUD says `OUTLINE OFF (TOO MANY QUADS: …)`. No silent skipping.
+
+### HUD: the MEASURED / STRUCTURAL split
+
+The two sections sit under separate headings, because collecting them into a single list
+is the easiest way to show a computed value as if it had been measured:
+
+- **MEASURED** — what was actually measured in that run: `REMESH` and `GEOMETRY BUILD`
+  (`performance.now()`), `QUADS`, `VERTICES` (`position.count`), `TRIANGLES` and
+  `DRAW CALLS` (**`renderer.info.render`**, that is, three's own counter),
+  `GEOMETRY BYTES`, `FPS`.
+- **STRUCTURAL** — what comes from the model, unmeasured: `CHUNK`, `SOLID VOXELS`,
+  `MASK CELLS`, `MODE`, `MERGE KEY`, `BOUNDARY`, `INDEX TYPE`.
+
+`MASK CELLS` shows a number in GREEDY mode only (`air` → `3 × 33 × 32² = 101,376`,
+`solid` → `3 × 31 × 32² = 95,232`); in naive and culled mode there is no such thing as a
+mask, so it prints `—`.
+
+> The HUD labels are written **already in uppercase** in the source and CSS does **not**
+> use `text-transform`: combine `text-transform: uppercase` with a Turkish locale
+> (`lang="tr"`) and the browser applies the Turkish rule to the English letter `i`, turning
+> it into `İ`, so you get `TRİANGLES` instead of `TRIANGLES`.
+
+## Build
+
+```bash
+npm run build        # tsc && vite build
+npm run preview
+```
+
+## File layout
+
+```
+src/
+  voxel/
+    chunk.ts       # CHUNK_SIZE · BoundaryPolicy · VoxelChunk (index/get/set/solidCount)
+    generate.ts    # mulberry32 · makeFbm · solidChunk · terrainChunk
+    quad.ts        # Axis · AXIS_U/AXIS_V · Quad · makeQuad · faceKeys · quadTriangleIndices
+    naive.ts       # meshNaive — 6 quads per voxel
+    culled.ts      # meshCulled — never emit a face whose neighbor is solid
+    greedy.ts      # meshGreedy — slice mask + rectangle merging (MergeKey)
+    geometry.ts    # MATERIAL_COLORS · quadsToGeometry · quadUVs · quadsToOutline
+  view/
+    main.ts        # demo: one chunk, 6 keys, manually triggered remesh
+    hud.ts         # the MEASURED / STRUCTURAL split
+    carve.ts       # carveSphere — the E key
+    style.css      # dark cinematic + neon; NO text-transform
+bench/
+  remesh.ts        # 4 tables + bench-results.json (warmup 20, measure 11, median)
+tests/             # 7 files, 31 tests — none of them opens a browser
+```
+
+## Known traps (commented in the code, nailed down in the tests)
+
+1. **The transposed mask is silent** — a symmetric chunk hides it, an asymmetric chunk
+   catches it. `tests/transpose-trap.test.ts`.
+2. **The `AXIS_U` / `AXIS_V` order is not arbitrary** — it is what makes `(û × v̂) = +axis`;
+   swapping it flips the normals and, with a `FrontSide` material, shows the model from
+   the inside. `tests/winding.test.ts`.
+3. **Where the `x[axis]++` line goes** — the mask is built from `x[axis]` and `x[axis]+1`,
+   the face sits BETWEEN the two. The increment goes after the mask, before quad emission.
+4. **Uint16 index overflow** — quads × 4 vertices, at 16,384 quads 65,535 is full; naive
+   mode blows well past that on terrain. `tests/geometry.test.ts`.
+5. **Mixing boundary policies** — both meshers have to be handed the same policy; in the
+   demo the policy is held in a single variable.
+6. **`computeVertexNormals()` is not called** — the normals are written by hand; an
+   averaging version would round off the voxel corners.
+7. **The mask is allocated ONCE per chunk** (`Int32Array(s*s)`, 4 KB) and reused across
+   all 33 slices.
+8. **Vitest's `toEqual` tells `-0` apart from `0`** — the cross product can produce `-0`,
+   which is why `winding.test.ts` uses the `round0` helper.
+
+## License
+
+MIT — `LICENSE`.
+
+### vite.config.ts
+```
+import { defineConfig } from "vite";
+
+// The demo builds against a modern target (three r185 ESM). The test config lives in
+// a separate file: vitest.config.ts. Tests run in the node environment — no browser,
+// canvas or WebGL context needed.
+export default defineConfig({
+  server: {
+    // Every demo in the repo has its own port (see .claude/launch.json).
+    port: 5217,
+  },
+  build: {
+    target: "esnext",
+  },
+  esbuild: {
+    target: "esnext",
+  },
+});
+```
+
+### vitest.config.ts
+```
+import { defineConfig } from "vitest/config";
+
+// The meshers are pure functions, chunk generation is pure math, and the geometry
+// builder touches only three's BufferGeometry/BufferAttribute classes.
+// None of them wants a WebGL context → the node environment is enough.
+export default defineConfig({
+  test: {
+    environment: "node",
+    include: ["tests/**/*.test.ts"],
+  },
+});
+```
+
+### bench/remesh.ts
+```
+/**
+ * npm run bench — fills every `— (not measured)` cell in the article in ONE run.
+ *
+ * Contract:
+ *  - Warmup: 20 runs per mesher, not measured.
+ *  - Measurement: an odd number of runs (11 by default), MEDIAN. Not the mean.
+ *  - The same VoxelChunk instance goes to all three meshers; generation cost stays out.
+ *  - min / median / max is printed for every mesher so you can see the time columns
+ *    move from run to run.
+ *  - The result is written to the project root as `bench-results.json`.
+ *
+ * Opens no browser. Plain Node.
+ *
+ * The opening of the file is IDENTICAL to the "merge key experiment" summary in the
+ * article; the measurement scaffolding sits underneath it.
+ */
+import { writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { VoxelChunk } from "../src/voxel/chunk.js";
+import type { Quad } from "../src/voxel/quad.js";
+import { meshNaive } from "../src/voxel/naive.js";
+import { meshCulled } from "../src/voxel/culled.js";
+import { meshGreedy } from "../src/voxel/greedy.js";
+import { mulberry32, terrainChunk } from "../src/voxel/generate.js";
+
+const chunk = terrainChunk(1337);
+
+// A 4-bit light value per voxel.
+const light = new Uint8Array(chunk.data.length);
+const rng = mulberry32(4242);
+for (let i = 0; i < light.length; i++) light[i] = Math.floor(rng() * 16);
+
+const plain = meshGreedy(chunk);
+const lit = meshGreedy(chunk, {
+  // Material in the low byte, light in the high byte. Merge only if both are equal.
+  mergeKey: (material, x, y, z) => material | (light[chunk.index(x, y, z)] << 8),
+});
+
+// --- Measurement scaffolding --------------------------------------------------
+
+const WARMUP = 20;
+const RUNS = 11;
+
+interface Timing {
+  median: number;
+  min: number;
+  max: number;
+  runs: number;
+}
+
+function time(fn: () => unknown): Timing {
+  for (let i = 0; i < WARMUP; i++) fn();
+  const samples: number[] = [];
+  for (let i = 0; i < RUNS; i++) {
+    const t0 = performance.now();
+    fn();
+    samples.push(performance.now() - t0);
+  }
+  samples.sort((a, b) => a - b);
+  return {
+    median: samples[(samples.length - 1) >> 1],
+    min: samples[0],
+    max: samples[samples.length - 1],
+    runs: RUNS,
+  };
+}
+
+const ms = (v: number) => v.toFixed(3);
+const tr = (v: number) => v.toLocaleString("en-US");
+
+function counts(quads: readonly Quad[]) {
+  return { quads: quads.length, vertices: quads.length * 4, triangles: quads.length * 2 };
+}
+
+// --- Table 1: terrain chunk ---------------------------------------------------
+
+// `chunk` is NOT MODIFIED past this point: tables 1/2/3 all see the same, untouched
+// data. The dirty edit scenario runs on a separate copy.
+const solidVoxels = chunk.solidCount;
+
+const naive = meshNaive(chunk);
+const culled = meshCulled(chunk);
+
+const tNaive = time(() => meshNaive(chunk));
+const tCulled = time(() => meshCulled(chunk));
+const tGreedy = time(() => meshGreedy(chunk));
+
+// Dirty edit: one voxel changes and ONE single remesh follows. This is the cost you
+// actually pay in a voxel engine — the chunk is not regenerated, only the mesh is built.
+const dirtyChunk = terrainChunk(1337);
+let dirtyToggle = 0;
+const dirtyEdit = (mesher: (c: VoxelChunk) => Quad[]) => () => {
+  const y = 8 + (dirtyToggle & 7);
+  dirtyChunk.set(16, y, 16, dirtyToggle & 1 ? 0 : 3);
+  dirtyToggle++;
+  return mesher(dirtyChunk);
+};
+const dNaive = time(dirtyEdit(meshNaive));
+const dCulled = time(dirtyEdit(meshCulled));
+const dGreedy = time(dirtyEdit((c) => meshGreedy(c)));
+
+// --- Table 2: data model experiment ------------------------------------------
+
+const oneMat = terrainChunk(1337, 32, 1);
+const manyMat = terrainChunk(1337, 32, 4);
+const culledOne = meshCulled(oneMat).length;
+const culledMany = meshCulled(manyMat).length;
+const greedyOne = meshGreedy(oneMat).length;
+const greedyMany = meshGreedy(manyMat).length;
+const greedyLit = lit.length;
+
+// --- Table 3: boundary policy --------------------------------------------------
+
+const culledAir = meshCulled(chunk, "air").length;
+const culledSolid = meshCulled(chunk, "solid").length;
+const greedyAir = meshGreedy(chunk, { policy: "air" }).length;
+const greedySolid = meshGreedy(chunk, { policy: "solid" }).length;
+
+// --- Report -------------------------------------------------------------------
+
+console.log(`\nNode ${process.version} · ${process.platform}/${process.arch}`);
+console.log(`terrainChunk(1337) · 32³ · solid voxels: ${tr(solidVoxels)}`);
+console.log(`warmup ${WARMUP} runs · measurement ${RUNS} runs · MEDIAN\n`);
+
+console.log("1. TERRAIN CHUNK (policy: air)");
+console.table([
+  {
+    Stage: "Naive",
+    Quad: tr(naive.length),
+    Vertex: tr(naive.length * 4),
+    Triangle: tr(naive.length * 2),
+    "ms median": ms(tNaive.median),
+    "ms min": ms(tNaive.min),
+    "ms max": ms(tNaive.max),
+  },
+  {
+    Stage: "Culled",
+    Quad: tr(culled.length),
+    Vertex: tr(culled.length * 4),
+    Triangle: tr(culled.length * 2),
+    "ms median": ms(tCulled.median),
+    "ms min": ms(tCulled.min),
+    "ms max": ms(tCulled.max),
+  },
+  {
+    Stage: "Greedy",
+    Quad: tr(plain.length),
+    Vertex: tr(plain.length * 4),
+    Triangle: tr(plain.length * 2),
+    "ms median": ms(tGreedy.median),
+    "ms min": ms(tGreedy.min),
+    "ms max": ms(tGreedy.max),
+  },
+]);
+
+console.log("1b. DIRTY EDIT (1 voxel changed → 1 remesh)");
+console.table([
+  { Stage: "Naive", "ms median": ms(dNaive.median) },
+  { Stage: "Culled", "ms median": ms(dCulled.median) },
+  { Stage: "Greedy", "ms median": ms(dGreedy.median) },
+]);
+
+const pct = (a: number, b: number) => `${((a / b) * 100).toFixed(1)}%`;
+
+console.log("2. DATA MODEL EXPERIMENT (same solid/empty pattern)");
+console.table([
+  {
+    Key: "single material, key = material",
+    Quad: tr(greedyOne),
+    "Culled quad": tr(culledOne),
+    "% of culled": pct(greedyOne, culledOne),
+  },
+  {
+    Key: "4 materials, key = material",
+    Quad: tr(greedyMany),
+    "Culled quad": tr(culledMany),
+    "% of culled": pct(greedyMany, culledMany),
+  },
+  {
+    Key: "4 materials, key = material + light",
+    Quad: tr(greedyLit),
+    "Culled quad": tr(culledMany),
+    "% of culled": pct(greedyLit, culledMany),
+  },
+]);
+
+console.log("3. BOUNDARY POLICY");
+console.table([
+  { Policy: "air", "Quad (culled)": tr(culledAir), "Quad (greedy)": tr(greedyAir) },
+  { Policy: "solid", "Quad (culled)": tr(culledSolid), "Quad (greedy)": tr(greedySolid) },
+]);
+
+const results = {
+  meta: {
+    node: process.version,
+    platform: `${process.platform}/${process.arch}`,
+    warmup: WARMUP,
+    runs: RUNS,
+    statistic: "median",
+    chunk: "terrainChunk(1337) 32³",
+    solidVoxels,
+    generatedAt: new Date().toISOString(),
+  },
+  terrain: {
+    naive: { ...counts(naive), timing: tNaive },
+    culled: { ...counts(culled), timing: tCulled },
+    greedy: { ...counts(plain), timing: tGreedy },
+  },
+  dirtyEdit: { naive: dNaive, culled: dCulled, greedy: dGreedy },
+  dataModel: {
+    singleMaterial: { greedy: greedyOne, culled: culledOne },
+    fourMaterials: { greedy: greedyMany, culled: culledMany },
+    fourMaterialsPlusLight: { greedy: greedyLit, culled: culledMany },
+  },
+  boundary: {
+    air: { culled: culledAir, greedy: greedyAir },
+    solid: { culled: culledSolid, greedy: greedySolid },
+  },
+};
+
+const here = dirname(fileURLToPath(import.meta.url));
+const out = join(here, "..", "bench-results.json");
+writeFileSync(out, JSON.stringify(results, null, 2) + "\n");
+console.log(`→ bench-results.json written\n`);
+```
+
+### src/view/carve.ts
+```
+import type { VoxelChunk } from "../voxel/chunk.js";
+
+/**
+ * Carves a sphere out of the chunk. The smallest form of the destructible terrain
+ * scenario: change the data, trigger ONE single remesh.
+ *
+ * @returns the number of solid voxels removed
+ */
+export function carveSphere(
+  chunk: VoxelChunk,
+  cx: number,
+  cy: number,
+  cz: number,
+  radius: number,
+): number {
+  const r2 = radius * radius;
+  const lo = (v: number) => Math.max(0, Math.floor(v - radius));
+  const hi = (v: number) => Math.min(chunk.size - 1, Math.ceil(v + radius));
+  let removed = 0;
+
+  for (let z = lo(cz); z <= hi(cz); z++) {
+    for (let y = lo(cy); y <= hi(cy); y++) {
+      for (let x = lo(cx); x <= hi(cx); x++) {
+        const dx = x - cx;
+        const dy = y - cy;
+        const dz = z - cz;
+        if (dx * dx + dy * dy + dz * dz > r2) continue;
+        if (chunk.get(x, y, z) !== 0) removed++;
+        chunk.set(x, y, z, 0);
+      }
+    }
+  }
+  return removed;
+}
+```
+
+### src/view/hud.ts
+```
+/**
+ * HUD — two sections, each under its own heading.
+ *
+ * MEASURED   : numbers really measured in that run (performance.now, renderer.info).
+ * STRUCTURAL : numbers that come from the model, unmeasured (chunk size, mask cells, mode).
+ *
+ * The split is deliberate: one merged list is wide open to showing a computed value as
+ * if it were measured. `TRIANGLES` is read from three's own counter on purpose.
+ *
+ * Every label is written ALREADY UPPERCASE in the source — `text-transform: uppercase`
+ * under a Turkish locale turns the English 'i' into 'İ' (TRIANGLES → TRİANGLES).
+ */
+
+export interface HudMeasured {
+  remeshMs: number;
+  geometryMs: number;
+  quads: number;
+  vertices: number;
+  triangles: number;
+  drawCalls: number;
+  geometryBytes: number;
+  fps: number;
+}
+
+export interface HudStructural {
+  chunk: string;
+  solidVoxels: number;
+  /** The mask exists only in greedy; in naive/culled mode it is null → the HUD prints "—". */
+  maskCells: number | null;
+  mode: string;
+  mergeKey: string;
+  boundary: string;
+  indexType: string;
+}
+
+export interface HudState {
+  measured: HudMeasured;
+  structural: HudStructural;
+  warning: string | null;
+}
+
+const nf = new Intl.NumberFormat("en-US");
+const num = (v: number) => nf.format(v);
+const ms = (v: number) => `${v.toFixed(2)} ms`;
+
+function kb(bytes: number): string {
+  if (bytes < 1024) return `${num(bytes)} B`;
+  return `${nf.format(Math.round(bytes / 1024))} KB`;
+}
+
+function row(cls: "m" | "s", key: string, value: string): string {
+  return `<div class="row ${cls}"><span class="k">${key}</span><span class="v">${value}</span></div>`;
+}
+
+export function renderHud(el: HTMLElement, state: HudState): void {
+  const m = state.measured;
+  const s = state.structural;
+
+  el.innerHTML = [
+    `<div class="section measured">MEASURED</div>`,
+    row("m", "REMESH", ms(m.remeshMs)),
+    row("m", "GEOMETRY BUILD", ms(m.geometryMs)),
+    row("m", "QUADS", num(m.quads)),
+    row("m", "VERTICES", num(m.vertices)),
+    row("m", "TRIANGLES", num(m.triangles)),
+    row("m", "DRAW CALLS", num(m.drawCalls)),
+    row("m", "GEOMETRY BYTES", kb(m.geometryBytes)),
+    row("m", "FPS", m.fps.toFixed(0)),
+    `<div class="section structural">STRUCTURAL</div>`,
+    row("s", "CHUNK", s.chunk),
+    row("s", "SOLID VOXELS", num(s.solidVoxels)),
+    row("s", "MASK CELLS", s.maskCells === null ? "—" : num(s.maskCells)),
+    row("s", "MODE", s.mode),
+    row("s", "MERGE KEY", s.mergeKey),
+    row("s", "BOUNDARY", s.boundary),
+    row("s", "INDEX TYPE", s.indexType),
+    state.warning ? `<div class="warn">${state.warning}</div>` : "",
+  ].join("");
+}
+```
+
+### src/view/main.ts
+```
+import {
+  ACESFilmicToneMapping,
+  BufferGeometry,
+  DirectionalLight,
+  HemisphereLight,
+  LineBasicMaterial,
+  LineSegments,
+  Mesh,
+  MeshStandardMaterial,
+  PerspectiveCamera,
+  Scene,
+  WebGLRenderer,
+} from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { CHUNK_SIZE, VoxelChunk, type BoundaryPolicy } from "../voxel/chunk.js";
+import { mulberry32, terrainChunk } from "../voxel/generate.js";
+import { meshNaive } from "../voxel/naive.js";
+import { meshCulled } from "../voxel/culled.js";
+import { meshGreedy } from "../voxel/greedy.js";
+import type { Quad } from "../voxel/quad.js";
+import { quadsToGeometry, quadsToOutline } from "../voxel/geometry.js";
+import { carveSphere } from "./carve.js";
+import { renderHud, type HudState } from "./hud.js";
+
+// --- The demo is deliberately LIGHT: one chunk, no world, no automatic sweep. A
+//     remesh is triggered ONLY by a key press; the render loop does nothing but draw.
+
+type Mode = "NAIVE" | "CULLED" | "GREEDY";
+const OUTLINE_QUAD_LIMIT = 25_000;
+
+const canvas = document.getElementById("scene") as HTMLCanvasElement;
+const hudEl = document.getElementById("hud") as HTMLElement;
+
+const renderer = new WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = ACESFilmicToneMapping;
+
+const scene = new Scene();
+const camera = new PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 500);
+camera.position.set(48, 38, 52);
+
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.target.set(CHUNK_SIZE / 2, CHUNK_SIZE / 3, CHUNK_SIZE / 2);
+
+const sun = new DirectionalLight(0xffffff, 2.1);
+sun.position.set(1, 1.6, 0.8);
+scene.add(sun);
+scene.add(new HemisphereLight(0x8fb7ff, 0x0b0d15, 1.15));
+
+const material = new MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0.0 });
+const outlineMaterial = new LineBasicMaterial({
+  color: 0x22d3ee,
+  transparent: true,
+  opacity: 0.55,
+});
+
+let mesh: Mesh | null = null;
+let outline: LineSegments | null = null;
+
+// --- State -------------------------------------------------------------------
+
+let seed = 1337;
+let chunk = terrainChunk(seed);
+let mode: Mode = "GREEDY";
+let policy: BoundaryPolicy = "air";
+let useLightKey = false;
+let showOutline = false;
+
+let light = makeLight(chunk);
+
+function makeLight(c: VoxelChunk): Uint8Array {
+  const buffer = new Uint8Array(c.data.length);
+  const rng = mulberry32(4242);
+  for (let i = 0; i < buffer.length; i++) buffer[i] = Math.floor(rng() * 16);
+  return buffer;
+}
+
+// --- Measurement -------------------------------------------------------------
+
+const state: HudState = {
+  measured: {
+    remeshMs: 0,
+    geometryMs: 0,
+    quads: 0,
+    vertices: 0,
+    triangles: 0,
+    drawCalls: 0,
+    geometryBytes: 0,
+    fps: 0,
+  },
+  structural: {
+    chunk: `${CHUNK_SIZE} x ${CHUNK_SIZE} x ${CHUNK_SIZE}`,
+    solidVoxels: 0,
+    maskCells: 0,
+    mode: "GREEDY",
+    mergeKey: "MATERIAL",
+    boundary: "AIR",
+    indexType: "UINT16",
+  },
+  warning: null,
+};
+
+function geometryBytes(geometry: BufferGeometry): number {
+  let bytes = 0;
+  for (const name of Object.keys(geometry.attributes)) {
+    bytes += (geometry.getAttribute(name).array as ArrayBufferView).byteLength;
+  }
+  const index = geometry.getIndex();
+  if (index) bytes += (index.array as ArrayBufferView).byteLength;
+  return bytes;
+}
+
+function meshFor(): Quad[] {
+  if (mode === "NAIVE") return meshNaive(chunk);
+  if (mode === "CULLED") return meshCulled(chunk, policy);
+  return meshGreedy(chunk, {
+    policy,
+    mergeKey: useLightKey ? (m, x, y, z) => m | (light[chunk.index(x, y, z)] << 8) : undefined,
+  });
+}
+
+/** A single remesh. Called ONLY from a key press. */
+function rebuild(): void {
+  const t0 = performance.now();
+  const quads = meshFor();
+  const remeshMs = performance.now() - t0;
+
+  const t1 = performance.now();
+  const geometry = quadsToGeometry(quads);
+  const geometryMs = performance.now() - t1;
+
+  if (mesh) {
+    scene.remove(mesh);
+    mesh.geometry.dispose();
+  }
+  mesh = new Mesh(geometry, material);
+  scene.add(mesh);
+
+  if (outline) {
+    scene.remove(outline);
+    outline.geometry.dispose();
+    outline = null;
+  }
+  let warning: string | null = null;
+  if (showOutline) {
+    if (quads.length > OUTLINE_QUAD_LIMIT) {
+      warning = `OUTLINE OFF (TOO MANY QUADS: ${quads.length.toLocaleString("en-US")})`;
+    } else {
+      outline = new LineSegments(quadsToOutline(quads), outlineMaterial);
+      scene.add(outline);
+    }
+  }
+
+  const index = geometry.getIndex();
+  state.measured.remeshMs = remeshMs;
+  state.measured.geometryMs = geometryMs;
+  state.measured.quads = quads.length;
+  state.measured.vertices = geometry.getAttribute("position").count;
+  state.measured.geometryBytes = geometryBytes(geometry);
+  state.structural.solidVoxels = chunk.solidCount;
+  // The mask exists only in greedy. air → S+1 slices, solid → S-1 slices; S² per slice.
+  // In naive/culled mode we print "—": filling in a number that does not exist is fake.
+  state.structural.maskCells =
+    mode === "GREEDY"
+      ? 3 * (policy === "air" ? CHUNK_SIZE + 1 : CHUNK_SIZE - 1) * CHUNK_SIZE * CHUNK_SIZE
+      : null;
+  state.structural.mode = mode;
+  state.structural.mergeKey = useLightKey ? "MATERIAL + LIGHT" : "MATERIAL";
+  state.structural.boundary = policy === "air" ? "AIR" : "SOLID";
+  state.structural.indexType = index?.array instanceof Uint32Array ? "UINT32" : "UINT16";
+  state.warning = warning;
+}
+
+// --- Keys --------------------------------------------------------------------
+
+window.addEventListener("keydown", (event) => {
+  const key = event.key.toLowerCase();
+  if (key === "1") mode = "NAIVE";
+  else if (key === "2") mode = "CULLED";
+  else if (key === "3") mode = "GREEDY";
+  else if (key === "4") useLightKey = !useLightKey;
+  else if (key === "w") showOutline = !showOutline;
+  else if (key === "b") policy = policy === "air" ? "solid" : "air";
+  else if (key === "e") {
+    const rng = mulberry32(seed * 31 + chunk.solidCount);
+    carveSphere(
+      chunk,
+      4 + rng() * (CHUNK_SIZE - 8),
+      4 + rng() * (CHUNK_SIZE - 8),
+      4 + rng() * (CHUNK_SIZE - 8),
+      3 + rng() * 4,
+    );
+  } else if (key === "r") {
+    seed += 1;
+    chunk = terrainChunk(seed);
+    light = makeLight(chunk);
+  } else return;
+
+  event.preventDefault();
+  rebuild();
+});
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// --- Loop: it only draws, it does not measure (except FPS) -------------------
+
+let fpsAccum = 0;
+let fpsFrames = 0;
+let last = performance.now();
+
+function frame(now: number): void {
+  requestAnimationFrame(frame);
+  const dt = now - last;
+  last = now;
+
+  controls.update();
+  renderer.render(scene, camera);
+
+  // TRIANGLES and DRAW CALLS come from three's own counter — not from our multiplication.
+  state.measured.triangles = renderer.info.render.triangles;
+  state.measured.drawCalls = renderer.info.render.calls;
+
+  fpsAccum += dt;
+  fpsFrames++;
+  if (fpsAccum >= 250) {
+    state.measured.fps = (fpsFrames * 1000) / fpsAccum;
+    fpsAccum = 0;
+    fpsFrames = 0;
+    renderHud(hudEl, state);
+  }
+}
+
+rebuild();
+renderHud(hudEl, state);
+requestAnimationFrame(frame);
+```
+
+### src/voxel/chunk.ts
+```
+export const CHUNK_SIZE = 32;
+
+/** What is outside the chunk? The call you make when no neighbor chunk is at hand. */
+export type BoundaryPolicy = "air" | "solid";
+
+export class VoxelChunk {
+  readonly size: number;
+  readonly data: Uint8Array;
+
+  constructor(size: number = CHUNK_SIZE) {
+    this.size = size;
+    this.data = new Uint8Array(size * size * size);
+  }
+
+  /**
+   * x + y*S + z*S² — the axis order is pinned down in ONE SINGLE PLACE.
+   * Copy this formula by hand into a second file and you may write the order backwards
+   * there, and the result does not crash: it silently gives you wrong geometry.
+   */
+  index(x: number, y: number, z: number): number {
+    const s = this.size;
+    return x + y * s + z * s * s;
+  }
+
+  /** An out-of-bounds read returns AIR — the right assumption when meshing a chunk alone. */
+  get(x: number, y: number, z: number): number {
+    const s = this.size;
+    if (x < 0 || y < 0 || z < 0 || x >= s || y >= s || z >= s) return 0;
+    return this.data[x + y * s + z * s * s];
+  }
+
+  set(x: number, y: number, z: number, material: number): void {
+    const s = this.size;
+    if (x < 0 || y < 0 || z < 0 || x >= s || y >= s || z >= s) return;
+    this.data[x + y * s + z * s * s] = material;
+  }
+
+  get solidCount(): number {
+    let n = 0;
+    for (let i = 0; i < this.data.length; i++) if (this.data[i] !== 0) n++;
+    return n;
+  }
+}
+```
+
+### src/voxel/culled.ts
+```
+import { AXES, AXIS_U, AXIS_V, makeQuad, type Quad } from "./quad.js";
+import type { BoundaryPolicy, VoxelChunk } from "./chunk.js";
+
+/**
+ * Never emit a face whose neighbor is solid.
+ *
+ * policy "air"   → outside the chunk is air. Correct if you show the chunk ON ITS OWN;
+ *                  with chunks laid side by side it wraps every chunk in an invisible
+ *                  shell and draws the two neighboring walls twice.
+ * policy "solid" → outside the chunk is solid. Correct if a neighbor chunk exists; on
+ *                  its own you lose the outer surface and see the model from inside.
+ *
+ * Either choice is valid as long as it is consistent. The inconsistent case — one mesher
+ * assuming "air" and the other "solid" — means silently wrong geometry.
+ */
+export function meshCulled(chunk: VoxelChunk, policy: BoundaryPolicy = "air"): Quad[] {
+  const quads: Quad[] = [];
+  const s = chunk.size;
+  const outsideIsSolid = policy === "solid";
+  const p: [number, number, number] = [0, 0, 0];
+  const n: [number, number, number] = [0, 0, 0];
+
+  for (let z = 0; z < s; z++) {
+    for (let y = 0; y < s; y++) {
+      for (let x = 0; x < s; x++) {
+        const material = chunk.get(x, y, z);
+        if (material === 0) continue;
+
+        p[0] = x;
+        p[1] = y;
+        p[2] = z;
+        for (const axis of AXES) {
+          const u = AXIS_U[axis];
+          const v = AXIS_V[axis];
+
+          for (const dir of [1, -1] as const) {
+            n[0] = x;
+            n[1] = y;
+            n[2] = z;
+            n[axis] += dir;
+
+            const outside = n[axis] < 0 || n[axis] >= s;
+            const neighbor = outside ? (outsideIsSolid ? 1 : 0) : chunk.get(n[0], n[1], n[2]);
+            if (neighbor !== 0) continue; // neighbor is solid → this face is invisible
+
+            const slice = dir === 1 ? p[axis] + 1 : p[axis];
+            quads.push(makeQuad(axis, dir, slice, p[u], p[v], 1, 1, material));
+          }
+        }
+      }
+    }
+  }
+  return quads;
+}
+```
+
+### src/voxel/generate.ts
+```
+import { VoxelChunk, CHUNK_SIZE } from "./chunk.js";
+
+/** Fast, deterministic 32-bit seeded generator. Same seed → same chunk. */
+export function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Seeded value noise + fBm. Return range is roughly [-1, 1]. */
+export function makeFbm(seed: number, octaves = 4): (x: number, z: number) => number {
+  const rng = mulberry32(seed);
+  const table = new Float32Array(256);
+  for (let i = 0; i < 256; i++) table[i] = rng();
+
+  const hash = (x: number, z: number) => table[((x * 73856093) ^ (z * 19349663)) & 255];
+  const smoothstep = (t: number) => t * t * (3 - 2 * t);
+
+  function value(x: number, z: number): number {
+    const xi = Math.floor(x);
+    const zi = Math.floor(z);
+    const u = smoothstep(x - xi);
+    const v = smoothstep(z - zi);
+    const a = hash(xi, zi);
+    const b = hash(xi + 1, zi);
+    const c = hash(xi, zi + 1);
+    const d = hash(xi + 1, zi + 1);
+    return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+  }
+
+  return function fbm(x: number, z: number): number {
+    let sum = 0;
+    let amp = 1;
+    let freq = 1;
+    let norm = 0;
+    for (let o = 0; o < octaves; o++) {
+      sum += value(x * freq, z * freq) * amp;
+      norm += amp;
+      amp *= 0.5;
+      freq *= 2;
+    }
+    return (sum / norm) * 2 - 1;
+  };
+}
+
+/** A fully solid chunk — the reference shape for the tests and the table. */
+export function solidChunk(size = CHUNK_SIZE, material = 1): VoxelChunk {
+  const chunk = new VoxelChunk(size);
+  chunk.data.fill(material);
+  return chunk;
+}
+
+/**
+ * Height field + cave noise. Pass `materials` as 1 and it produces a single-material
+ * chunk; when measuring how sensitive greedy is to the data model we flip this
+ * parameter and mesh the same surface twice.
+ */
+export function terrainChunk(seed = 1337, size = CHUNK_SIZE, materials = 4): VoxelChunk {
+  const chunk = new VoxelChunk(size);
+  const surface = makeFbm(seed);
+  const cave = makeFbm(seed ^ 0x9e3779b9, 3);
+
+  for (let z = 0; z < size; z++) {
+    for (let x = 0; x < size; x++) {
+      const height = Math.floor((0.55 + surface((x / size) * 3.5, (z / size) * 3.5) * 0.32) * size);
+      for (let y = 0; y < Math.min(height, size); y++) {
+        // Caves: they drill into the chunk and produce INNER surface. These holes
+        // are what let you see what the culling step culls and what it does not.
+        if (y > 2 && cave((x / size) * 5, (z / size) * 5 + y * 0.21) > 0.45) continue;
+        const depth = height - y;
+        const material = materials === 1 ? 1 : depth <= 1 ? 1 : depth <= 4 ? 2 : y < 4 ? 4 : 3;
+        chunk.set(x, y, z, material);
+      }
+    }
+  }
+  return chunk;
+}
+```
+
+### src/voxel/geometry.ts
+```
+import { BufferAttribute, BufferGeometry } from "three";
+import { AXIS_U, AXIS_V, quadTriangleIndices, type Quad } from "./quad.js";
+
+/** Material id → vertex color. 0 is air, never used. */
+export const MATERIAL_COLORS: readonly (readonly [number, number, number])[] = [
+  [0.0, 0.0, 0.0],
+  [0.24, 0.72, 0.48], // 1 — surface
+  [0.46, 0.33, 0.23], // 2 — dirt
+  [0.44, 0.47, 0.55], // 3 — stone
+  [0.13, 0.83, 0.93], // 4 — crystal (cyan)
+];
+
+export function quadsToGeometry(quads: readonly Quad[], scale = 1): BufferGeometry {
+  const vertexCount = quads.length * 4;
+  const positions = new Float32Array(vertexCount * 3);
+  const normals = new Float32Array(vertexCount * 3);
+  const colors = new Float32Array(vertexCount * 3);
+
+  // 4 vertices per quad → at 16,384 quads the Uint16 ceiling (65,535) is full.
+  // Naive mode blows well past it. Leave it Uint16 and the indices wrap SILENTLY
+  // and you get giant triangle spikes across the screen.
+  const indices: Uint16Array | Uint32Array =
+    vertexCount > 65535 ? new Uint32Array(quads.length * 6) : new Uint16Array(quads.length * 6);
+
+  const p = [0, 0, 0];
+  const du = [0, 0, 0];
+  const dv = [0, 0, 0];
+  let base = 0; // vertex counter
+  let po = 0; // position write cursor
+  let io = 0; // index write cursor
+
+  for (const q of quads) {
+    const u = AXIS_U[q.axis];
+    const v = AXIS_V[q.axis];
+
+    p[0] = p[1] = p[2] = 0;
+    p[q.axis] = q.slice;
+    p[u] = q.u;
+    p[v] = q.v;
+
+    du[0] = du[1] = du[2] = 0;
+    du[u] = q.w;
+    dv[0] = dv[1] = dv[2] = 0;
+    dv[v] = q.h;
+
+    for (let k = 0; k < 3; k++) {
+      positions[po + k] = p[k] * scale;
+      positions[po + 3 + k] = (p[k] + du[k]) * scale;
+      positions[po + 6 + k] = (p[k] + du[k] + dv[k]) * scale;
+      positions[po + 9 + k] = (p[k] + dv[k]) * scale;
+    }
+
+    const c = MATERIAL_COLORS[q.material] ?? MATERIAL_COLORS[3];
+    for (let corner = 0; corner < 4; corner++) {
+      const o = po + corner * 3;
+      normals[o] = 0;
+      normals[o + 1] = 0;
+      normals[o + 2] = 0;
+      normals[o + q.axis] = q.dir; // axis-aligned face: the normal is already unit length
+      colors[o] = c[0];
+      colors[o + 1] = c[1];
+      colors[o + 2] = c[2];
+    }
+
+    const tri = quadTriangleIndices(q.dir);
+    for (let k = 0; k < 6; k++) indices[io + k] = base + tri[k];
+
+    base += 4;
+    po += 12;
+    io += 6;
+  }
+
+  const geometry = new BufferGeometry();
+  geometry.setAttribute("position", new BufferAttribute(positions, 3));
+  geometry.setAttribute("normal", new BufferAttribute(normals, 3));
+  geometry.setAttribute("color", new BufferAttribute(colors, 3));
+  geometry.setIndex(new BufferAttribute(indices, 1));
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
+/** UVs of a greedy quad: the texture repeats w×h times. */
+export function quadUVs(q: Quad): [number, number, number, number, number, number, number, number] {
+  return [0, 0, q.w, 0, q.w, q.h, 0, q.h];
+}
+
+/** The four edges of every quad — for LineSegments. Lifted slightly along the face normal. */
+export function quadsToOutline(quads: readonly Quad[], scale = 1, lift = 0.004): BufferGeometry {
+  const positions = new Float32Array(quads.length * 4 * 3);
+  const indices: Uint16Array | Uint32Array =
+    quads.length * 4 > 65535
+      ? new Uint32Array(quads.length * 8)
+      : new Uint16Array(quads.length * 8);
+
+  const p = [0, 0, 0];
+  const du = [0, 0, 0];
+  const dv = [0, 0, 0];
+  let base = 0;
+  let po = 0;
+  let io = 0;
+
+  for (const q of quads) {
+    const u = AXIS_U[q.axis];
+    const v = AXIS_V[q.axis];
+
+    p[0] = p[1] = p[2] = 0;
+    p[q.axis] = q.slice + q.dir * lift; // this is how we kill z-fighting
+    p[u] = q.u;
+    p[v] = q.v;
+
+    du[0] = du[1] = du[2] = 0;
+    du[u] = q.w;
+    dv[0] = dv[1] = dv[2] = 0;
+    dv[v] = q.h;
+
+    for (let k = 0; k < 3; k++) {
+      positions[po + k] = p[k] * scale;
+      positions[po + 3 + k] = (p[k] + du[k]) * scale;
+      positions[po + 6 + k] = (p[k] + du[k] + dv[k]) * scale;
+      positions[po + 9 + k] = (p[k] + dv[k]) * scale;
+    }
+
+    indices[io] = base;
+    indices[io + 1] = base + 1;
+    indices[io + 2] = base + 1;
+    indices[io + 3] = base + 2;
+    indices[io + 4] = base + 2;
+    indices[io + 5] = base + 3;
+    indices[io + 6] = base + 3;
+    indices[io + 7] = base;
+
+    base += 4;
+    po += 12;
+    io += 8;
+  }
+
+  const geometry = new BufferGeometry();
+  geometry.setAttribute("position", new BufferAttribute(positions, 3));
+  geometry.setIndex(new BufferAttribute(indices, 1));
+  return geometry;
+}
+```
+
+### src/voxel/greedy.ts
+```
+import { AXES, AXIS_U, AXIS_V, makeQuad, type Quad } from "./quad.js";
+import type { BoundaryPolicy, VoxelChunk } from "./chunk.js";
+
+/** The key two neighboring cells must have EQUAL in order to merge. */
+export type MergeKey = (material: number, x: number, y: number, z: number) => number;
+
+export interface GreedyOptions {
+  policy?: BoundaryPolicy;
+  /** Default: material only. Whatever you add to the key stops merging that much earlier. */
+  mergeKey?: MergeKey;
+}
+
+export function meshGreedy(chunk: VoxelChunk, options: GreedyOptions = {}): Quad[] {
+  const policy = options.policy ?? "air";
+  const mergeKey = options.mergeKey ?? ((material) => material);
+
+  const quads: Quad[] = [];
+  const s = chunk.size;
+  const mask = new Int32Array(s * s);
+
+  const x = [0, 0, 0]; // the swept position
+  const q = [0, 0, 0]; // one +1 step along the axis
+
+  const keyAt = (px: number, py: number, pz: number): number => {
+    const material = chunk.get(px, py, pz);
+    return material === 0 ? 0 : mergeKey(material, px, py, pz);
+  };
+
+  for (const axis of AXES) {
+    const u = AXIS_U[axis];
+    const v = AXIS_V[axis];
+    q[0] = q[1] = q[2] = 0;
+    q[axis] = 1;
+
+    // "air": start at -1 and emit the chunk's OUTER surface too.
+    // "solid": start at 0 and never emit the outer surface (the neighbor chunk draws it).
+    const first = policy === "air" ? -1 : 0;
+    const last = policy === "air" ? s : s - 1;
+
+    for (x[axis] = first; x[axis] < last;) {
+      // --- 1) Build the mask for this slice ---
+      let m = 0;
+      for (x[v] = 0; x[v] < s; x[v]++) {
+        for (x[u] = 0; x[u] < s; x[u]++) {
+          const a = x[axis] >= 0 ? keyAt(x[0], x[1], x[2]) : 0;
+          const b = x[axis] < s - 1 ? keyAt(x[0] + q[0], x[1] + q[1], x[2] + q[2]) : 0;
+
+          // Both solid → the face between them is invisible. Both empty → no face.
+          // Only a solid → the face looks toward +axis. Only b solid → toward -axis.
+          mask[m++] = a !== 0 && b !== 0 ? 0 : a !== 0 ? a : -b;
+        }
+      }
+
+      // The face plane sits BETWEEN the two cells. We advance after building the mask.
+      x[axis]++;
+
+      // --- 2) Collect the largest rectangles in the mask ---
+      let n = 0;
+      for (let j = 0; j < s; j++) {
+        for (let i = 0; i < s;) {
+          const key = mask[n];
+          if (key === 0) {
+            i++;
+            n++;
+            continue;
+          }
+
+          // Width: how many cells the same key runs for along the u axis.
+          let w = 1;
+          while (i + w < s && mask[n + w] === key) w++;
+
+          // Height: grow one more row along v only if the WHOLE ROW matches.
+          let h = 1;
+          grow: while (j + h < s) {
+            for (let k = 0; k < w; k++) {
+              if (mask[n + k + h * s] !== key) break grow;
+            }
+            h++;
+          }
+
+          quads.push(makeQuad(axis, key > 0 ? 1 : -1, x[axis], i, j, w, h, Math.abs(key) & 0xff));
+
+          // Zero out what we consumed, otherwise we emit the same face again.
+          for (let b = 0; b < h; b++) {
+            for (let a = 0; a < w; a++) mask[n + a + b * s] = 0;
+          }
+
+          i += w;
+          n += w;
+        }
+      }
+    }
+  }
+
+  return quads;
+}
+```
+
+### src/voxel/naive.ts
+```
+import { AXES, AXIS_U, AXIS_V, makeQuad, type Quad } from "./quad.js";
+import type { VoxelChunk } from "./chunk.js";
+
+/** ALL SIX faces of every solid voxel. It never looks at a neighbor, it culls nothing. */
+export function meshNaive(chunk: VoxelChunk): Quad[] {
+  const quads: Quad[] = [];
+  const s = chunk.size;
+  const p: [number, number, number] = [0, 0, 0];
+
+  for (let z = 0; z < s; z++) {
+    for (let y = 0; y < s; y++) {
+      for (let x = 0; x < s; x++) {
+        const material = chunk.get(x, y, z);
+        if (material === 0) continue;
+
+        p[0] = x;
+        p[1] = y;
+        p[2] = z;
+        for (const axis of AXES) {
+          const u = AXIS_U[axis];
+          const v = AXIS_V[axis];
+          // + face: on the plane beyond the voxel. - face: on the voxel's own plane.
+          quads.push(makeQuad(axis, 1, p[axis] + 1, p[u], p[v], 1, 1, material));
+          quads.push(makeQuad(axis, -1, p[axis], p[u], p[v], 1, 1, material));
+        }
+      }
+    }
+  }
+  return quads;
+}
+```
+
+### src/voxel/quad.ts
+```
+export type Axis = 0 | 1 | 2;
+
+/**
+ * u = (axis + 1) % 3, v = (axis + 2) % 3.
+ * This ORDER is not arbitrary: it makes the (û × v̂) product come out as +axis.
+ * Swap the order and every normal flips, and you end up seeing the scene from inside.
+ */
+export const AXIS_U: readonly Axis[] = [1, 2, 0];
+export const AXIS_V: readonly Axis[] = [2, 0, 1];
+
+/** `for (let a = 0 as Axis; ...; a++)` does not compile in TS — a++ assigns number to Axis. */
+export const AXES: readonly Axis[] = [0, 1, 2];
+
+export interface Quad {
+  /** Axis of the normal: 0 = X, 1 = Y, 2 = Z. */
+  axis: Axis;
+  /** Sign of the normal. */
+  dir: 1 | -1;
+  /** The plane the face sits on — an integer coordinate along the axis. */
+  slice: number;
+  /** Start and width of the rectangle on the u axis. */
+  u: number;
+  w: number;
+  /** Start and height of the rectangle on the v axis. */
+  v: number;
+  h: number;
+  /** Material id (≥ 1). */
+  material: number;
+}
+
+export function makeQuad(
+  axis: Axis,
+  dir: 1 | -1,
+  slice: number,
+  u: number,
+  v: number,
+  w: number,
+  h: number,
+  material: number,
+): Quad {
+  return { axis, dir, slice, u, v, w, h, material };
+}
+
+/**
+ * Expands a quad list into the set of unit faces it covers.
+ * Key: axis, dir, slice, u, v, material.
+ *
+ * This is how you prove an optimization correct: establish SET EQUALITY with the
+ * unoptimized version. Equality of quad COUNT is not enough — a bug that keeps the
+ * count the same while changing the surface is genuinely possible, as we will see.
+ */
+export function faceKeys(quads: readonly Quad[]): Set<string> {
+  const keys = new Set<string>();
+  for (const q of quads) {
+    for (let b = 0; b < q.h; b++) {
+      for (let a = 0; a < q.w; a++) {
+        keys.add(`${q.axis},${q.dir},${q.slice},${q.u + a},${q.v + b},${q.material}`);
+      }
+    }
+  }
+  return keys;
+}
+
+/** dir = +1 → CCW, normal +axis. dir = -1 → reversed order, normal -axis. */
+export function quadTriangleIndices(dir: 1 | -1): readonly number[] {
+  return dir === 1 ? [0, 1, 2, 0, 2, 3] : [0, 3, 2, 0, 2, 1];
+}
+```
