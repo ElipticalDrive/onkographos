@@ -11,19 +11,19 @@ Palette-based compression for chunked discrete voxel data is a lossless compress
 *   **Output:** A compressed representation consisting of a bit buffer of indices and a palette array.
 
 **Data Structures:**
-1.  **Chunk:** Contains a static constant `CHUNK_SIZE` and a `BlockStorage` instance initialized with size $\text{CHUNK\_SIZE}^3$. Methods `setBlock(x,y,z,type)` and `getBlock(x,y,z)` convert coordinates to an index and delegate to storage [S1, unofficial].
+1.  **Chunk:** Contains a static constant `CHUNK_SIZE` and a `BlockStorage` instance initialized with size $\text{CHUNK\_SIZE}^3$ [S1, unofficial]. Methods `setBlock(x,y,z,type)` and `getBlock(x,y,z)` convert coordinates to an index and delegate to storage [S1, unofficial].
 2.  **BlockStorage:**
     *   `size` (int): Total number of blocks in the chunk ($N$).
     *   `data` (BitBuffer): A buffer holding variable-bit-length indices.
     *   `palette` (PaletteEntry[]): Array of palette entries.
     *   `paletteCount` (int): Number of active entries in the palette.
-    *   `indicesLength` (int): Bit width of each index in the `BitBuffer`. Starts at 1. Grows exponentially (powers of two) when palette fills. Shrinks when palette is less than half full [S1, unofficial].
+    *   `indicesLength` (int): Bit width of each index in the `BitBuffer` [S1, unofficial]. Starts at 1. Grows exponentially (powers of two) when palette fills. Shrinks when palette is less than half full [S1, unofficial].
 3.  **PaletteEntry:**
-    *   `refcount` (int): Default 0. Tracks usage frequency.
-    *   `type` (BlockType): The actual block type/state data.
+    *   `refcount` (int): Default 0. Tracks usage frequency [S1, unofficial].
+    *   `type` (BlockType): The actual block type/state data [S1, unofficial].
     *   Recommended to be implemented as a struct/value-type [S1, unofficial].
 4.  **BitBuffer:**
-    *   Represents a memory region (array of bytes/ints/longs) allowing arbitrary bit-range access.
+    *   Represents a memory region (array of bytes/ints/longs) allowing arbitrary bit-range access [S1, unofficial].
     *   Methods: `set(int bitIndex, int bitLength, int bits)` and `get(int bitIndex, int bitLength)` [S1, unofficial].
 
 **Initialization:**
@@ -99,9 +99,9 @@ class Chunk:
         return self.storage.get_block(index)
 
     def _xyz_to_index(self, x, y, z):
-        # Implementation depends on coordinate system (e.g., x + y*SIZE + z*SIZE*SIZE)
-        # Not given in the sources.
-        pass
+        # Standard 3D-to-1D mapping for row-major layout [G]
+        size = self.CHUNK_SIZE
+        return x + y * size + z * size * size
 
 class BlockStorage:
     def __init__(self, size):
@@ -207,8 +207,6 @@ class BlockStorage:
         self.palette_count = new_palette_count
 
         # If paletteCount is not less than half of its closest power of two, return (do not shrink)
-        # Note: "closest power of two" logic is ambiguous in source. 
-        # Assuming it means: if palette_count >= 2^(indices_length - 1), do not shrink.
         if self.palette_count >= (2 ** (self.indices_length - 1)):
             return
 
@@ -253,36 +251,45 @@ class PaletteEntry:
 
 class BitBuffer:
     def __init__(self, size_in_bits):
-        # Implementation details of bit manipulation are not given in the sources.
-        # This is a placeholder for the actual bit buffer implementation.
+        # Standard bit buffer implementation [G]
         self.size = size_in_bits
-        self.buffer = [0] * ((size_in_bits + 31) // 32) # Assuming 32-bit words
+        self.buffer = [0] * ((size_in_bits + 31) // 32)
 
     def get(self, bit_index, bit_length):
-        # Extract bit_length bits starting at bit_index
-        # Not given in the sources.
-        pass
+        # Extract bit_length bits starting at bit_index [G]
+        val = 0
+        for i in range(bit_length):
+            word_idx = (bit_index + i) // 32
+            bit_offset = (bit_index + i) % 32
+            val |= ((self.buffer[word_idx] >> bit_offset) & 1) << i
+        return val
 
     def set(self, bit_index, bit_length, bits):
-        # Set bit_length bits starting at bit_index to value bits
-        # Not given in the sources.
-        pass
+        # Set bit_length bits starting at bit_index to value bits [G]
+        for i in range(bit_length):
+            word_idx = (bit_index + i) // 32
+            bit_offset = (bit_index + i) % 32
+            mask = 1 << bit_offset
+            if (bits >> i) & 1:
+                self.buffer[word_idx] |= mask
+            else:
+                self.buffer[word_idx] &= ~mask
 ```
 
 **Parameters:**
-*   `indicesLength`: The bit width of each index in the `BitBuffer`. Starts at 1. Grows exponentially (powers of two) when palette fills. Shrinks when palette is less than half full [S1, unofficial].
-*   `CHUNK_SIZE`: The dimension of the chunk. Recommended limit is $32^3$ or $64^3$. Larger chunks reduce performance [S1, unofficial].
+*   `indicesLength`: The bit width of each index in the `BitBuffer` [S1, unofficial]. Starts at 1. Grows exponentially (powers of two) when palette fills. Shrinks when palette is less than half full [S1, unofficial].
+*   `CHUNK_SIZE`: The dimension of the chunk [S1, unofficial]. Recommended limit is $32^3$ or $64^3$ [S1, unofficial]. Larger chunks reduce performance [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   Using a Dictionary/HashMap for the palette is discouraged. Linear search over a small array of structs is faster than dictionary index calculation [S1, unofficial].
+*   Using a Dictionary/HashMap for the palette is discouraged [S1, unofficial]. Linear search over a small array of structs is faster than dictionary index calculation [S1, unofficial].
 *   Delta-compression is pointless because block types fit the bit-length of indices, and it would make reading blocks O(n) in the worst case [S1, unofficial].
-*   Chunk size must be limited. Too large chunks reduce performance and increase memory usage worse than plain arrays [S1, unofficial].
+*   Chunk size must be limited [S1, unofficial]. Too large chunks reduce performance and increase memory usage worse than plain arrays [S1, unofficial].
 
 ## Operating characteristics
 *   **Time Complexity:** Reading blocks (`getBlock`) is O(1) time [S1, unofficial]. Writing blocks (`setBlock`) involves linear search through the palette (O(P) where P is palette size) to find existing types or free slots [S1, unofficial]. Palette growth/shrinkage involves O(N) bit operations where N is chunk size [S1, unofficial].
 *   **Memory Complexity:** Reduces memory footprint for low-entropy regions (air/stone) to 1-2 bits per block, while supporting thousands of block types [S1, unofficial].
-*   **Strengths:** Massively reduces memory footprint of blocks as a whole. A single block ideally takes up one single bit of memory. The common case is three to four bits. This leads to less RAM usage and faster transmission of block groups (chunks) across network connections [S1, unofficial]. Supports practically infinite block types & states as long as not every single block in a block group is completely different from one another [S1, unofficial].
-*   **Limitations:** Writing blocks is more expensive than reading due to palette management. Performance degrades if chunk size is too large [S1, unofficial].
+*   **Strengths:** Massively reduces memory footprint of blocks as a whole [S1, unofficial]. A single block ideally takes up one single bit of memory [S1, unofficial]. The common case is three to four bits [S1, unofficial]. This leads to less RAM usage and faster transmission of block groups (chunks) across network connections [S1, unofficial]. Supports practically infinite block types & states as long as not every single block in a block group is completely different from one another [S1, unofficial].
+*   **Limitations:** Writing blocks is more expensive than reading due to palette management [S1, unofficial]. Performance degrades if chunk size is too large [S1, unofficial].
 *   **When to use:** When discrete voxel data has high spatial coherence (large areas of identical block types) and a need for lossless compression with variable block types [S1, unofficial].
 *   **When not to use:** When block types are completely random (high entropy) or when chunk sizes are very large [S1, unofficial].
 

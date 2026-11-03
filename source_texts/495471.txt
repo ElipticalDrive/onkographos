@@ -1,0 +1,1850 @@
+Factored-NeuS: Reconstructing Surfaces, Illumination, and Materials of Possibly
+Glossy Objects
+Yue Fan1
+Ningjing Fan1
+Ivan Skorokhodov2
+Oleg Voynov3,4
+3,4
+2
+Evgeny Burnaev
+Peter Wonka
+Yiqun Wang1 *
+arXiv:2305.17929v2 [cs.CV] 7 Apr 2025
+1
+Chongqing University
+2
+KAUST
+Abstract
+3
+Skoltech
+4
+Savva Ignatyev3
+AIRI
+ods typically do not fully consider the interdependence between different components, leading to the following issues
+with glossy surfaces when using real data.
+First, surfaces with glossy materials typically result in
+highlights. The best current methods [11, 42, 43] for reconstructing implicit neural surfaces rarely consider material
+information and directly reconstruct surfaces. The surface
+parameters can then be frozen for subsequent material reconstruction. Since neural radiance fields typically model such
+inconsistent colors as bumpy surfaces as shown in Fig. 1 left,
+the artifacts from surface reconstruction will affect material
+reconstruction if surfaces and materials are reconstructed
+sequentially. Second, a glossy surface can affect the decomposition of the reflected radiance into a diffuse component and a specular component. Typically, the specular
+component leaks into the diffuse component, resulting in
+inaccurate modeling as shown in Fig. 1 right. Third, focusing on synthetic data makes it easier to incorporate complex
+physically-based rendering algorithms [5, 45], but they may
+not be robust enough to work on real data.
+In this work, we consider the impact of glossy surfaces
+on surface and material reconstruction based on implicit representation. Although existing methods based on explicit
+representations, such as 3D Gaussian Splatting (3DGS) [20],
+have made progress in surface reconstruction [8, 16, 51] and
+inverse rendering [12, 18, 21, 24, 36], the unique advantages
+of implicit representations, such as low storage requirements
+and smooth surface modeling, still make them worthy of
+being explored as a separate research branch. This paper
+focuses solely on methods based on implicit representation
+and further extends research in reconstructing glossy objects.
+To better handle glossy surfaces, we jointly use surface and
+volume rendering. Volume rendering does not decompose
+the reflected radiance, while surface rendering considers
+the diffuse and specular radiance separately. The learned
+SDF network enables accurate radiance reconstruction in volume rendering while also being capable of providing correct
+surface information in surface rendering to model specular
+and diffuse components into directional and non-directional
+parts. Both work together to regularize accurate and ef-
+We develop a method that recovers the surface, materials,
+and illumination of a scene from its posed multi-view images.
+In contrast to prior work, it does not require any additional
+data and can handle glossy objects or bright lighting. It
+is a progressive inverse rendering approach, which consists of three stages. In the first stage, we reconstruct the
+scene radiance and signed distance function (SDF) with a
+novel regularization strategy for specular reflections. We
+propose to explain a pixel color using both surface and volume rendering jointly, which allows for handling complex
+view-dependent lighting effects for surface reconstruction.
+In the second stage, we distill light visibility and indirect
+illumination from the learned SDF and radiance field using
+learnable mapping functions. Finally, we design a method
+for estimating the ratio of incoming direct light reflected in a
+specular manner and use it to reconstruct the materials and
+direct illumination. Experimental results demonstrate that
+the proposed method outperforms the current state-of-theart in recovering surfaces, materials, and lighting without
+relying on any additional data.
+1. Introduction
+Reconstructing shape, material, and lighting from multiple views has wide applications in computer vision, virtual
+reality, augmented reality, and shape analysis. The emergence of neural radiance fields [27] provides a framework
+for high-quality scene reconstruction. Subsequently, many
+works [11, 31, 42, 43, 49] have incorporated implicit neural
+surfaces into neural radiance fields, further enhancing the
+quality of surface reconstruction from multi-views. Recently,
+several works [29, 38, 53, 55, 56] have utilized coordinatebased networks to predict materials and learned parameters
+to represent illumination, followed by synthesizing image
+color using physically-based rendering equations to achieve
+material and lighting reconstruction. However, these meth* Corresponding author: yiqun.wang@cqu.edu.cn
+1
+Image
+GT Mesh
+NeuS
+Geo-NeuS
+Ours
+Image
+IndiSG
+Diffuse
+IndiSG
+Specular
+Ours
+Diffuse
+Ours
+Specular
+Figure 1. Left: Geometry visualization for NeuS, Geo-NeuS and our method on the Pot scene from SK3D dataset. Existing surface
+reconstruction methods struggle to recover the correct geometry of glossy objects due to the complex view-dependent effects they induce.
+The weak color model of these methods compels to represent such effects through concave geometric deformations rather than proper
+view-dependent radiance, leading to shape artifacts. In contrast, our method can correctly reconstruct a highly reflective surface due to our
+joint appearance, diffuse, and specular color training strategy. Right: Visualization of the recovered diffuse color component on the Bunny
+scene from DTU for IndiSG [56] and our method. Existing inverse rendering methods overestimate the diffuse material component in the
+presence of specular highlights. Our regularization strategy allows us to properly disentangle the color into diffuse and specular components.
+ficient SDF surface reconstruction of glossy objects. To
+better recover diffuse and specular components, we estimate
+the ratio of incoming light reflected in a specular manner.
+By introducing this parameter into a Spherical Gaussian
+representation of the BRDF for inverse rendering, we can
+better model the reflection of glossy surfaces and decompose more accurate diffuse albedo information. Furthermore,
+we propose predicting continuous light visibility for signed
+distance functions to further enhance the quality of reconstructed materials and illumination. Our experimental results
+have shown that our factorization of surface, materials, and
+illumination achieves state-of-the-art performance on both
+synthetic and real datasets.
+We believe our approach outperforms recent work because it was developed primarily on real data. The fundamental challenge in material and lighting reconstruction is the
+lack of available ground truth information for real datasets.
+Our solution was to work with real data and improve surface reconstruction as our main metric by experimenting
+with different materials and lighting decompositions as a
+regularizer, indirectly measuring the success of material and
+lighting reconstruction through surface metrics. By contrast,
+most recent works [10, 53, 56] use surface reconstruction
+and real data more as an afterthought, focusing instead on
+increasingly complex material and lighting reconstruction
+with synthetic data. However, we believe that this typically
+does not translate as well to real data as our approach.
+as input and output implicit neural surface representations.
+Many works have studied how to obtain implicit neural surfaces from images, initially focusing on surface rendering
+only [30, 48]. Subsequent methods followed NeRF to employ volume rendering, e.g. UNISURF [31], VolSDF [49],
+NeuS [42], HF-NeuS [43], and Geo-NeuS [11].
+Joint reconstruction of surface, material, and illumination. Ideally, we would like to jointly reconstruct the 3D
+geometry, material properties, and lighting conditions of a
+scene from 2D images. Several methods employ strategies
+to simplify the problem such as assuming known lighting
+conditions (NeRV [37] and NeRD [3]) or pre-training (ENVIDR [23]). PhySG [53], NeRFactor [55], and NeROIC [22]
+use Spherical Gaussians, point light sources, and spherical
+harmonics, respectively, to decompose unknown lighting
+from a set of images. Using an illumination integration
+network, Neural-PIL [4] further reduces the computational
+cost of lighting integration. IRON [54] uses SDF-based
+volume rendering methods to obtain better geometric details in the shape recovery stage. NVDiffrec [29] explicitly extracts triangle mesh from tetrahedral representation
+for better material and lighting modeling. IndiSG [56]
+uses Spherical Gaussians to represent indirect illumination
+and achieves good lighting decomposition results. Some
+works [10, 19, 46, 52, 57] continue to improve the efficiency
+and quality of inverse rendering but do not consider cases
+with a glossy appearance. NeAI [58] proposes neural ambient illumination to enhance the rendering quality of glossy
+appearance. NeRO [25] highlights its good performance
+in reconstructing reflective objects. Ref-NeuS [13] learns
+specular reflection intensity and attenuates the impact of
+pixels affected by specular reflection. Despite a lot of recent
+activity in this area, existing frameworks still struggle to
+effectively reconstruct reflective or glossy surfaces, lighting,
+and material information directly from images, especially
+real-world captured images.
+2. Related work
+Neural radiance fields. NeRF [27] is a seminal work in
+3D reconstruction. Important improvements were proposed
+by Mip-NeRF [1] and Mip-NeRF360 [2]. One line of work
+explores the combination of different data structures with
+MLPs, such as factored volumes [6, 7, 44] or voxels [28,
+33, 34]. Multiple approaches take a step towards extending
+neural radiance fields to reconstruct material information [13,
+14, 39, 47, 50].
+Implicit neural surfaces. Implicit neural surfaces are typically represented by occupancy functions or signed distance
+fields (SDFs). Some early works [9, 26, 32] take point clouds
+3. Method
+Our framework has three training stages to gradually decompose the shape, materials, and illumination. The input to our
+2
+Md
+cd
+γ(cd + cs )
+x
+vf
+s
+n
+SDF network
+d
+Ms
+ref
+ωr
+x
+C sur
+Mind
+x
+i
+{ξki , λik , µik }K
+k=1
+(indirect light SGs)
+Mind
+ωi
+Mc
+z
+cs
+Mν
+Dec
+Enc
+da
+r
+n
+i
+{ξki , λik , µik }K
+k=1
+rendering
+C
+(indirect light SGs)
+e
+{ξke , λek , µek }K
+k=1
+ν
+(direct light SGs)
+c
+ωr
+Msa
+sa
+ν
+ωi
+Figure 2. Overview for Stage 1 (left), Stage 2 (mid), and Stage 3 (right) training pipelines. The first stage (left) trains the SDF network Sθ
+which outputs a feature vector vf ∈ R256 , SDF value s ∈ R, and normal n ∈ S2 (as a normalized gradient of s; denoted via the dashed
+line); diffuse and specular surface color networks Md and Ms produce their respective colors cd , cs ∈ R3 via surface rendering, which are
+then combined through tone mapping γ(·) to get the final surface color C sur ∈ R3 ; volumetric color network Mc produces the volumetrically
+rendered color C vol ∈ R3 . The ref operation denotes computation of the reflection direction ωr ∈ S2 from normal n and ray direction
+ω ∈ S2 . In the second stage (mid), indirect light network Mind and light visibility network Mν produce their respective indirect light SGs
+and light visibility ν. In the third stage (right), we optimize the material BRDF auto-encoder with the sparsity constraint [56], our novel
+specular albedo network Msa , and the indirect illumination network Mind . See Sec 3 for details.
+framework is a set of images. In the first stage, we reconstruct the surface from a (possibly glossy) appearance by
+jointly using volume rendering and surface rendering. After
+that, we use the reconstructed radiance field to extract direct
+illumination visibility and indirect illumination. In the final
+stage, we recover the direct illumination map and materials’ bidirectional reflectance distribution function (BRDF),
+proposing to use a BRDF with a learnable specular albedo.
+a diffuse and a specular component. This can achieve an
+improved surface reconstruction of glossy surfaces.
+Shape representation. We model shape as a signed distance
+function Sθ : x 7→ (s, vf ), which maps a 3D point x ∈ R3
+to its signed distance value s ∈ R and a feature vector
+vf ∈ R256 . SDF allows computing a normal n directly by
+calculating the gradient: n = ∇Sθ (x)/∥∇Sθ (x)∥.
+Synthesize appearance. Learning implicit neural surfaces
+from multi-view images often requires synthesizing appearance/color to optimize the underlying surface. The recent
+use of volume rendering in NeuS [42] has been shown
+to better reconstruct surfaces. According to Eq. 14 in
+Appx A,Pthe discretization
+for volume rendering is
+Pformula
+n
+n
+C vol = i=1 Ti αi ci = i=1 wi ci with n sampled points
+{r(ti )}ni=1 on the ray. where αi = max(Φs (Sθ (r(ti ))) −
+Φs (Sθ (r(ti+1 )))/Φs (Sθ (r(ti ))), 0), which is discrete opacity values following NeuS, where Φs = 1/(1 + e−x ) is
+Qi−1
+a sigmoid function and Ti =
+j=1 (1 − αj ) is the discrete transparency. Similar to the continuous case, we
+can also define discrete weights wi = Ti αi . To compute
+color ci on the point r(ti ), we define a color mapping
+Mc : (x, n, d, vf ) 7→ c from any 3D point x given its
+feature vector vf , normal n and ray direction d.
+Synthesize diffuse and specular components. We also
+synthesize separated diffuse and specular components as
+proposed in [15, 23, 50], but uniquely, we simultaneously
+preserve the synthesis of the overall appearance. This idea
+comes from surface rendering, which better handles surface
+reflections. From Eq. 16 in Appx A, the radiance Lo of
+surface point x and outgoing viewing direction ωo can be
+decomposed into two parts: diffuse and specular radiance.
+Z
+da
+Lo (x, ωo ) =
+Li (x, ωi )(ωi · n)dωi
+(1)
+π Ω
+Z
++
+fs (x, ωi , ωo )Li (x, ωi )(ωi · n)dωi (2)
+3.1. Stage 1: Surface reconstruction from glossy
+appearance
+Current inverse rendering methods first recover implicit neural surfaces, typically represented as SDFs, from multi-view
+images to recover shape information, then freeze the parameters of neural surfaces to further recover the material. However, this approach does not consider specular reflections that
+produce highlights and often models this inconsistent color
+as bumpy surface geometry as depicted in Fig. 1 left. This
+incorrect surface reconstruction has a negative impact on subsequent material reconstruction. We propose a neural surface
+reconstruction method that considers the appearance, diffuse
+color, and specular color of glossy surfaces at the same time,
+whose architecture is given in Fig. 2. Our inspiration comes
+from the following observations. First, according to GeoNeuS [11], using SDF point cloud supervision can make the
+colors of surface points and volume rendering more similar.
+We abandoned the idea of using additional surface points
+to supervise SDFs and directly used two different MLPs to
+predict the surface rendering and volume rendering results
+and narrow the gap between these two colors using network
+training. In addition, when modeling glossy surfaces, RefNeRF [39] proposes a method of decomposing reflected
+radiance into diffuse and specular components, which can
+better model the glossy appearance. However, this approach
+is unstable when directly applied to reconstruct implicit surfaces. We propose to simultaneously optimize the radiance
+from the volumetric rendering and the surface rendering. For
+surface rendering, we further split the reflected radiance into
+Ω
+= Md (x, n) + Ms (x, ωo , n)
+(3)
+We define two neural networks to predict diffuse and spec3
+Training strategies. In our training process, we define three
+loss functions, namely volume radiance loss Lvol , surface
+radiance loss Lsur , and regularization loss Lreg . The volume
+radiance loss Lvol is measured by calculating the L1 distance between the ground truth colors C gt and the volume
+radiances C vol of a subset of rays R. The surface radiance
+loss Lsur is measured by calculating the L1 distance between
+the ground truth colors C gt and the surface radiances C sur .
+Lreg is an Eikonal loss term on the sampled points. We use
+weights λsur and λreg to balance the impact of these three
+losses. The overall training loss is as follows. See Appx C
+for details of training strategies.
+ular components separately. We use the term diffuse radiance to refer to the component of the reflected radiance that
+stems from a diffuse surface reflection. We define a mapping
+Md : (x, n, vf ) 7→ cd for diffuse radiance that maps surface points x, surface normals n, and feature vectors vf to
+diffuse radiance. For simplicity, we assume that the diffuse
+radiance is not related to the outgoing viewing direction ωo .
+We use the term specular radiance to describe the nondiffuse (view-direction dependent) component of the reflected radiance. Ref-NeRF [39] proposes to model the
+glossy appearance using the reflection direction instead of
+the viewing one. However, from Eq. 3, we can observe
+that specular radiance is also highly dependent on the surface normal, which is particularly important when reconstructing SDF. In contrast to Ref-NeRF, we further condition
+specular radiance on the surface normal. Therefore, we define specular radiance Ms : (x, ωr , n, vf ) 7→ cs , which
+maps surface points x, reflection direction ωr , surface normals n, and feature vectors vf to specular radiance, where
+ωr = 2(ωo · n)n − ωo .
+Surface rendering focuses the rendering process on the
+surface, allowing for a better understanding of highlights
+on the surface compared to volume rendering, but requires
+calculating surface points. We sample n points on the
+ray {r(ti )|i = 1, ..., n}. We query the sampled points
+to find the first point r(t′i ) whose SDF value is less than
+zero Sθ (r(t′i )) < 0. Then the point r(ti′ −1 ) sampled before r(t′i ) has the SDF value greater than or equal to zero
+Sθ (r(ti′ −1 )) ≥ 0. To account for the possibility of rays
+interacting with objects and having multiple intersection
+points, we select the first point with a negative SDF value to
+solve this issue.
+We use two neural networks to predict the diffuse radiance
+and specular radiance of two sampling points r(ti′ −1 ) and
+r(t′i ). The diffuse radiance of the two points calculated by
+′
+′
+the diffuse network Md will be cid −1 and cid . The specular
+radiance of the two points calculated by the specular network
+′
+′
+Ms will be cis −1 and cis . Therefore, the diffuse radiance and
+specular radiance of the surface point x can be calculated as
+follows.
+′
+′
+(4)
+At this stage, we focus on predicting the lighting visibility
+and indirect illumination of a surface point x under different
+incoming light direction ωi using the SDF in the first stage.
+Visibility is an important factor in shadow computation.
+It calculates the visibility of the current surface point x in the
+direction of the incoming light ωi . Path tracing of the SDF is
+commonly used to obtain a binary visibility (0 or 1) as used
+in IndiSG [56], but this kind of visibility is not friendly to
+network learning. Inspired by NeRFactor [55], we propose
+to use an integral representation with the continuous weight
+function w(t) (with a range from 0 to 1 and sourced from
+stage 1) for the SDF to express light visibility. Specifically,
+we establish a neural network Mν : (x, ωi ) 7→ ν, that maps
+the surface point x and incoming light direction ωi to visibility, and the ground truth value of light visibility is obtained
+by integrating the weights wi of the SDF of sampling points
+along the incoming
+light direction and can be expressed as
+Pn
+ν gt = 1 − i=1 wi .
+Indirect illumination refers to the light that is reflected or
+emitted from surfaces in a scene and then illuminates other
+surfaces, rather than directly coming from a light source,
+which contributes to the realism of rendered images. Following IndiSG [56], we parameterize indirect illumination
+I(x, ωi ) via Ki = 24 Spherical Gaussians (SGs). For more
+details, see Appx D.
+(5)
+3.3. Stage 3: Recovering materials and direct illumination
+′
+wi′ −1 csi −1 + wi′ cis
+wi′ −1 + wi′
+Reconstructing good materials and lighting from scenes with
+highlights is a challenging task. Following prior works [53,
+56], we use the Ward BRDF model [45] and represent BRDF
+fs (ωi | ξs , λs , µs ) via Spherical Gaussians [53]. Direct
+(environment) illumination is represented using Ke = 128
+SGs:
+Ke
+X
+E(x, ωi ) =
+Ek (ωi | ξke , λek , µek )
+(8)
+The final radiance of the intersection of the ray and the
+surface is calculated by a tone mapping:
+C sur = γ(cd + cs )
+(7)
+3.2. Stage 2: Learning direct lighting visibility and
+indirect illumination
+′
+wi′ −1 cdi −1 + wi′ cid
+cd = Md (x, n) =
+wi′ −1 + wi′
+cs = Ms (x, ωo , n) =
+L = Lvol + λsur Lsur + λreg Lreg
+(6)
+where γ is a pre-defined tone mapping function that converts
+linear color to sRGB [39] while ensuring that the resulting
+color values are within the valid range of [0, 1].
+k=1
+4
+Baselines. Our main competitors are the methods that can
+also reconstruct all three scene properties: surface geometry,
+materials, and illumination. We choose NVDiffRec [29],
+PhySG [53], and IndiSG [56] due to their popularity and
+availability of the source code. NVDiffRec uses tetrahedral
+marching to extract triangle meshes and obtains good material decomposition using a triangle-based renderer. PhySG
+optimizes geometry and material information at the same
+time using a Spherical Gaussian representation for direct
+lighting and material. IndiSG first optimizes geometry and
+then uses a Spherical Gaussian representation for indirect
+lighting to improve the quality of material reconstruction.
+Apart from that, we also compared against more general
+surface reconstruction methods to provide additional context
+for our results. For this, we use NeuS [42], Geo-NeuS [11],
+and NeRO [25]. NeuS is a popular implicit surface reconstruction method that achieves strong results without relying
+on extra data. Geo-NeuS improves upon NeuS by using
+additional point cloud supervision, obtained from structure
+from motion (SfM) [35]. NeRO is capable of reconstructing
+reflective objects effectively. In addition, we also compare
+with Ref-NeRF [39], which considers material decomposition, but due to modeling geometry using density function,
+it has difficulty extracting smooth geometry.
+Evaluation metrics. We use the official evaluation protocol
+to compute Chamfer distance for the DTU dataset and also
+use Chamfer distance for the SK3D dataset. We utilize the
+PSNR metric, to quantitatively evaluate the quality of rendering, material, and illumination. We follow IndiSG [56]
+and employ masks to compute the PSNR metric in the foreground to evaluate the quality of materials and rendering.
+See Appx B for implementation details.
+and render diffuse radiance and specular radiance of direct
+illumination in a way similar to Eq. 2.
+K
+e
+da X
+Ld (x) =
+(ν(x, ωi ) ⊗ Ek (ωi )) · (ωi · n) (9)
+π
+k=1
+Ls (x, ωo ) =
+Ke
+X
+(fsa ⊗ ν(x, ωi ) ⊗ Ek (ωi )) · (ωi · n)
+k=1
+(10)
+where da is diffuse albedo.
+To reconstruct a more accurate specular reflection effect,
+we use an additional neural network Msa : (x, ωr ) 7→ sa ∈
+[0, 1] to predict the specular albedo. The modified BRDF
+fsa is as follows:
+fsa = sa ⊗ fs (ωi ; ξ, λ, µ) = fs (ωi ; ξ, λ, sa µ)
+(11)
+For indirect illumination, the radiance is extracted directly
+from another surface and does not consider light visibility.
+The diffuse radiance and specular radiance of indirect illumination are as follows
+T
+da X
+Ik (x, ωi ) · (ωi · n)
+π
+Lind
+d (x) =
+(12)
+k=1
+Lind
+s (x, ωo ) =
+T
+X
+(sa ⊗ fs ) ⊗ Ik (x, ωi ) · (ωi · n) (13)
+k=1
+Our final synthesized appearance is C = Ld + Ls + Lind
+d +
+Lind
+s and supervised via an L1 RGB loss.
+4. Experiments
+4.1. Evaluation setup
+4.2. Surface reconstruction quality
+Datasets. To evaluate the quality of surface reconstruction, we use the SK3D [40], DTU [17], Shiny [39], and
+Glossy [25] datasets. SK3D and DTU are two real-world
+captured datasets, while Shiny is synthetic. In the SK3D
+dataset, 100 views are provided for each scene. Compared to
+DTU, SK3D contains more reflective objects with complex
+view-dependent lighting effects. From SK3D, we select 4
+glossy surface scenes with high levels of glare. For DTU,
+we select 4 scenes with high specularities to evaluate our
+method in terms of surface quality quantitatively and material decomposition qualitatively. The Shiny dataset has
+5 different glossy objects rendered in Blender under conditions similar to the NeRF-synthetic dataset [27]. Glossy [25]
+dataset contains both real and synthetic scenes.
+To evaluate the effectiveness of material and lighting reconstruction, we use the dataset provided by IndiSG [56],
+which has self-occlusion and complex materials. To evaluate the quality of material decomposition, the dataset also
+provides diffuse albedo, roughness, and masks for testing.
+We first demonstrate quantitative results in terms of Chamfer distance. We provide the numerical results for IndiSG,
+PhySG, NeuS, Geo-NeuS, and NeRO for comparison. NVDiffrec struggles with glossy surface reconstruction as we
+subsequently verify qualitatively in Fig. 4. First, we list
+quantitative results on SK3D and DTU in Tab. 1. As shown
+in the table, our approach achieves the best and the secondbest performance on the SK3D and DTU scenes with glossy
+surfaces. Geo-NeuS achieves better performance on the
+DTU dataset because the additional sparse 3D point clouds
+generated by structure from motion (SfM) for supervising
+the SDF network are accurate. Our approach can also incorporate the components of Geo-NeuS based on extra data, and
+the surface reconstruction quality will be further improved
+as shown in appendix F.2 (refer to it as Appx henceforth).
+However, on the SK3D scenes with more reflective surfaces,
+these sparse 3D points cannot be generated accurately by
+SfM, leading to poor surface reconstruction by Geo-NeuS.
+In contrast, our approach can reconstruct glossy surfaces on
+5
+Table 1. Quantitative results in terms of Chamfer distance on the scenes with high specularities on DTU [17] and SK3D [40]. Red and
+orange indicate the best and second-best algorithms. Geo-NeuS is separated because of the additional 3D point cloud (PC) for supervision.
+Our method achieves state-of-the-art surface reconstruction results on both glossy (this table) and regular (see Table 2) scenes.
+Funnel
+Snowman
+Jug
+Mean
+DTU 63
+DTU 97
+DTU 110
+DTU 122
+Mean
+Geo-NeuS (PC) [11]
+1.88
+2.03
+1.64
+1.68
+1.81
+0.96
+0.91
+0.70
+0.37
+0.73
+PhySG [53]
+IndiSG [56]
+NeuS [42]
+NeRO [25]
+Factored-NeuS (ours)
+14.40
+5.62
+2.09
+6.03
+1.54
+7.39
+4.05
+3.93
+2.63
+1.95
+1.55
+1.74
+1.40
+1.71
+1.31
+7.59
+2.35
+1.81
+4.23
+1.40
+7.73
+3.44
+2.31
+3.65
+1.55
+4.16
+1.15
+1.01
+1.32
+0.99
+4.99
+2.07
+1.21
+1.47
+1.15
+3.57
+2.60
+1.14
+1.14
+0.89
+1.42
+0.61
+0.54
+0.57
+0.46
+3.53
+1.61
+0.98
+1.12
+0.87
+Funnel
+DTU110
+Pot
+DTU97
+Jug
+DTU63
+Pot
+Image
+Geo-NeuS PhySG IndiSG
+NeuS
+NeRO
+Ours
+Image
+Geo-NeuS PhySG
+IndiSG
+NeuS
+NeRO
+Ours
+Figure 3. Qualitative results for DTU (left) and SK3D (right).
+Table 2. Quantitative results in terms of Chamfer distance on DTU.
+DTU
+24
+37
+40
+55
+63
+65
+69
+that our method can reconstruct glossy surfaces without
+explicit geometric supervision. For NeRO, even in scenarios
+with a simple background and straightforward geometry, it
+still tends to lose certain details of the dataset and fills in
+shadowed areas (Pot and Jug). Furthermore, NeRO not only
+struggles to accurately restore detailed information but also
+fails to address the negative impact of partial highlights on
+geometry (DTU97). More DTU results are in Appx Fig. 10.
+83
+NeuS 1.00 1.37 0.93 0.43 1.01 0.65 0.57 1.48
+NeRO 1.10 1.13 1.26 0.46 1.32 1.93 0.71 1.61
+Ours 0.82 1.05 0.85 0.40 0.99 0.59 0.60 1.44
+DTU
+97
+105 106 110 114 118 122 Mean
+NeuS 1.21 0.83 0.52 1.14 0.35 0.49 0.54 0.83
+NeRO 1.47 1.10 0.70 1.14 0.39 0.52 0.57 1.03
+Ours 1.15 0.81 0.58 0.89 0.36 0.44 0.46 0.76
+We further show qualitative results for surface reconstruction compared with NeuS, Ref-NeRF, IndiSG, PhySG, and
+NVDiffrec on the Shiny dataset, which is a synthetic dataset
+with glossy surfaces. From Fig. 4, we can observe that NeuS
+is easily affected by highlights, and the geometry reconstructed by Ref-NeRF has strong noise. PhySG is slightly
+better than IndiSG on the Shiny synthetic dataset with jointly
+optimizing materials and surfaces, such as toaster and car
+scenes, but still can not handle bright reflections. NeRO
+cannot accurately reconstruct the spoon in the coffee scene
+and performed poorly in the toaster bottom panel. The results of other scenarios in the Shiny dataset are shown in
+Appx Fig. 11. Our method can produce clean glossy surfaces
+without being affected by the issues caused by highlights.
+Overall, our approach demonstrates superior performance
+in surface reconstruction, especially on glossy surfaces. Additionally, we compare our method with Ref-NeuS [13]
+in Fig. 7. Ref-NeuS’s approach is easily affected by complex
+specular highlights, leading to suboptimal results on models
+in Shiny and SK3D with complex highlights.
+both SK3D and DTU without any explicit geometry information. IndiSG and PhySG share the same surface reconstruction method, but PhySG optimizes it together with the
+materials, while IndiSG freezes the underlying SDF after its
+initial optimization. Compared with IndiSG, PhySG cannot
+optimize geometry and material information well simultaneously on real-world acquired datasets with complex lighting
+and materials. We demonstrate large improvements over
+IndiSG and PhySG on both SK3D and DTU. NeRO focuses
+on highlight scenes, but our approach significantly outperforms it in both SK3D and DTU glossy scenes. Additional
+Chamfer distance comparisons for the other DTU scenes are
+in Tab. 2.
+We further demonstrate the qualitative comparison results
+on glossy scenes from the SK3D and DTU datasets in Fig. 3.
+It can be seen that although Geo-NeuS has better quantitative
+evaluation metrics on DTU, it loses some of the fine details,
+such as the small dents on the metal can in DTU 97. By
+visualizing the results of the SK3D dataset, we can validate
+For completeness, we also conducted experiments on
+the Glossy dataset [25], in which NeRO [25] excels. In
+6
+DTU97
+DTU110
+GT image
+Ref-NeRF
+NeuS
+PhySG
+IndiSG
+NVDiffrec
+NeRO
+Ours
+Figure 4. Qualitative results for the Shiny dataset(toaster and coffee).
+Table 3. Quantitative PSNR results on IndiSG [56] dataset for IndiSG and our method. “SAI” refers to specular albedo improvement. Red
+and orange indicate the best and second-best algorithms.
+Baloons
+Hotdog
+Chair
+Jugs
+Mean
+albedo illumination rendering albedo illumination rendering albedo illumination rendering albedo illumination rendering albedo illumination rendering
+PhySG
+NVDiffrec
+IndiSG
+Ours w/o IndiLgt
+Ours w/o SAI
+Ours
+Image
+CD
+15.91
+26.88
+21.95
+23.13
+24.09
+25.79
+13.89
+14.63
+25.24
+18.24
+25.97
+21.79
+NeuS
+0.0074
+27.83
+29.90
+24.40
+29.45
+28.82
+33.89
+13.95
+13.60
+26.43
+25.62
+30.58
+30.72
+NeRO
+0.0033
+11.69
+22.43
+21.87
+17.97
+23.50
+20.23
+25.13
+33.68
+31.77
+35.97
+36.05
+36.71
+14.86
+21.12
+24.71
+25.22
+25.23
+26.33
+12.26
+15.56
+22.17
+18.04
+22.13
+20.97
+28.32
+29.16
+24.98
+34.31
+32.64
+34.58
+16.84
+11.20
+21.44
+22.87
+19.64
+22.94
+10.92
+10.47
+20.59
+21.84
+20.40
+21.84
+28.20
+25.30
+24.91
+26.30
+33.56
+36.48
+15.39
+20.41
+23.63
+24.21
+24.89
+26.28
+12.19
+13.56
+22.47
+19.02
+23.00
+21.21
+27.37
+29.51
+26.51
+31.51
+32.77
+35.41
+In addition to the synthetic datasets with ground truth
+decomposed materials, we also provide qualitative results on real-world captured datasets (SK3D and DTU) in
+Appx Fig. 17 and show the effectiveness of material factorization. To offer a more detailed presentation of the reconstruction quality across continuous viewpoints, we include
+videos of diffuse albedo, indirect illumination, light visibility,
+and rendering for three different scenes in the supplementary
+materials. Furthermore, we perform relighting for these three
+scenes and provide videos to assess the relighting quality.
+Ours
+0.0034
+Figure 5. Qualitative results for Glossy dataset.
+Fig. 5, we compared the reconstruction results of the bear
+scene with NeuS and NeRO, while other scenes are shown
+in Appx Fig. 12. It can be seen that our method and NeRO
+achieved comparable results on the Glossy dataset. Additional Chamfer distance metrics for the other scenes of the
+Glossy dataset are presented in Appx Tab. 5.
+4.4. Ablation study
+Surface reconstruction. To validate our surface reconstruction strategy in Stage 1, we selected the Pot scene from
+SK3D and ablated the method the following way. “Lvol +
+LIsur ” means that we only use volume rendering and surface rendering MLPs for surface reconstruction, without
+decomposing material information into diffuse and specular components. “Lvol + LII
+vol ” means we use two volume
+reconstructions where one of them is split into diffuse and
+specular components. Just using “LII
+vol ” like Ref-NeRF to
+split diffuse and specular components fails to reconstruct
+the correct surface due to inaccurate normal vectors in the
+reflection direction computation. We provide the quantitative (Chamfer distance) and qualitative results of different
+frameworks in Fig. ??. It can be seen that synchronizing the
+volume color and the color on the surface point has a certain effect in suppressing concavities, but still cannot meet
+the requirements for complex glossy surfaces with strong
+reflections. Using volume rendering to decompose diffuse
+and specular components can result in excessive influence
+from non-surface points, which still causes small concavities. When using our loss “Lvol (LIvol ) + Lsur (LII
+sur )” , we
+can achieve reconstruction results without concavities. More
+qualitative results are shown in Appx Fig. 13.
+4.3. Material reconstruction and rendering quality
+In Tab. 3, we evaluate the quantitative results in terms of
+PSNR metric for material and illumination reconstruction
+on the IndiSG dataset compared with PhySG, NVDiffrec,
+and IndiSG. For completeness, we also compare to the case
+where the specular albedo improvement was not used in
+Stage 3 (See in Eq. 11). Regarding diffuse albedo, although
+NVDiffrec showed a slight improvement over us in the balloons scene, we achieved a significant improvement over
+NVDiffrec in the other three scenes. Our method achieved
+the best results in material reconstruction. Moreover, our
+method achieves the best results in illumination quality without using the specular albedo improvement. Additionally,
+our method significantly outperforms other methods in terms
+of rendering quality and achieves better appearance synthesis results. We present the qualitative results of material
+reconstruction in Fig. 6, which shows that our method has
+better detail capture compared to IndiSG, PhySG, and NVDiffrec, such as the text on the balloon. Fig. 18 in Appx. also
+demonstrates the material decomposition effectiveness of
+our method on Shiny datasets with glossy surfaces.
+7
+Baloons
+Hotdog
+GT albedo
+PhySG
+NVDiffrec
+IndiSG
+Ours
+GT image
+PhySG
+NVDiffrec
+IndiSG
+Ours
+Figure 6. Qualitative results on IndiSG dataset (Balloons and Hotdog) in terms of albedo reconstruction (left) and rendering quality (right).
+Image
+CD
+Ref-NeuS
+1.02
+Ours
+0.85
+Image
+CD
+Ref-NeuS
+18.90
+Table 4. Ablation study for materials and illumination decomposition in terms of PSNR. “Alb” is “diffuse albedo”, “Rough” is
+“roughness”, “Rend” is “appearance”, and “Illu” is “illumination”.
+Ours
+1.54
+Figure 7. Comparison with Ref-NeuS.
+Image
+CD
+NeuS
+2.09
+Lvol + LIsur
+2.01
+Lvol + LII
+vol
+1.91
+Ours
+1.88
+UniSDF
+Ours
+mesh
+diffuse
+(low specular)
+specular
+Alb
+Rough
+Rend
+Illu
+IndiSG [56]
+26.44
+15.97
+31.78
+21.88
+Ours w/o SAI w/o VI w/o SI
+Ours w/o SAI w/o VI
+Ours w/o SAI
+Ours
+29.31
+29.64
+30.58
+30.76
+16.98
+17.86
+18.83
+23.10
+35.48
+36.36
+36.05
+36.71
+23.48
+23.41
+23.50
+20.24
+improve the accuracy of material and lighting reconstruction.
+When the surface has no defects, further performing the surface improvement will enhance the quality of roughness and
+rendering but may cause a decrease in lighting reconstruction quality. Making the visibility supervision continuous
+improves the reconstruction of diffuse albedo, roughness,
+and lighting, but it also affects rendering quality. Introducing
+specular albedo can greatly improve roughness and rendering
+quality but negatively affect lighting reconstruction quality.
+We further show qualitative results in Appx Fig. 23 to highlight the importance of taking into account various factors,
+which enhance the reconstruction of materials and lighting.
+In stage 3, if we do not consider indirect illumination during the training process, the predicted results for rendering,
+material, and lighting will all experience a decline. The
+qualitative results are shown in Appx Fig. 24. The specific
+PSNR metrics can be found in Tab. 3
+Figure 8. Ablation study for different reconstruction strategies.
+Image
+Method
+rendered image
+Figure 9. Comparison with UniSDF.
+We also implement an ablation study on the concurrent work UniSDF [41] (coming code), which introduces
+a learnable parameter to weight the volume rendering (lowreflectance) and the specular component of volume rendering.
+We compared this method with ours and found that, although
+both approaches effectively decompose the surface, our diffuse (low-reflectance) component aligns more closely with
+reality with fewer specular components. This indicates that
+our method achieves a better decomposition.
+Materials and illumination. We conduct an ablation study
+on the different components we proposed by evaluating their
+material and lighting performance on a complex scene, the
+hotdog, as shown in Tab. 4. “SI” refers to surface improvement, which means using networks to jointly synthesize
+volume color and decomposed surface color. “VI” stands
+for visibility improvement, which involves continuous light
+visibility supervision based on the SDF. “SAI” refers to
+specular albedo improvement, which incorporates specular
+albedo into the BRDF of Spherical Gaussians. We compare
+different settings in terms of diffuse albedo, roughness, appearance synthesis, and illumination. We use IndiSG as a
+reference and find that introducing volume rendering can
+5. Conclusions
+In this work, we propose Factored-NeuS, a novel approach
+to inverse rendering that factors geometry, material, and
+lighting from multiple views. Our first contribution is to
+simultaneously synthesize the appearance, diffuse radiance,
+and specular radiance during surface reconstruction. The
+combination of volume and decoupled surface rendering
+allows the geometry to be unaffected by glossy highlights.
+Our second contribution is to train networks to estimate reflectance albedo and learn a visibility function supervised by
+continuous values based on the SDF, so that our method is
+capable of better decomposing material and lighting. Experimental results show that our method surpasses the state-ofthe-art in both geometry reconstruction quality and material
+reconstruction quality. A future research direction is how to
+effectively decompose materials for fine structures.
+8
+Acknowledgements
+[12] Jian Gao, Chun Gu, Youtian Lin, Hao Zhu, Xun Cao, Li
+Zhang, and Yao Yao. Relightable 3d gaussian: Real-time
+point cloud relighting with brdf decomposition and ray tracing. arXiv:2311.16043, 2023. 1
+[13] Wenhang Ge, Tao Hu, Haoyu Zhao, Shu Liu, and Ying-Cong
+Chen. Ref-neus: Ambiguity-reduced neural implicit surface
+learning for multi-view reconstruction with reflection. In
+Proceedings of the IEEE/CVF International Conference on
+Computer Vision (ICCV), pages 4251–4260, 2023. 2, 6
+[14] Yuan-Chen Guo, Di Kang, Linchao Bao, Yu He, and SongHai Zhang. Nerfren: Neural radiance fields with reflections.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 18409–18418, 2022. 2
+[15] Peter Hedman, Pratul P Srinivasan, Ben Mildenhall,
+Jonathan T Barron, and Paul Debevec. Baking neural radiance fields for real-time view synthesis. In Proceedings of
+the IEEE/CVF international conference on computer vision,
+pages 5875–5884, 2021. 3
+[16] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and
+Shenghua Gao. 2d gaussian splatting for geometrically accurate radiance fields. In SIGGRAPH 2024 Conference Papers.
+Association for Computing Machinery, 2024. 1
+[17] Rasmus Jensen, Anders Dahl, George Vogiatzis, Engin Tola,
+and Henrik Aanæs. Large scale multi-view stereopsis evaluation. In Proceedings of the IEEE conference on computer
+vision and pattern recognition, pages 406–413, 2014. 5, 6, 15
+[18] Yingwenqi Jiang, Jiadong Tu, Yuan Liu, Xifeng Gao, Xiaoxiao Long, Wenping Wang, and Yuexin Ma. Gaussianshader:
+3d gaussian splatting with shading functions for reflective
+surfaces. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 5322–5332,
+2024. 1
+[19] Haian Jin, Isabella Liu, Peijia Xu, Xiaoshuai Zhang, Songfang Han, Sai Bi, Xiaowei Zhou, Zexiang Xu, and Hao
+Su. Tensoir: Tensorial inverse rendering. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2023. 2
+[20] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and
+George Drettakis. 3d gaussian splatting for real-time radiance
+field rendering. ACM Trans. Graph., 42(4):139–1, 2023. 1
+[21] Ye Keyang, Hou Qiming, and Zhou Kun. 3d gaussian splatting with deferred reflection. 2024. 1
+[22] Zhengfei Kuang, Kyle Olszewski, Menglei Chai, Zeng Huang,
+Panos Achlioptas, and Sergey Tulyakov. Neroic: neural rendering of objects from online image collections. ACM Transactions on Graphics (TOG), 41(4):1–12, 2022. 2
+[23] Ruofan Liang, Huiting Chen, Chunlin Li, Fan Chen, Selvakumar Panneer, and Nandita Vijaykumar. Envidr: Implicit
+differentiable renderer with neural environment lighting. In
+Proceedings of the IEEE/CVF International Conference on
+Computer Vision (ICCV), pages 79–89, 2023. 2, 3
+[24] Zhihao Liang, Qi Zhang, Ying Feng, Ying Shan, and Kui Jia.
+Gs-ir: 3d gaussian splatting for inverse rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 21644–21653, 2024. 1
+[25] Yuan Liu, Peng Wang, Cheng Lin, Xiaoxiao Long, Jiepeng
+Wang, Lingjie Liu, Taku Komura, and Wenping Wang. Nero:
+We would like to acknowledge support from the National
+Natural Science Foundation of China (62202076) and the
+KAUST - Center of Excellence for Generative AI, under
+award number 5940, and the NTGC-AI program.
+References
+[1] Jonathan T Barron, Ben Mildenhall, Matthew Tancik, Peter
+Hedman, Ricardo Martin-Brualla, and Pratul P Srinivasan.
+Mip-nerf: A multiscale representation for anti-aliasing neural
+radiance fields. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pages 5855–5864, 2021. 2
+[2] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P
+Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded
+anti-aliased neural radiance fields. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 5470–5479, 2022. 2
+[3] Mark Boss, Raphael Braun, Varun Jampani, Jonathan T Barron, Ce Liu, and Hendrik Lensch. Nerd: Neural reflectance
+decomposition from image collections. In Proceedings of
+the IEEE/CVF International Conference on Computer Vision,
+pages 12684–12694, 2021. 2
+[4] Mark Boss, Varun Jampani, Raphael Braun, Ce Liu, Jonathan
+Barron, and Hendrik Lensch. Neural-pil: Neural preintegrated lighting for reflectance decomposition. Advances
+in Neural Information Processing Systems, 34:10691–10704,
+2021. 2
+[5] Brent Burley and Walt Disney Animation Studios. Physicallybased shading at disney. In Acm Siggraph, pages 1–7. vol.
+2012, 2012. 1, 14
+[6] Eric R Chan, Connor Z Lin, Matthew A Chan, Koki Nagano,
+Boxiao Pan, Shalini De Mello, Orazio Gallo, Leonidas J
+Guibas, Jonathan Tremblay, Sameh Khamis, et al. Efficient
+geometry-aware 3d generative adversarial networks. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 16123–16133, 2022. 2
+[7] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and
+Hao Su. Tensorf: Tensorial radiance fields. In European
+Conference on Computer Vision (ECCV), 2022. 2
+[8] Danpeng Chen, Hai Li, Weicai Ye, Yifan Wang, Weijian Xie,
+Shangjin Zhai, Nan Wang, Haomin Liu, Hujun Bao, and
+Guofeng Zhang. Pgsr: Planar-based gaussian splatting for
+efficient and high-fidelity surface reconstruction. 2024. 1
+[9] Zhiqin Chen and Hao Zhang. Learning implicit fields for
+generative shape modeling. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 5939–5948, 2019. 2
+[10] Youming Deng, Xueting Li, Sifei Liu, and Ming-Hsuan Yang.
+Dip: Differentiable interreflection-aware physics-based inverse rendering. arXiv preprint arXiv:2212.04705, 2022. 2
+[11] Qiancheng Fu, Qingshan Xu, Yew Soon Ong, and Wenbing
+Tao. Geo-neus: Geometry-consistent neural implicit surfaces
+learning for multi-view reconstruction. Advances in Neural
+Information Processing Systems, 35:3403–3416, 2022. 1, 2,
+3, 5, 6, 13, 15
+9
+Neural geometry and brdf reconstruction of reflective objects
+from multiview images. ACM Transactions on Graphics
+(TOG), 42(4):1–22, 2023. 2, 5, 6
+[26] Lars Mescheder, Michael Oechsle, Michael Niemeyer, Sebastian Nowozin, and Andreas Geiger. Occupancy networks:
+Learning 3d reconstruction in function space. In Proceedings
+of the IEEE/CVF conference on computer vision and pattern
+recognition, pages 4460–4470, 2019. 2
+[27] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
+Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. In European conference on computer vision, pages
+405–421. Springer, 2020. 1, 2, 5
+[28] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph., 41(4):102:1–
+102:15, 2022. 2
+[29] Jacob Munkberg, Jon Hasselgren, Tianchang Shen, Jun Gao,
+Wenzheng Chen, Alex Evans, Thomas Müller, and Sanja Fidler. Extracting triangular 3d models, materials, and lighting
+from images. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 8280–8290,
+2022. 1, 2, 5
+[30] Michael Niemeyer, Lars Mescheder, Michael Oechsle, and
+Andreas Geiger. Differentiable volumetric rendering: Learning implicit 3d representations without 3d supervision. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 3504–3515, 2020. 2
+[31] Michael Oechsle, Songyou Peng, and Andreas Geiger.
+Unisurf: Unifying neural implicit surfaces and radiance
+fields for multi-view reconstruction. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision,
+pages 5589–5599, 2021. 1, 2
+[32] Jeong Joon Park, Peter Florence, Julian Straub, Richard Newcombe, and Steven Lovegrove. Deepsdf: Learning continuous
+signed distance functions for shape representation. In Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition, pages 165–174, 2019. 2
+[33] Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas
+Geiger. Kilonerf: Speeding up neural radiance fields with
+thousands of tiny mlps. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision, pages 14335–
+14345, 2021. 2
+[34] Sara Fridovich-Keil and Alex Yu, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
+Radiance fields without neural networks. In CVPR, 2022. 2
+[35] Johannes Lutz Schönberger and Jan-Michael Frahm.
+Structure-from-motion revisited. In Conference on Computer
+Vision and Pattern Recognition (CVPR), 2016. 5
+[36] Yahao Shi, Yanmin Wu, Chenming Wu, Xing Liu, Chen
+Zhao, Haocheng Feng, Jingtuo Liu, Liangjun Zhang, Jian
+Zhang, Bin Zhou, et al. Gir: 3d gaussian inverse rendering for relightable scene factorization. arXiv preprint
+arXiv:2312.05133, 2023. 1
+[37] Pratul P Srinivasan, Boyang Deng, Xiuming Zhang, Matthew
+Tancik, Ben Mildenhall, and Jonathan T Barron. Nerv: Neural reflectance and visibility fields for relighting and view
+synthesis. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 7495–7504,
+2021. 2
+[38] Cheng Sun, Guangyan Cai, Zhengqin Li, Kai Yan, Cheng
+Zhang, Carl Marshall, Jia-Bin Huang, Shuang Zhao, and Zhao
+Dong. Neural-pbir reconstruction of shape, material, and
+illumination. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pages 18046–18056, 2023.
+1
+[39] Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler,
+Jonathan T Barron, and Pratul P Srinivasan. Ref-nerf: Structured view-dependent appearance for neural radiance fields.
+In 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 5481–5490. IEEE, 2022. 2,
+3, 4, 5, 16
+[40] Oleg Voynov, Gleb Bobrovskikh, Pavel Karpyshev, AndreiTimotei Ardelean, Arseniy Bozhenko, Saveliy Galochkin,
+Ekaterina Karmanova, Pavel Kopanev, Yaroslav LabutinRymsho, Ruslan Rakhimov, et al. Multi-sensor large-scale
+dataset for multi-view 3d reconstruction. arXiv preprint
+arXiv:2203.06111, 2022. 5, 6
+[41] Fangjinhua Wang, Marie-Julie Rakotosaona, Michael
+Niemeyer, Richard Szeliski, Marc Pollefeys, and Federico
+Tombari. Unisdf: Unifying neural representations for highfidelity 3d reconstruction of complex scenes with reflections.
+In NeurIPS, 2024. 8
+[42] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku
+Komura, and Wenping Wang. Neus: Learning neural implicit
+surfaces by volume rendering for multi-view reconstruction.
+Advances in Neural Information Processing Systems, 2021. 1,
+2, 3, 5, 6, 12
+[43] Yiqun Wang, Ivan Skorokhodov, and Peter Wonka. Improved
+surface reconstruction using high-frequency details. Advances
+in Neural Information Processing Systems, 2022. 1, 2
+[44] Yiqun Wang, Ivan Skorokhodov, and Peter Wonka. Pet-neus:
+Positional encoding triplanes for neural surfaces. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, 2023. 2
+[45] Gregory J Ward. Measuring and modeling anisotropic reflection. In Proceedings of the 19th annual conference on
+Computer graphics and interactive techniques, pages 265–
+272, 1992. 1, 4, 14
+[46] Haoqian Wu, Zhipeng Hu, Lincheng Li, Yongqiang Zhang,
+Changjie Fan, and Xin Yu. Nefii: Inverse rendering for reflectance decomposition with near-field indirect illumination.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), pages 4295–4304,
+2023. 2
+[47] Wenqi Yang, Guanying Chen, Chaofeng Chen, Zhenfang
+Chen, and Kwan-Yee K Wong. S 3 -nerf: Neural reflectance
+field from shading and shadow under a single viewpoint. Advances in Neural Information Processing Systems, 35:1568–
+1582, 2022. 2, 15
+[48] Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan
+Atzmon, Basri Ronen, and Yaron Lipman. Multiview neural
+surface reconstruction by disentangling geometry and appearance. Advances in Neural Information Processing Systems,
+33:2492–2502, 2020. 2
+10
+[49] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume rendering of neural implicit surfaces. Advances in Neural
+Information Processing Systems, 34, 2021. 1, 2
+[50] Lior Yariv, Peter Hedman, Christian Reiser, Dor Verbin,
+Pratul P Srinivasan, Richard Szeliski, Jonathan T Barron,
+and Ben Mildenhall. Bakedsdf: Meshing neural sdfs for realtime view synthesis. In ACM SIGGRAPH 2023 Conference
+Proceedings, pages 1–9, 2023. 2, 3
+[51] Zehao Yu, Torsten Sattler, and Andreas Geiger. Gaussian
+opacity fields: Efficient adaptive surface reconstruction in
+unbounded scenes. ACM Transactions on Graphics, 2024. 1
+[52] Jingyang Zhang, Yao Yao, Shiwei Li, Jingbo Liu, Tian Fang,
+David McKinnon, Yanghai Tsin, and Long Quan. Neilf++:
+Inter-reflectable light fields for geometry and material estimation. In International Conference on Computer Vision (ICCV),
+2023. 2
+[53] Kai Zhang, Fujun Luan, Qianqian Wang, Kavita Bala, and
+Noah Snavely. Physg: Inverse rendering with spherical gaussians for physics-based material editing and relighting. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5453–5462, 2021. 1, 2,
+4, 5, 6
+[54] Kai Zhang, Fujun Luan, Zhengqi Li, and Noah Snavely. Iron:
+Inverse rendering by optimizing neural sdfs and materials
+from photometric images. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 5565–5574, 2022. 2
+[55] Xiuming Zhang, Pratul P Srinivasan, Boyang Deng, Paul Debevec, William T Freeman, and Jonathan T Barron. Nerfactor:
+Neural factorization of shape and reflectance under an unknown illumination. ACM Transactions on Graphics (TOG),
+40(6):1–18, 2021. 1, 2, 4, 13
+[56] Yuanqing Zhang, Jiaming Sun, Xingyi He, Huan Fu, Rongfei
+Jia, and Xiaowei Zhou. Modeling indirect illumination for
+inverse rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+18643–18652, 2022. 1, 2, 3, 4, 5, 6, 7, 8, 12, 13
+[57] Youjia Zhang, Teng Xu, Junqing Yu, Yuteng Ye, Yanqing Jing,
+Junle Wang, Jingyi Yu, and Wei Yang. Nemf: Inverse volume
+rendering with neural microflake field. In Proceedings of
+the IEEE/CVF International Conference on Computer Vision
+(ICCV), pages 22919–22929, 2023. 2
+[58] Yiyu Zhuang, Qi Zhang, Xuan Wang, Hao Zhu, Ying Feng,
+Xiaoyu Li, Ying Shan, and Xun Cao. Neai: A pre-convoluted
+representation for plug-and-play neural ambient illumination.
+arXiv preprint arXiv:2304.08757, 2023. 2
+11
+A. Preliminaries
+In Stage 2, the light visibility network Mν has 4 layers. To
+better encode the input 3D coordinate x, positional encoding
+with 10 frequency scales is utilized. The input view direction
+ωi is also positional-encoded using 4 scales. The indirect
+light network Mind in stage 2 comprises 4 layers.
+In stage 3, the encoder part of the BRDF network consists
+of 4 layers, and the input 3D coordinate is positional-encoded
+using 10 scales. The output latent vector z has 32 dimensions, and we impose a sparsity constraint on the latent code
+z, following IndiSG [56]. The decoder part of the BRDF
+network is a 2-layer MLP with a width of 128, and the output has 4 dimensions, including the diffuse albedo da ∈ R3
+and roughness r ∈ R. Finally, the specular albedo network
+Msa uses a 4-layer MLP, where the input 3D coordinate x is
+positional-encoded using 10 scales, and the input reflection
+direction ωr is positional-encoded using 4 scales.
+The learning rate for all three stages begins with a linear
+warm-up from 0 to 5 × 10−4 during the first 5K iterations.
+It is controlled by the cosine decay schedule until it reaches
+the minimum learning rate of 2.5 × 10−5 , which is similar to
+NeuS. The weights λsur for the surface color loss are set for
+0.1, 0.6, 0.6, 0.6 and 0.01 for DTU, SK3D, Shiny, Glossy,
+and the IndiSG dataset, respectively. For all datasets, the
+Fresnel value f in the rendering equation is set to 0.02. We
+train our model for 300K iterations in the first stage, which
+takes 11 hours in total. For the second and third stages,
+we train for 40K iterations, taking around 1 hour each. The
+training was performed on a single NVIDIA RTX 4090 GPU.
+Volume rendering. The radiance C of the pixel corresponding to a given ray r(t) = o + td at the origin o ∈ R3
+towards direction d ∈ S2 is calculated using the volume
+rendering equation, which involves an integral along the ray
+with boundaries tn and tf (tn and tf are parameters to define
+the near and far clipping plane). This calculation requires
+the knowledge of the volume density σ and directional color
+c for each point within the volume.
+Z tf
+C(r) =
+T (t)σ(r(t))c(r(t), d)dt
+(14)
+tn
+The volume density σ is used to calculate the accumulated
+transmittance T (t):
+ Z tf
+
+T (t) = exp −
+σ(rs )ds
+(15)
+tn
+It is then used to compute a weighting function w(t) =
+T (t)σ(r(t)) to weigh the sampled colors along the ray r(t)
+to integrate into radiance C(r).
+Surface rendering. The radiance Lo (x, ωo ) reflected from
+a surface point x in direction ωo = −d is an integral of
+bidirectional reflectance distribution function (BRDF) and
+illumination over half sphere Ω, centered at normal n of the
+surface point x:
+Z
+Lo (x, ωo ) =
+Li (x, ωi )fr (x, ωi , ωo )(ωi · n)dωi (16)
+Ω
+C. Training strategies of stage 1
+where Li (x, ωi ) is the illumination on x from the incoming
+light direction ωi , and fr is BRDF, which is the proportion
+of light reflected from direction ωi towards direction ωo at
+the point x.
+In our training process, we define three loss functions,
+namely volume radiance loss Lvol , surface radiance loss
+Lsur , and regularization loss Lreg . The volume radiance loss
+Lvol is measured by calculating the L1 distance between the
+ground truth colors C gt and the volume radiances C vol of a
+subset of rays R, which is defined as follows.
+B. Implementation details
+Our full model is composed of several MLP networks, each
+one of them having a width of 256 hidden units unless otherwise stated. In Stage 1, the SDF network Sθ is composed of
+8 layers and includes a skip connection at the 4-th layer, similar to NeuS [42]. The input 3D coordinate x is encoded using
+positional encoding with 6 frequency scales. The diffuse
+color network Md utilizes a 4-layer MLP, while the input
+surface normal n is positional-encoded using 4 scales. For
+the specular color network Ms , a 4-layer MLP is employed,
+and the reflection direction ωr is also positional-encoded
+using 4 frequency scales. In the first stage, we exclusively
+focus on decomposing the highlight (largely white) areas.
+To reduce the complexity of considering color, we assume
+that the specular radiance is in grayscale and only consider
+changes in brightness. We can incorporate color information
+in later stages to obtain a more detailed specular reflection
+model. Like NeuS, the background is modeled by NeRF++.
+Lvol =
+1 X
+∥Crvol − Crgt ∥1
+|R|
+(17)
+r∈R
+The surface radiance loss Lsur is measured by calculating
+the L1 distance between the ground truth colors C gt and the
+surface radiances C sur . During the training process, only a
+few rays have intersection points with the surface. We only
+care about the set of selected rays R′ , which satisfies the
+condition that each ray exists point whose SDF value is less
+than zero and not the first sampled point. The loss is defined
+as follows.
+1 X
+Lsur =
+∥Crsur − Crgt ∥1
+(18)
+|R′ |
+′
+r∈R
+Lreg is an Eikonal loss term on the sampled points. Eikonal
+loss is a regularization loss applied to a set of sampling points
+12
+X, which is used to constrain the noise in signed distance
+function (SDF) generation.
+Lreg =
+1 X
+(∥∇Sθ (x)∥2 − 1)2
+|X |
+scene and then illuminates other surfaces, rather than directly coming from a light source, which contributes to the
+realism of rendered images. Following IndiSG [56], we
+parameterize indirect illumination I(x, ωi ) via Ki = 24
+Spherical Gaussians (SGs) as follows.
+(19)
+x∈X
+We use weights λsur and λreg to balance the impact of these
+three losses. The overall training weights are as follows.
+I(x, ωi ) =
+Ki
+X
+k=1
+L = Lvol + λsur Lsur + λreg Lreg
+where ξki (x) ∈ S2 , λik (x) ∈ R+ , and µik (x) ∈ R3 are
+the lobe axis, sharpness, and amplitude of the k-th Spherical Gaussian, respectively. For this, we train a network
+i
+Mind : x 7→ {ξki , λik , µik }K
+k=1 that maps the surface point x
+to the parameters of indirect light SGs. Similar to learning
+visibility, we randomly sample several directions ωi from the
+surface point x to obtain (pseudo) ground truth I gt (x, ωi ).
+Some of these rays have intersections x′ with other surfaces,
+thus, ωi is the direction pointing from x to x′ . We query our
+proposed color network Mc to get the (pseudo) ground truth
+indirect radiance I gt (x, ωi ) as follows.
+At this stage, we focus on predicting the lighting visibility
+and indirect illumination of a surface point x under different
+incoming light direction ωi using the SDF in the first stage.
+Therefore, we need first to calculate the position of the surface point x. In stage one, we have calculated two sampling
+points r(ti′ −1 ), r(t′i ) near the surface. As Geo-NeuS [11],
+we weigh these two sampling points to obtain a surface point
+x as follows.
+Sθ (r(ti′ −1 ))r(t′i ) − Sθ (r(t′i ))r(ti′ −1 )
+Sθ (r(ti′ −1 )) − Sθ (r(t′i ))
+(21)
+I gt (x, ωi ) = Mc (x′ , n′ , ωi , vf )
+n
+X
+wi
+Lind =
+(26)
+m∈M
+The combination of light visibility and illumination SG is
+achieved by applying a ratio to the lobe amplitude of the
+output SG, while preserving the center position of the SG.
+We randomly sample Ks = 32 directions within the SG
+lobe and compute a weighted average of the visibility with
+different directions.
+(22)
+ν(x, ωi ) ⊗ Ek (ωi | ξke , λek , µek )
+PKs
+Ek (ωs )ν(x, ωs ) e
+e
+e
+≈Ek (ωi | ξk , λk , s=1
+µk )
+PKs
+s=1 Ek (ωs )
+i=1
+1 X
+gt
+∥νω − νω
+∥1
+|Ωi |
+1 X
+gt
+∥I(x, ωm ) − Im
+(x, ωm )∥1
+|M |
+E. Details of stage 3
+The weights of the light visibility network are optimized
+by minimizing the loss between the calculated ground truth
+values and the predicted values of a set of sampled incoming
+light directions Ωi ⊂ S2 . This pre-integrated technique can
+reduce the computational burden caused by the integration
+for subsequent training.
+Lvis =
+(25)
+where n′ is the normal on the point x′ . We also use L1 loss
+to train the network.
+Learning lighting visibility. Visibility is an important factor in shadow computation. It calculates the visibility of the
+current surface point x in the direction of the incoming light
+ωi . Path tracing of the SDF is commonly used to obtain a
+binary visibility (0 or 1) as used in IndiSG [56], but this kind
+of visibility is not friendly to network learning. Inspired by
+NeRFactor [55], we propose to use an integral representation
+with the continuous weight function w(t) (from 0 to 1) for
+the SDF to express light visibility. Specifically, we establish
+a neural network Mν : (x, ωi ) 7→ ν, that maps the surface
+point x and incoming light direction ωi to visibility, and the
+ground truth value of light visibility is obtained by integrating the weights wi of the SDF of sampling points along the
+incoming light direction and can be expressed as follows.
+ν gt = 1 −
+(24)
+(20)
+D. Details of stage 2
+x=
+Ik (ωi | ξki (x), λik (x), µik (x))
+(27)
+Here, we offer intuitive explanations for why the incorporation of specular albedo in the model results in a decrease in
+lighting prediction. The increase in the model’s complexity
+is the primary reason. Specular albedo introduces a more
+detailed modeling of surface reflection characteristics, requiring additional parameters and learning capacity. This
+raises the difficulty of training the model, potentially resulting in overfitting or training instability, thereby affecting the
+accurate prediction of lighting.
+(23)
+ω∈Ωi
+Learning indirect illumination. Indirect illumination refers
+to the light that is reflected or emitted from surfaces in a
+13
+F. Additional results
+ter reconstruction. By decomposing highlights through the
+network in the first stage, surfaces with specular reflections
+can be reconstructed more effectively, demonstrated by the
+presence of flower pot ablation, and without encountering
+the concavity issues observed in other methods.
+In Fig. 17, from the DTU data, we can observe that our
+method can separate the specular reflection component from
+the diffuse reflection component, as seen in the highlights
+on the apple, can, and golden rabbit. Even when faced with
+a higher intensity of specular reflection, as demonstrated
+in the example showcased in SK3D, our method excels at
+preserving the original color in the diffuse part and accurately
+separating highlights into the specular part.
+In Fig. 18, we show the diffuse albedo and rendering
+results of NVDiffrec, IndiSG, and our method. The rendering results indicate that our method can restore the original
+appearance with specular highlights more accurately, such
+as the reflections on the helmet and toaster compared to the
+IndiSG and NVDiffrec methods. The material reconstruction
+results show that our diffuse albedo contains less specular
+reflection information compared to other methods, indicating
+our method has a better ability to suppress decomposition
+ambiguity caused by specular highlights.
+Additionally, in Fig. 19, Fig. 20, and Fig. 21, we presented all components, the rendering, albedo, roughness,
+diffuse color, specular color, light visibility, indirect light,
+and environment light results for the IndiSG, DTU and SK3D
+datasets, respectively. An interesting observation is that our
+reconstructed environment maps have the capability to represent multiple direct light illuminants, as demonstrated in
+the DTU dataset.
+In Fig. 22, we additionally showcase the visualization results of relighting compared with the IndiSG method. IndiSG
+and ours yield different predictions for material, resulting in
+variations in the relighting results, but the relighting results
+generated by our method exhibit richer details. Our method
+demonstrates the practical utility employed in the relighting
+scenarios.
+In Fig. 23, we show that introducing specular albedo also
+makes the sausage appear smoother and closer to its true
+color roughness, represented by black. In terms of lighting,
+when not using specular albedo, the lighting reconstruction
+achieves the best result, indicating a clearer reconstruction of
+ambient illumination. In summary, our ablation study highlights the importance of taking into account various factors
+when reconstructing materials and illumination from images.
+By evaluating the performance of different modules, we can
+better understand their role in improving the reconstruction
+quality.
+In stage 3, if we do not consider indirect illumination
+during the training process, the predicted results for rendering, material, and lighting will all experience a decline. The
+qualitative results are shown in Fig. 24.
+F.1. Additional results for the main text
+We conduct a more in-depth comparison of our method with
+the already published work NeRO. For DTU datasets, our
+findings demonstrate that NeRO performs less effectively
+than our approach on real datasets DTU, especially in the regular scenes of DTU shown in Fig. 10. NeRO fails to address
+the negative impact of partial highlights on the geometry.
+For example, the highlighted region of the skull model is
+reconstructed as overly flat, while the Buddha model loses
+numerous details that should have been retained. Similar
+issues are also observed in the two plush toy scenes. Moreover, the presence of shadows causes NeRO to mistakenly
+reconstruct shadowed areas as real objects and fill them in
+(bricks and skull models). Fig. 11 shows three other scenes
+(helmet, teapot, and car) from the Shiny dataset. We have
+demonstrated that our method performs better than other
+methods on the Shiny dataset. NeRO exhibits defects in the
+dents and highlights of the helmet, as well as in the wheels
+of the car. Furthermore, we extend our comparison to include more scenes in the glossy dataset in Fig. 12 and Tab. 5,
+where although NeRO performs better, our method is also
+capable of mitigating the impact of highlights on geometry. Our method demonstrates comparable results to NeRO.
+Moreover, compared to NeuS, the results show a significant
+improvement. Note that the real datasets include bear, bunny,
+coral, and vase. The rest of the others are synthetic. As
+for material representation, we adopted the spherical Gaussians to represent the Ward BRDF model [45], while NeRO
+uses the spherical harmonics to represent the Disney BRDF
+model [5]. Tab. 6 and Fig. 14 show that we outperform
+NeRO in materials and rendering.
+In order to prove the effectiveness of the combination
+of volume rendering and decoupled surface rendering, in
+Fig. 13, we additionally present the qualitative evaluation for
+more objects. It is evident that surface rendering is essential
+for decomposing diffuse and specular components, ensuring smooth reconstruction of glossy surfaces with complex
+reflections.
+Fig. 15 illustrates the qualitative results of material reconstruction on the other scenes of the IndiSG dataset, highlighting the effectiveness of our method. For completeness, we
+visualize the decomposition of diffuse and specular in the
+first stage in Fig. 16. In the first stage, the decomposition of
+diffuse and specular is not a true BRDF model. This is because the MLP in the first stage is used solely for predicting
+the components of diffuse and specular reflection, rather than
+predicting material properties such as albedo and roughness.
+The decision to directly predict colors instead of material
+properties in the first stage serves two purposes: reducing
+model complexity by focusing on the direct prediction of
+specular reflection color, and optimizing geometry for bet14
+Table 5. Comparison with NeRO and NeuS on Glossy dataset.
+Glossy
+bear
+bunny
+coral maneki
+vase
+angel
+bell
+cat
+horse
+luyu
+potion
+tbell
+teapot
+mean
+NeuS 0.0074 0.0022 0.0016 0.0091 0.0101 0.0035 0.0146 0.0278 0.0053 0.0066 0.0393 0.0348 0.0546 0.0167
+NeRO 0.0033 0.0012 0.0014 0.0024 0.0011 0.0034 0.0032 0.0044 0.0049 0.0054 0.0053 0.0035 0.0037 0.0033
+Ours 0.0034 0.0017 0.0014 0.0027 0.0023 0.0034 0.0054 0.0059 0.0052 0.0060 0.0058 0.0035 0.0105 0.0044
+Table 6. Comparison of material rendering on IndiSG dataset.
+NeRO
+Ours
+albedo
+Baloons
+rough render
+albedo
+Hotdog
+rough render
+14.65
+25.79
+18.91
+19.75
+11.54
+30.72
+18.42
+23.10
+23.84
+33.89
+Fresnel value can result in the degradation of texture details.
+For instance, in the Coffee model, although the highlights
+on the spoon are better reconstructed, the text on the cup
+deteriorates. One of our future directions is to address this
+issue more effectively.
+26.95
+36.71
+G. Limitations
+In certain scenarios, our method still faces difficulties. For
+mesh reconstruction, despite improvements on the glossy
+parts in the DTU 97 tin model, the overall Chamfer distance
+does not significantly decrease due to the small proportion
+of glossy parts. However, for scenes with large areas of
+glossy parts, such as the flower pot model, our improvements
+are more pronounced and surpass Geo-NeuS. As seen in
+Appx Fig. 15, the reconstructed albedo of the chair still
+lacks some detail. The nails on the chair and the textures on
+the pillow are not accurately captured in the reconstructed
+geometry. A future research direction is how to effectively
+decompose materials for fine structures, such as nails on the
+backrest of a chair.
+F.2. Additional experiments
+To have a fair comparison with Geo-NeuS on the DTU
+dataset, we incorporate the components of Geo-NeuS based
+on the additional data (the point clouds from SfM and image pairs) used in Geo-NeuS into our method. As shown
+in Tab. 7, our approach can further enhance the surface reconstruction quality on datasets where highlights are less
+pronounced.
+Table 7. Quantitative results in terms of Chamfer distance on
+DTU [17].
+Geo-NeuS [11]
+Factored-NeuS (ours)
+Factored-NeuS (ours w/ Geo)
+DTU 63
+DTU 97
+DTU 110
+Mean
+0.96
+0.99
+0.95
+0.91
+1.15
+0.89
+0.70
+0.89
+0.69
+0.86
+1.01
+0.84
+We conduct another experiment to compare our modeling
+approach with Ref-NeRF and S3 -NeRF [47]. The experimental quantitative and qualitative results are shown in Fig. 25.
+Ref-NeRF utilizes volume rendering colors for diffuse and
+specular components. If we directly combine SDF and the
+architecture of Ref-NeRF, it is challenging to eliminate the
+influence of highlights. Furthermore, if we applied the construction method of S3 -NeRF, which involves integrating
+surface rendering colors into volume rendering, to modify
+our model structure, we found that this modeling approach
+cannot address the issue of geometric concavity caused by
+highlights.
+For chrome-like materials, We increase the Fresnel value
+to 0.75 in the rendering formula of stage 3 to test the impact
+of this operation. We show the results and their PSNR value
+in Fig. 26, we observed that increasing the Fresnel value
+indeed leads to the better reconstruction of objects with
+chrome-like materials. For the Toaster model, we observed a
+significant improvement in PSNR with an increased Fresnel
+value. However, we also noticed that solely increasing the
+15
+reference
+image
+NeuS
+NeRO
+Ours
+reference
+image
+NeuS
+NeRO
+Ours
+Car
+Teapot
+Helmet
+Figure 10. Qualitative results on regular scenes from DTU. with NeRO and NeuS on DTU dataset. Results show that NeRO fails to address
+the negative impact of partial highlights on the geometry. Moreover, the presence of shadows causes NeRO to mistakenly reconstruct
+shadowed areas as real objects and fill them in (bricks and skull models).
+GT image
+Ref-NeRF
+NeuS
+PhySG
+IndiSG
+NVDiffrec
+NeRO
+Ours
+Figure 11. Qualitative results on other scans (helmet, teapot, and car) from the Shiny dataset [39]. NeRO exhibits defects in the dents and
+highlights of the helmet, as well as in the wheels of the car.
+16
+reference
+image
+NeuS
+NeRO
+Ours
+reference
+image
+NeuS
+NeRO
+Ours
+Figure 12. Qualitative results on other scenes (bell, potion, horse, and tbell) compared with NeRO and NeuS on the Glossy dataset.
+GT Image
+NeuS
+Lvol + LIsur
+Lvol + LII
+vol
+Ours
+GT Image
+Lvol + LIsur
+NeuS
+Lvol + LII
+vol
+Ours
+Figure 13. Qualitative ablation evaluation for more objects.
+GT Image
+Ours
+NeRO
+GT Albedo
+Ours
+NeRO
+GT Rough
+Ours
+NeRO
+Jugs
+Chair
+Figure 14. Qualitative comparison with NeRO in terms of material reconstruction and rendering quality.
+GT albedo
+PhySG
+NVDiffrec
+IndiSG
+Ours
+GT image
+PhySG
+NVDiffrec
+IndiSG
+Ours
+Figure 15. Qualitative results for other scenes (chair and jugs) on IndiSG dataset in terms of albedo reconstruction (left) and novel view
+synthesis quality (right).
+17
+GT image
+diffuse
+color
+specular
+color
+GT image
+diffuse
+color
+specular
+color
+Funnel
+DTU110
+Pot
+DTU97
+Jug
+DTU63
+Figure 16. Diffuse and specular decomposition results in the first stage.
+Image
+Ours
+Diffuse
+Ours
+Specular
+Ours
+Appearance
+Image
+Ours
+Diffuse
+Ours
+Specular
+Ours
+Appearance
+Figure 17. Qualitative results for the SK3D (left) and DTU (right) datasets in the third stage. We can observe that our method can separate
+the specular reflection component from the diffuse reflection component, as seen in the highlights on the apple, can, and golden rabbit. Even
+when faced with a higher intensity of specular reflection in SK3D, our method can separate them very well.
+18
+Toaster
+Coffee
+Helmet
+Teapot
+Car
+GT image
+Ref-NeRF
+Albedo
+NeuS
+Albedo
+PhySG
+Albedo
+IndiSG
+Image
+NVDiffrec
+Image
+Ours
+Image
+Figure 18. Qualitative results of materials reconstruction for the Shiny dataset, where albedo refers to the diffuse albedo. The results indicate
+that our method can restore the original appearance with specular highlights more accurately, such as the reflections on the helmet and
+toaster, and has a better ability to suppress decomposition ambiguity caused by specular highlights.
+rendering
+albedo
+roughness
+diffuse
+color
+specular
+color
+light
+visibility
+Figure 19. Visualization of all components on IndiSG dataset.
+19
+indirect
+light
+light
+rendering
+albedo
+roughness
+diffuse
+color
+specular
+color
+light
+visibility
+indirect
+light
+light
+Figure 20. Visualization of all components on DTU dataset.
+rendering
+albedo
+roughness
+diffuse
+color
+specular
+color
+light
+visibility
+indirect
+light
+light
+Figure 21. Visualization of all components on SK3D dataset.
+light
+IndiSG
+Ours
+IndiSG
+Ours
+IndiSG
+Figure 22. Relighting comparison with IndiSG.
+20
+Ours
+IndiSG
+Ours
+Albedo
+Roughness
+Rendering
+Light
+IndiSG
+GT
+w/o SAI w/o VI w/o SI
+w/o SAI w/o VI
+w/o SAI
+Ours
+Figure 23. Ablation study of material and illumination reconstruction. We show that introducing specular albedo also makes the sausage
+appear smoother and closer to its true color roughness, represented by black. In terms of lighting, when not using specular albedo, the
+lighting reconstruction achieves the best result, indicating a clearer reconstruction of ambient illumination.
+reference
+image
+w/o indirect
+light
+Ours
+reference
+albedo
+w/o indirect
+light
+Ours
+Figure 24. Ablation study of indirect light.
+21
+reference
+light
+w/o indirect
+light
+Ours
+reference
+image
+Ours
+1.15
+Ours with S3 -NeRF
+1.23
+Ours with Ref-NeRF
+2.17
+Figure 25. Comparison with Ref-NeRF and S3 -NeRF.
+GT image
+f=0.02
+22.33
+f=0.75
+24.31
+GT image
+f=0.02
+30.43
+Figure 26. Adjusting Fresnel value to model chrome-like appearance.
+22
+f=0.75
+30.18

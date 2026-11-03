@@ -3,36 +3,26 @@
 Also called: Derivative Spline Evaluation, Exact Gradient for FCC
 
 ## Overview
-This method computes exact gradient vectors for local shading (BRDF) in volume rendering by evaluating analytic derivatives of the underlying box-spline basis function, avoiding the inaccuracies and extra memory bandwidth of finite differences. It sets itself apart from [Analytic Gradient Computation](2167-analytic-gradient-computation.md) by specifically exploiting the symmetry and structure of Face-Centered Cubic (FCC) box-spluses to reuse the 19 samples already fetched for scalar evaluation, whereas finite difference methods require six additional full spline evaluations.
+This method computes exact gradient vectors for local shading in volume rendering by evaluating analytic derivatives of the underlying box-spline basis function, avoiding the inaccuracies and extra memory bandwidth of finite differences [S1]. It sets itself apart from [Analytic Gradient Computation](2167-analytic-gradient-computation.md) by specifically exploiting the symmetry and structure of Face-Centered Cubic (FCC) box-splines to reuse the 19 samples already fetched for scalar evaluation, whereas finite difference methods require six additional full spline evaluations [S1].
 
 ## How it works
 **Inputs:**
-- Volume data $V$ defined on an FCC grid.
-- Evaluation point $x$ in continuous space.
-- The set of direction vectors $\Xi_{\text{fcc}}$ defining the FCC box-spline $M_{\text{fcc}}$.
+- Volume data $V$ defined on an FCC grid [S1].
+- Evaluation point $x$ in continuous space [S1].
+- The set of direction vectors $\Xi_{\text{fcc}}$ defining the FCC box-spline $M_{\text{fcc}}$ [S1].
 
 **Outputs:**
-- Gradient vector $\nabla(V * M_{\text{fcc}})(x)$.
+- Gradient vector $\nabla(V * M_{\text{fcc}})(x)$ [S1].
 
 **Data Structures:**
-- The scalar value is computed as $s(x) = V * M_{\text{fcc}}(x)$.
-- The gradient is computed using three directional derivatives $d_{110}, d_{101}, d_{011}$ along vectors $\xi_{110}, \xi_{101}, \xi_{011}$.
-- Derivative kernels $M_\xi$ are defined as sums of two box-splines. Due to symmetry, only the B-spline (BB) coefficients for $M_{110}$ are explicitly stored/computed; others are derived via permutation.
-- $M_{110}$ requires handling three polynomial piece types: $\tau_0, \tau_2, \tau_4$.
+- The scalar value is computed as $s(x) = V * M_{\text{fcc}}(x)$ [S1].
+- The gradient is computed using three directional derivatives $d_{110}, d_{101}, d_{011}$ along vectors $\xi_{110}, \xi_{101}, \xi_{011}$ [S1].
+- Derivative kernels $M_\xi$ are defined as sums of two box-splines [S1]. Due to symmetry, only the BB-coefficients for $M_{110}$ are explicitly stored/computed; others are derived via permutation [S1].
+- $M_{110}$ requires handling three polynomial piece types: $\tau_0, \tau_2, \tau_4$ [S1].
 
 **Steps:**
-1. **Fetch Samples:** Retrieve the 19 voxel values $V$ required for the evaluation of the FCC box-spline $M_{\text{fcc}}$ at point $x$. These samples cover the support of $M_{\text{fcc}}$. Note that the support of each derivative kernel $M_\xi$ is a subset of the support of $M_{\text{fcc}}$, so no additional texture fetches are needed [S1].
-
-2. **Compute Directional Derivatives:** Calculate the three directional derivatives $d_\xi = V * M_\xi$ for $\xi \in \{\xi_{110}, \xi_{101}, \xi_{011}\}$.
-   - The directional derivative of the spline $s = V * M_{\text{fcc}}$ along $\xi$ is given by:
-     $$ D_\xi(V * M_{\text{fcc}}) = V * M_\xi $$
-   - The kernel $M_\xi$ is defined as:
-     $$ M_\xi(x) = 2M_{\Xi_{\text{rec}} \setminus \{\xi\}}(x + \xi_c) - 2M_{\Xi_{\text{rec}} \setminus \{\xi\}}(x + \xi_c - \xi) $$
-     where $\Xi_{\text{rec}}$ is the set of directions for the reconstructed spline, and $\xi_c$ is a centering vector [S1].
-   - Evaluate $M_\xi$ using the de Casteljau algorithm. Since $M_\xi$ is quadratic, this is computationally efficient [S1].
-   - For $M_{110}$, determine the polynomial piece type ($\tau_0, \tau_2, \text{or } \tau_4$) based on the local grid position. Apply the corresponding precomputed BB-coefficients for that piece type to the fetched samples [S1].
-   - Use permutational symmetries to compute $M_{101}$ and $M_{011}$ from the coefficients of $M_{110}$ [S1].
-
+1. **Fetch Samples:** Retrieve the 19 voxel values $V$ required for the evaluation of the FCC box-spline $M_{\text{fcc}}$ at point $x$ [S1]. These samples cover the support of $M_{\text{fcc}}$ [S1]. The support of each derivative kernel $M_\xi$ is a subset of the support of $M_{\text{fcc}}$, so no additional texture fetches are needed [S1].
+2. **Compute Directional Derivatives:** Calculate the three directional derivatives $d_\xi = V * M_\xi$ for $\xi \in \{\xi_{110}, \xi_{101}, \xi_{011}\}$ [S1]. The directional derivative of the spline $s = V * M_{\text{fcc}}$ along $\xi$ is given by $D_\xi(V * M_{\text{fcc}}) = V * M_\xi$ [S1]. The kernel $M_\xi$ is defined as $M_\xi(x) = 2M_{\Xi_{\text{rec}} \setminus \{\xi\}}(x + \xi_c) - 2M_{\Xi_{\text{rec}} \setminus \{\xi\}}(x + \xi_c - \xi)$, where $\Xi_{\text{rec}}$ is the set of directions for the reconstructed spline, and $\xi_c$ is a centering vector [S1]. Evaluate $M_\xi$ using the de Casteljau algorithm [S1]. Since $M_\xi$ is quadratic, this is computationally efficient [S1]. For $M_{110}$, determine the polynomial piece type ($\tau_0, \tau_2, \text{or } \tau_4$) based on the local grid position [S1]. Apply the corresponding precomputed BB-coefficients for that piece type to the fetched samples [S1]. Use permutational symmetries to compute $M_{101}$ and $M_{011}$ from the coefficients of $M_{110}$ [S1].
 3. **Reconstruct Gradient:** Combine the directional derivatives to form the Cartesian gradient vector:
    $$ \nabla(V * M_{\text{fcc}}) = \frac{1}{2} \begin{bmatrix} d_{110} + d_{101} - d_{011} \\ d_{110} + d_{011} - d_{101} \\ d_{101} + d_{011} - d_{110} \end{bmatrix} $$
    where $d_\xi = V * M_\xi$ [S1].
@@ -42,114 +32,67 @@ This method computes exact gradient vectors for local shading (BRDF) in volume r
 
 ```python
 def compute_analytic_gradient_fcc(V, x, grid_info):
-    """
-    V: Array of volume values on FCC grid.
-    x: Continuous evaluation point (vec3).
-    grid_info: Contains grid dimensions and mapping from continuous to grid indices.
-    
-    Returns:
-    gradient: vec3, the analytic gradient at x.
-    """
-    # Step 1: Fetch the 19 samples required for M_fcc evaluation.
-    # The support of M_fcc defines the stencil indices relative to the center.
-    # Let indices be a list of 19 integer offsets (dx, dy, dz) in the FCC lattice.
-    # In practice, these are mapped to texture coordinates or memory addresses.
-    samples = fetch_fcc_samples(V, x, grid_info)
-    
-    # Step 2: Compute directional derivatives d_110, d_101, d_011.
-    # Each d_xi = V * M_xi. M_xi is a sum of two box-splines.
-    # We use de Casteljau algorithm to evaluate the polynomial pieces.
-    
-    # Determine the polynomial piece type for the current location x.
-    # This depends on the fractional part of x in the local cell.
+    # [G] Map continuous point x to the 19 FCC grid indices covering the support of M_fcc.
+    indices = map_to_fcc_support(x, grid_info)
+    samples = [V[idx] for idx in indices]
+
+    # Determine polynomial piece type for M_110 based on local fractional coordinates.
+    # Not given in the sources.
     piece_type = get_polynomial_piece_type(x, grid_info)
-    
-    # Get BB-coefficients for M_110 based on piece_type.
-    # Table 1 in [S1] provides these coefficients for tau_0, tau_2, tau_4.
+
+    # Retrieve BB-coefficients for M_110 from Table 1 in [S1] based on piece_type.
+    # Not given in the sources.
     coeffs_110 = get_bb_coefficients_M110(piece_type)
-    
-    # Evaluate d_110 using the fetched samples and coefficients.
-    # The stencil for M_110 is a subset of M_fcc's stencil.
-    d_110 = evaluate_kernel(samples, coeffs_110)
-    
-    # Evaluate d_101 and d_011 using symmetry/permutation of M_110 coefficients.
-    # The specific permutation rules depend on the FCC symmetry group.
-    coeffs_101 = permute_coefficients(coeffs_110, direction='101')
-    coeffs_011 = permute_coefficients(coeffs_110, direction='011')
-    
-    d_101 = evaluate_kernel(samples, coeffs_101)
-    d_011 = evaluate_kernel(samples, coeffs_011)
-    
-    # Step 3: Reconstruct the gradient vector.
-    gradient = vec3(
+
+    # Evaluate d_110 = V * M_110 using the dot product of samples and coefficients.
+    d_110 = sum(s * c for s, c in zip(samples, coeffs_110))
+
+    # Evaluate d_101 and d_011 using permutational symmetries of M_110.
+    # Not given in the sources.
+    coeffs_101 = permute_coefficients(coeffs_110, '101')
+    coeffs_011 = permute_coefficients(coeffs_110, '011')
+
+    d_101 = sum(s * c for s, c in zip(samples, coeffs_101))
+    d_011 = sum(s * c for s, c in zip(samples, coeffs_011))
+
+    # Reconstruct Cartesian gradient vector.
+    gradient = (
         (d_110 + d_101 - d_011) / 2.0,
         (d_110 + d_011 - d_101) / 2.0,
         (d_101 + d_011 - d_110) / 2.0
     )
-    
     return gradient
-
-def evaluate_kernel(samples, coefficients):
-    """
-    Computes the dot product of fetched samples and kernel coefficients.
-    samples: List of 19 float values.
-    coefficients: List of 19 float weights corresponding to the stencil.
-    """
-    result = 0.0
-    for s, c in zip(samples, coefficients):
-        result += s * c
-    return result
-
-def get_polynomial_piece_type(x, grid_info):
-    """
-    Determines if the evaluation point x falls into polynomial piece tau_0, tau_2, or tau_4.
-    This is determined by the local coordinates within the unit cell.
-    """
-    # Implementation detail: Check fractional coordinates against predefined regions.
-    # Not given in sources, but required for implementation.
-    pass
-
-def permute_coefficients(coeffs_110, direction):
-    """
-    Permutes the BB-coefficients of M_110 to get coefficients for M_101 or M_011.
-    """
-    # Implementation detail: Apply symmetry transformations.
-    # Not given in sources, but required for implementation.
-    pass
 ```
 
-**Parameters:**
-- No tunable parameters. The method is deterministic based on the grid and data.
-
 **Edge Cases and Pitfalls:**
-- **Precision:** Finite difference methods suffer from rounding errors if the offset $\delta$ is too small, or poor approximation if $\delta$ is too large [S1]. The analytic method avoids this entirely.
-- **Polynomial Piece Identification:** Correctly identifying the polynomial piece type ($\tau_0, \tau_2, \tau_4$) is critical for using the correct BB-coefficients. Errors here lead to discontinuous gradients [S1].
-- **Support Mismatch:** While the support of $M_\xi$ is a subset of $M_{\text{fcc}}$, care must be taken to align the coefficients with the correct fetched samples.
+- **Precision:** Finite difference methods suffer from rounding errors if the offset $\delta$ is too small, or poor approximation if $\delta$ is too large [S1]. The analytic method avoids this entirely [S1].
+- **Polynomial Piece Identification:** Correctly identifying the polynomial piece type ($\tau_0, \tau_2, \tau_4$) is critical for using the correct BB-coefficients [G].
+- **Support Mismatch:** While the support of $M_\xi$ is a subset of $M_{\text{fcc}}$, care must be taken to align the coefficients with the correct fetched samples [S1].
 
 ## Subtopics
 
 ### Analytic Normal Computation
-This variant uses the analytic gradient to compute normal vectors for isosurface rendering. It is preferred over finite difference normals because it always yields accurate results regardless of step size, whereas finite difference normals are sensitive to offset selection (too small causes rounding errors, too large causes approximation errors) [S1]. It offers a speed-up of 1.2x to 1.3x on standard datasets (MRI-Head, VisMale, CT-Head) due to lower data fetch overhead [S1].
+This variant uses the analytic gradient to compute normal vectors for isosurface rendering [S1]. It is preferred over finite difference normals because it always yields accurate results regardless of step size, whereas finite difference normals are sensitive to offset selection (too small causes rounding errors, too large causes approximation errors) [S1]. It offers a speed-up of 1.2x to 1.3x on standard datasets (MRI-Head, VisMale, CT-Head) due to lower data fetch overhead [S1].
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-- Time complexity is dominated by the evaluation of the quadratic derivative kernels using the de Casteljau algorithm.
-- Memory complexity is identical to scalar evaluation as it reuses the same 19 samples.
+- Time complexity is dominated by the evaluation of the quadratic derivative kernels using the de Casteljau algorithm [S1].
+- Memory complexity is identical to scalar evaluation as it reuses the same 19 samples [S1].
 
 **Measured Performance:**
 - The analytic method is faster than finite difference because it avoids six additional spline evaluations [S1].
 - Speed-ups observed: MRI-Head 1.3x, VisMale 1.3x, CT-Head 1.2x, Carp 1.0x [S1].
 
 **Strengths and Limitations:**
-- **Strengths:** Exact gradients, no tuning of step size, lower memory bandwidth usage than finite differences, superior isosurface quality [S1].
-- **Limitations:** Requires precomputed BB-coefficients for derivative kernels and polynomial piece types. The method is specific to FCC box-spluses.
+- **Strengths:** Exact gradients, lower memory bandwidth usage than finite differences, superior isosurface quality [S1].
+- **Limitations:** Requires precomputed BB-coefficients for derivative kernels and polynomial piece types. The method is specific to FCC box-spluses [S1].
 
 **When to Use:**
-- Use when high-quality normals are required for shading or isosurface rendering and performance is a concern.
-- Do not use if the volume data is not represented by FCC box-spluses.
+- Use when high-quality normals are required for shading or isosurface rendering and performance is a concern [S1].
+- Do not use if the volume data is not represented by FCC box-spluses [S1].
 
 ## Background
-This method was introduced by Minho Kim and Jürgen Peters in their 2012 paper "GPU Isosurface Raycasting of FCC Datasets" [S1]. It addresses the limitations of finite difference gradient estimation in the context of FCC grid volume rendering, leveraging the mathematical properties of box-spluses to provide exact derivatives.
+This method was introduced by Minho Kim and Jürgen Peters in their 2012 paper "GPU Isosurface Raycasting of FCC Datasets" [S1]. It addresses the limitations of finite difference gradient estimation in the context of FCC grid volume rendering, leveraging the mathematical properties of box-spluses to provide exact derivatives [S1].
 
 ## Sources
 [S1] GPU Isosurface Raycasting of FCC Datasets, https://minho-kim-uos.github.io/papers/kim12gpu.pdf, fetched 2026-10-29

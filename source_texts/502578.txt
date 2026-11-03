@@ -1,0 +1,347 @@
+Ray tracing simulator made in Unity with DirectX12 that calculates and visualizes cumulative light damage on cultural artifacts for heritage conservation. - Fix UV mapping and shadow raytracing for irradiance simulation by pireu2 · Pull Request #1 · pireu2/chronolux
+
+Fix UV mapping and shadow raytracing for irradiance simulation by pireu2 · Pull Request #1 · pireu2/chronolux · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+pireu2
+commented
+Apr 6, 2026
+Copy link
+Copy Markdown
+Owner
+This commit resolves several issues in the dosimetry pipeline:
+Fixed texture-space UV baking by adding Y-axis flip for RT orientation.
+Optimized shadow ray logic in IrradianceBake.raytrace using a visibility-only pattern.
+Automated RTAS building in IrradianceBaker to include all scene occluders.
+Refactored C# scripts for better readability and removed unused components.
+Fix UV mapping and shadow raytracing for irradiance simulation
+…
+daa5690
+```
+This commit resolves several issues in the dosimetry pipeline:
+- Fixed texture-space UV baking by adding Y-axis flip for RT orientation.
+- Optimized shadow ray logic in IrradianceBake.raytrace using a visibility-only pattern.
+- Automated RTAS building in IrradianceBaker to include all scene occluders.
+- Refactored C# scripts for better readability and removed unused components.
+```
+Copilot
+AI
+review requested due to automatic review settings
+April 6, 2026 21:50
+Hide details
+View details
+pireu2
+merged commit b284f9c
+into
+main
+Apr 6, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+pireu2
+deleted the
+fix/uv-bake-and-shadows
+branch
+April 6, 2026 21:50
+Copilot started reviewing on behalf of
+pireu2
+April 6, 2026 21:50
+View session
+Copilot
+AI
+reviewed
+Apr 6, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR updates the texture-space dosimetry pipeline for the Unity/HDRP DXR irradiance simulation by fixing UV-space baking orientation, introducing a ray traced shadow/visibility bake into a dose texture, and wiring the new baker into the simulation scene and controller.
+Changes:
+Added a UV-space MRT baker shader to output world-space Position/Normal maps with a Y-flip alignment for ray tracing dispatch.
+Added a DXR .raytrace raygen+miss shader and a new IrradianceBaker C# component to build an RTAS and accumulate Lux-hour dose into an RFloat texture.
+Updated LightDoseSimulator to dispatch the DXR bake during the simulation loop and apply a preview texture; updated the scene to include the new baker component.
+Reviewed changes
+Copilot reviewed 6 out of 6 changed files in this pull request and generated 8 comments.
+Show a summary per file
+File
+Description
+Assets/Shaders/UVSpaceBaker.shader
+New hidden shader that rasterizes meshes into UV space and outputs Position/Normal MRTs (includes Y flip).
+Assets/Shaders/IrradianceBake.raytrace
+New DXR raygen shader that casts a visibility ray toward the sun and accumulates dose when unoccluded.
+Assets/Scripts/UVMapBaker.cs
+Refactors UV baking/render target setup and EXR saving logic.
+Assets/Scripts/LightDoseSimulator.cs
+Wires in IrradianceBaker dispatch and adds a one-hour test bake + preview application.
+Assets/Scripts/IrradianceBaker.cs
+New component that builds RTAS, manages the dose texture, and dispatches ray tracing.
+Assets/OutdoorsScene.unity
+Scene wiring for the new baker + simulation manager updates and added objects.
+Comment thread
+Assets/Scripts/UVMapBaker.cs
+RenderTexture.active = prev;
+byte[] bytes = tex.EncodeToEXR(Texture2D.EXRFlags.OutputAsFloat);
+System.IO.File.WriteAllBytes(System.IO.Path.Combine(Application.dataPath, $"../{gameObject.name}_{label}.exr"), tex.EncodeToEXR());
+Copilot
+AI
+Apr 6, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+SaveRT previously encoded EXRs with Texture2D.EXRFlags.OutputAsFloat, but now uses EncodeToEXR() default flags. For position/normal data this can silently drop precision (often half-float) and corrupt downstream metrology. Please restore explicit EXR flags (and consider ZIP compression if size matters).
+Suggested change
+System.IO.File.WriteAllBytes(System.IO.Path.Combine(Application.dataPath, $"../{gameObject.name}_{label}.exr"), tex.EncodeToEXR());
+var exrFlags = Texture2D.EXRFlags.OutputAsFloat | Texture2D.EXRFlags.CompressZIP;
+System.IO.File.WriteAllBytes(System.IO.Path.Combine(Application.dataPath, $"../{gameObject.name}_{label}.exr"), tex.EncodeToEXR(exrFlags));
+Copilot uses AI. Check for mistakes.
+Comment thread
+Assets/Scripts/UVMapBaker.cs
+Comment on lines
+12
+to
+17
+public void Bake()
+{
+if (bakeShader == null)
+{
+Debug.LogError("[UVMapBaker] bakeShader is null. Assign Hidden/UVSpaceBaker in the Inspector.", this);
+return;
+}
+if (bakeShader == null) return;
+var allMF = GetComponentsInChildren<MeshFilter>(true);
+if (allMF.Length == 0) { Debug.LogError("[UVMapBaker] No MeshFilter found.", this); return; }
+foreach (var mf in allMF)
+{
+if (mf.sharedMesh == null) continue;
+if (!mf.sharedMesh.isReadable)
+{
+Debug.LogError($"[UVMapBaker] '{mf.sharedMesh.name}' — enable Read/Write in Import Settings.", this);
+return;
+}
+if (mf.sharedMesh.uv == null || mf.sharedMesh.uv.Length == 0)
+{
+Debug.LogError($"[UVMapBaker] '{mf.sharedMesh.name}' has no UV channel 0. Unwrap it first.", this);
+return;
+}
+}
+if (allMF.Length == 0) return;
+Copilot
+AI
+Apr 6, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Bake() now returns early when bakeShader is null or no MeshFilter exists, but it no longer logs any error/warning. This makes failures silent and can lead to later null refs in the dosimetry pipeline. Please add at least a warning/error log on these early-exit paths (similar to the previous implementation).
+Copilot uses AI. Check for mistakes.
+Comment thread
+Assets/Scripts/LightDoseSimulator.cs
+Comment on lines
++89
+to
++103
+public void TestStaticBake()
+{
+if (!ValidateReferences()) return;
+// 1. Ensure UV maps are baked
+if (baker.PositionMap == null || baker.NormalMap == null)
+{
+Debug.Log("[LightDoseSimulator] Baking UV Maps...");
+baker.Bake();
+}
+// 2. Initialize Irradiance Baker
+// This clears the DoseMap to zero.
+irradianceBaker.Initialize(baker.PositionMap.width, baker.PositionMap.height);
+Copilot
+AI
+Apr 6, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+TestStaticBake() can throw NullReferenceException: ValidateReferences() only logs warnings when baker/irradianceBaker are missing, but this method immediately dereferences them (e.g., baker.PositionMap, irradianceBaker.Initialize(...)). Please add explicit null checks (and bail with an error) before using these references, and re-check that baker.Bake() actually produced non-null maps before reading width/height.
+Copilot uses AI. Check for mistakes.
+Comment thread
+Assets/Scripts/LightDoseSimulator.cs
+Comment on lines
+132
+to
++177
+@@ -111,19 +170,54 @@ private IEnumerator RunSimulation()
+// ── 1. Sun position ──────────────────────────────────────────
+ApplySunPosition(localTime);
+// ── 2. Dispatch irradiance accumulator (placeholder) ─────────
+// TODO: When IrradianceBake.compute is ready, call:
+// DispatchIrradianceBake(CurrentSunDirection, CurrentBeamLux, CurrentDeltaHours);
+// ── 2. Dispatch irradiance accumulator ─────────
+if (irradianceBaker != null && baker != null && baker.PositionMap != null)
+{
+irradianceBaker.DispatchRays(CurrentSunDirection, CurrentBeamLux, CurrentDeltaHours, baker.PositionMap, baker.NormalMap);
+}
+Copilot
+AI
+Apr 6, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+In the simulation loop you only check baker.PositionMap != null before dispatch, but you pass baker.NormalMap too. If NormalMap is null, DispatchRays will no-op and dose accumulation silently stops. Please ensure both maps are baked/validated (PositionMap and NormalMap) before initialization and before each dispatch condition.
+Copilot uses AI. Check for mistakes.
+Comment thread
+Assets/Scripts/LightDoseSimulator.cs
+Comment on lines
++210
+to
++217
+Material material = targetRenderer.material;
+material.SetTexture(previewTextureProperty, irradianceBaker.DoseMap);
+if (previewTextureProperty != "_MainTex" && material.HasProperty("_MainTex"))
+{
+material.SetTexture("_MainTex", irradianceBaker.DoseMap);
+}
+Copilot
+AI
+Apr 6, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+ApplyDosePreview() uses targetRenderer.material, which instantiates a unique material and can leak/accumulate copies if preview is applied multiple times. For previewing a texture, prefer sharedMaterial (if you want to modify the asset) or a MaterialPropertyBlock (if you only want a per-renderer override). Also consider guarding with material.HasProperty(previewTextureProperty) and logging if the property doesn’t exist.
+Suggested change
+Material material = targetRenderer.material;
+material.SetTexture(previewTextureProperty, irradianceBaker.DoseMap);
+if (previewTextureProperty != "_MainTex" && material.HasProperty("_MainTex"))
+{
+material.SetTexture("_MainTex", irradianceBaker.DoseMap);
+}
+Material material = targetRenderer.sharedMaterial;
+if (material == null)
+{
+Debug.LogWarning($"[LightDoseSimulator] Dose preview skipped: renderer '{targetRenderer.name}' has no material assigned.");
+return;
+}
+bool hasPreviewProperty = material.HasProperty(previewTextureProperty);
+bool hasMainTexProperty = previewTextureProperty != "_MainTex" && material.HasProperty("_MainTex");
+if (!hasPreviewProperty && !hasMainTexProperty)
+{
+Debug.LogWarning($"[LightDoseSimulator] Dose preview skipped: material '{material.name}' on renderer '{targetRenderer.name}' has neither '{previewTextureProperty}' nor '_MainTex'.");
+return;
+}
+MaterialPropertyBlock propertyBlock = new MaterialPropertyBlock();
+targetRenderer.GetPropertyBlock(propertyBlock);
+if (hasPreviewProperty)
+{
+propertyBlock.SetTexture(previewTextureProperty, irradianceBaker.DoseMap);
+}
+else
+{
+Debug.LogWarning($"[LightDoseSimulator] Material '{material.name}' on renderer '{targetRenderer.name}' does not expose '{previewTextureProperty}'. Falling back to '_MainTex' only.");
+}
+if (hasMainTexProperty)
+{
+propertyBlock.SetTexture("_MainTex", irradianceBaker.DoseMap);
+}
+targetRenderer.SetPropertyBlock(propertyBlock);
+Copilot uses AI. Check for mistakes.
+Comment thread
+Assets/Scripts/IrradianceBaker.cs
+Comment on lines
++71
+to
++78
+public void DispatchRays(Vector3 sunDirection, float beamLux, float deltaHours, RenderTexture positionMap, RenderTexture normalMap)
+{
+if (!_isInitialized || positionMap == null || normalMap == null) return;
+if (sunDirection.sqrMagnitude <= 1e-8f) return;
+sunDirection.Normalize();
+var cmd = new CommandBuffer { name = "Dispatch IrradianceBake" };
+Copilot
+AI
+Apr 6, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+DispatchRays allocates a new CommandBuffer every time step. In LightDoseSimulator.RunSimulation() this can run thousands of iterations and generate avoidable GC/CPU overhead. Please reuse a persistent command buffer (clear/reset per dispatch) or use a pool to reduce per-step allocations.
+Copilot uses AI. Check for mistakes.
+Comment thread
+Assets/OutdoorsScene.unity
+Comment on lines
++835
+to
++846
+--- !u!114 &860855130
+MonoBehaviour:
+m_ObjectHideFlags: 0
+m_CorrespondingSourceObject: {fileID: 0}
+m_PrefabInstance: {fileID: 0}
+m_PrefabAsset: {fileID: 0}
+m_GameObject: {fileID: 860855124}
+m_Enabled: 1
+m_EditorHideFlags: 0
+m_Script: {fileID: 11500000, guid: 44abd04523f4b6b4ea238a8241051c7b, type: 3}
+m_Name:
+m_EditorClassIdentifier: Assembly-CSharp::RayTracingTarget
+Copilot
+AI
+Apr 6, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This scene adds a RayTracingTarget MonoBehaviour (script GUID 44abd04523f4b6b4ea238a8241051c7b), but there is no corresponding .cs/.meta for RayTracingTarget in the repo. This will show up as a missing script component for other users and can break the scene. Please add the missing script+meta or remove this component from the scene.
+Suggested change
+--- !u!114 &860855130
+MonoBehaviour:
+m_ObjectHideFlags: 0
+m_CorrespondingSourceObject: {fileID: 0}
+m_PrefabInstance: {fileID: 0}
+m_PrefabAsset: {fileID: 0}
+m_GameObject: {fileID: 860855124}
+m_Enabled: 1
+m_EditorHideFlags: 0
+m_Script: {fileID: 11500000, guid: 44abd04523f4b6b4ea238a8241051c7b, type: 3}
+m_Name:
+m_EditorClassIdentifier: Assembly-CSharp::RayTracingTarget
+Copilot uses AI. Check for mistakes.
+Comment thread
+Assets/OutdoorsScene.unity
+Comment on lines
++451
+to
++454
+m_Script: {fileID: 11500000, guid: 14bfc4b311353544aacfbb0854d2d62a, type: 3}
+m_Name:
+m_EditorClassIdentifier: Assembly-CSharp::IrradianceBaker
+rayTracingShader: {fileID: 4807578003741378534, guid: ecae26d334832a04ca62f479ebdc322c, type: 3}
+Copilot
+AI
+Apr 6, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The scene references the new IrradianceBaker script by GUID (14bfc4b311353544aacfbb0854d2d62a) and the new bake shader by GUID (de0c9190aaba52b419da4e40e9131f0d), but the PR does not include the required .meta files for the newly added assets (IrradianceBaker.cs, UVSpaceBaker.shader, IrradianceBake.raytrace). Without metas, GUIDs will be regenerated and these scene references will break on other machines. Please commit the .meta files for all new assets.
+Copilot uses AI. Check for mistakes.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

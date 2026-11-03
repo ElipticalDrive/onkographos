@@ -1,0 +1,1274 @@
+Open-source helical spring design app in Rust + iced. Computes spring rate, Wahl-corrected stress, buckling, natural frequency, and fatigue from cited engineering sources. - feat(gui): shaded 3D spring view via SDF ray-marching by r6e · Pull Request #69 · r6e/OpenSpringmaker
+
+feat(gui): shaded 3D spring view via SDF ray-marching by r6e · Pull Request #69 · r6e/OpenSpringmaker · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+r6e
+commented
+Jul 13, 2026
+Copy link
+Copy Markdown
+Owner
+Shaded 3D spring view (SDF ray-marching)
+Replaces the plotters wireframe with a GPU-shaded 3D spring rendered by signed-distance-field
+ray-marching, with the wireframe kept as an automatic fallback when no GPU adapter is present.
+All five families render (compression, conical, extension, torsion, assembly); metallic
+material look, rectangular-wire-ready cross-sections, scroll-wheel zoom, ground/flattened-end
+rendering, and per-member material hues for future multi-material support.
+Architecture: viz/sdf.rs is a pure-Rust SDF mirror (ADR 0008 — no iced/wgpu imports);
+viz/shader3d.{rs,wgsl} is the humble iced shader::Program + WGSL ray-marcher, mirrored
+function-for-function with shared {{PLACEHOLDER}} constants and gated by a naga parse+validate
+test (the no-GPU shader gate). The helix SDF's conservativeness (never over-estimate → march
+safety) is closed by proof in the sd_helix doc comment and pinned by property sweeps.
+⚠️ Manual visual checklist (requires a real GPU — please verify before merge)
+The headless suite cannot see pixels. Please confirm on the live render:
+V1 spring renders silver (music-wire), not black
+V2 dark-mode background is the panel color, not black; spring clearly visible
+V1/V2 (new case) on a machine whose surface format is sRGB, confirm no washed-out /
+double-encoded appearance (the fix derives the encode from the runtime TextureFormat)
+V3 ground/dead-coil ends stay in-line with the wire (no 90° kink at the taper)
+V4 extension hooks hang outward, no curl into the body, transition not oversharp
+V5 extension springs render at the specified free length (not always close-wound)
+V6 hooks curl the correct handedness (clockwise per Shigley Fig. 10-7b, gap toward body)
+orbit + zoom feel; both light/dark themes; member hues on assemblies
+Deliberate behavior changes vs the wireframe shipped in #63
+Extension springs now render at the solved free length in both the wireframe and SDF
+paths (previously both drew close-wound). Free length below the close-wound minimum is now a
+hard reject in the extension solver (matches compression's free < solid precedent), citing
+EN 13906-2 / Shigley Eq. 10-39/10-40; the minimum uses body coils Nb = Na − G/E (verified
+against Shigley Example 10-6 — the naive Na-based minimum would falsely reject the book's own
+worked example).
+Extension hook loops now hang axially outward with the correct handedness (both paths).
+Spec drift (plan-sanctioned)
+The design said "zero new dependencies"; implementation added pollster (runtime, for the
+boot-time adapter probe) and naga (dev-only, the shader validation gate). Both were sanctioned
+during planning.
+Testing & gates
+Workspace green: 586 springcore + 8 golden + 660 springmaker; both clippy variants -D warnings;
+cargo doc -D warnings; typos; springcore in-diff mutation gate 0 missed (23 caught, 5
+unviable). Advisory springmaker viz mutation coverage was hardened 132 → 29 survivors; the
+residual 29 are equivalent-class boundary/boolean mutants (11 viz) plus out-of-scope GUI
+view-layer struct-field cosmetics (18) — springmaker is not the CI-mutation-gated crate.
+Review
+Five-round adversarial panel (general, architect, simplifier, input-domain adversary,
+stateful-UI adversary, formula/mirror cross-validator) cycled to convergence. The riskiest
+change — a per-winding subdivision of the sd_helix conservativeness bound to kill
+sibling-family seam phantoms — was independently re-derived by two reviewers with their own
+ground-truth sweeps and positive controls (zero over-estimates across ~1.6M probe points
+combined); the window-anchor k*==k** identity was verified byte-unchanged.
+🤖 Generated with Claude Code
+r6e
+and others
+added 30 commits
+July 12, 2026 13:29
+docs(spec): shaded 3D view design — SDF ray-marching via the iced sha…
+…
+55ff64e
+```
+…der widget
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+docs(plan): shaded-3D SDF implementation plan
+…
+6f0e8f0
+```
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+docs(plan): avoid the typos-gated segment-vector identifier in the ca…
+…
+d47afe8
+```
+…psule formula
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+feat(gui): SDF core — primitives, profiles, appearance contract
+…
+837ff03
+```
+Pure Rust mirror of the future WGSL ray-marcher (ADR 0008 split): exact
+signed-distance functions for capsule, torus-arc (hooks), 2D cross-section
+profile (circle/rectangle), and half-space plane cuts, plus a steel/
+member-hue Appearance contract. All four primitives are proven EXACT (not
+merely conservative) — see doc comments, in particular the torus-arc
+endpoint-capping proof (Euclidean-nearest endpoint == angularly-nearest,
+via a shared cosine-comparison identity).
+
+Deviates from the task brief's cut_plane test: the brief's "below the
+plane, base wins" assertion asked for -5.0 from
+cut_plane(-5.0, [0,-3,0], [0,0,0], [0,1,0]), but max(-5.0, dot(...)) =
+max(-5.0, -3.0) = -3.0 is the mathematically correct half-space
+intersection (the plane, 3mm away, is genuinely the nearer surface).
+Split into two honest cases instead: below-but-nearer-the-plane (-3.0)
+and below-by-more-than-the-base-depth (-5.0).
+```
+docs(gui): cut_plane is conservative near the seam, not exact
+…
+43ea484
+```
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+feat(gui): helix SDF — periodic reduction with close-wound neighbor g…
+…
+efed3e0
+```
+…uard and taper
+
+sd_helix reduces the transcendental nearest-point-on-helix problem to a
+2D cross-section-plane profile distance at four candidate turn indices
+(floor(k_est)-1 ..= +2 — the close-wound neighbor guard), with linear
+conical taper and assembly axial offset.
+
+Two deviations from the brief's literal text, each with evidence:
+
+1. Clamping the RAW angle phi = theta + TAU*k to [0, TAU*turns] discards
+   theta for out-of-range candidates, creating a phantom start-cap
+   candidate at the wrong azimuth that under-runs the true surface
+   distance (measured d = -0.167 at a genuine surface point: radius 10,
+   pitch 6, turns 8, wire_r 1, phi ~ 0.2526, ring_ang 4.0). Fixed by
+   clamping the TURN INDEX k to [0, floor((TAU*turns - theta)/TAU)]
+   first, preserving azimuthal alignment; the raw-phi clamp remains only
+   as the terminal boundary safety net.
+
+2. The brief's close-wound test asserted only a negative-guard, which is
+   provably blind to a shrunk candidate set (min over a subset can only
+   increase, never go negative). Strengthened with a conservativeness
+   upper bound at off-midpoint gap fractions, where a single-candidate
+   reduction OVER-estimates (floor picks the far turn) — the actual
+   sphere-tracing failure the guard exists to prevent.
+
+Conservativeness argument documented on the function: the ring-plane
+reduction never over-estimates — safe for sphere tracing.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(gui): helix SDF conservativeness — cos-alpha bound, taper-anchore…
+…
+ea0176e
+```
+…d window, sub-turn caps
+
+Review findings (Task 2, R1):
+
+1. Critical — the ring-plane candidate measures distance to a SUBSET of
+   the swept solid (one azimuthal cross-section) and therefore
+   OVER-estimates: R=10/pitch=6/w=1 at p=(10,3,0) reported 2.000000 vs
+   true 1.986414. The reviewer's constant d*cos(alpha) rescale is the
+   first-order fix but measurably NOT a bound (violations 5.4e-7 at the
+   counterexample itself, 6e-2 at steep-pitch exterior points, 4.4e-1 on
+   the coil axis); implemented instead as the rigorous per-winding form:
+   Jordan's chord inequality bounds the azimuth term, the remaining
+   quadratic's constrained vertex shifts the in-plane evaluation point.
+   Zero violations across grid + 2600-point randomized sweeps against an
+   independent 1-D minimization.
+
+2. Important — taper window anchored at the closed-form quadratic
+   minimizer k* (reduces to k_est when dR=0); the pitch-only anchor
+   missed the small-end winding on a steep cone (109% over-estimate at
+   the reviewer's conical counterexample). Window anchor additionally
+   clamped to the covering-winding range so beyond-the-end queries at
+   far azimuths keep a candidate on the nearest real arc.
+
+3. Important — sub-turn phantom (turns=0.5, p=(0,3,-10) reported -1.0
+   vs true 13.14) closed with exact terminal-centerline cap candidates
+   (the sd_torus_arc endpoint trick), joined unconditionally.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(gui): anchor the helix candidate window at the refined-objective …
+…
+b565191
+```
+…vertex
+
+R2 flagged that sd_helix's window anchor k* (the ring-plane objective's
+vertex) might diverge from k**, the true vertex of the Jordan-refined
+per-winding objective V(k) = min_u f_k(u). Solving f_k(u)'s 2x2 joint
+stationarity system proves k* == k** exactly for every geometry: a(k,u)
+and b(k,u) depend on (k,u) only through the combined phase TAU*k+u
+(dR_turn = TAU*g, pitch = TAU*s), so the azimuth term's stationarity
+condition forces u**=0 at the joint optimum, collapsing it onto the same
+u=0 slice k* already comes from. No functional change was needed — the
+existing closed form already computes k** — so this extracts it into a
+named helper and rewrites the doc's "four neighbors still bracket"
+hand-wave into the proven statement, backed by an independent numeric
+proof test and a broadened 2000-point randomized conservativeness sweep
+targeting the interior/high-radial/high-taper regime R2 flagged.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+feat(gui): SDF scene composition and per-family builders
+…
+9f0857b
+```
+SdfScene (parts + ground cuts) with min-union/max-cut evaluation and a
+winning-part index for appearance lookup; per-family builders
+(compression, conical, extension, torsion, assembly) reconstruct the
+wireframe scene_models' exact geometry — dead-coil flattening via a
+3-segment helix reconstruction of coil_height_fn, hooks as oriented
+torus arcs, legs as tangential capsules, series stacking with the
+shared gap — with the same degenerate/capped guards returning
+SdfScene::default() (extent None → placeholder).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(gui): ground planes at true faces, phase-continuous segments, cut…
+…
+1f987aa
+```
+… pins
+
+Review findings F1/F3/F2 on the Task 3 SDF scene builders:
+
+- F1 (critical): ground_cuts placed both planes one wire radius too deep
+  (y = wire_r / H - wire_r). The true ground faces are y = 0 and y = H:
+  coil_height_fn's centerline spans [0, H] (H = SquaredGround L0), the
+  un-ground blank fills [-d/2, H + d/2], and grinding removes d/2 per
+  end — preserving face-to-face = L0 and reproducing Ls = d*Nt at solid.
+- F3: the centerline tests excluded cut-adjacent points via the scene's
+  OWN cuts, so a wrong plane auto-excluded its own damage. New
+  ground_cuts_match_planes_derived_from_engine_fields pins both planes
+  (position AND normal, both ends) against in-test engine-field math,
+  and the agreement tests now pin the exclusion count exactly (32).
+- F2: HelixParams gains phase_rad (helix rigidly rotated about Y; the
+  reduction maps the query azimuth into the phase frame once, terminal
+  caps at phi_end + phase_rad). helical_body_parts derives each
+  segment's phase from the cumulative turns before it, so dead/active
+  joins are azimuthally continuous for PlainGround (dead_per_end = 0.5)
+  and fractional active counts; the false "phase-exact" doc claim is
+  replaced. Pinned by two seam tests on the true continuous centerline
+  plus a 400-case rotation-equivariance property (phase == rigid
+  rotation, phase-0 back-compat).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+feat(gui): SDF uniforms, camera math, zoom step
+…
+08758e4
+```
+Task 4 of the shaded-3D plan: fixed-stride scene_uniforms/unpack_scene
+packing in sdf.rs, and hand-rolled camera matrices + zoom_step in mod.rs.
+
+MAX_PARTS raised from the brief's 24 to 48 (16 members x 3 Helix segments
+each): every helical body reconstructs to 3 segments (dead/active/dead),
+not 1, and no cap on assembly member count exists anywhere in the app
+(AsmMemberAdd pushes unconditionally) -- the brief's "fit the real member
+cap" is unsatisfiable, so the representability guard degrades gracefully
+past a generous 16-member budget, mirroring MAX_RENDER_TURNS's precedent.
+
+FLOATS_PER_PART stays 16 as specified: Helix needs 15 slots (radius, an
+NaN-sentinel taper, pitch, turns, profile kind+dims, offset, phase,
+5-float appearance) + 1 pad; TorusArc 14+2; Capsule 13+3.
+
+camera_uniforms packs view_proj + its inverse (32 f32, no separate stored
+eye -- Task 5's ray reconstruction unprojects near/far NDC instead) from
+a hand-rolled look-at/perspective/4x4-inverse. Fit-to-extent framing uses
+a bounding-sphere radius of extent/sqrt(2) (not extent/2 -- the tight
+bound for the [r<=E/2, y in [0,E]] cylinder scene_extent_mm bounds).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(gui): negative taper sentinel (WGSL-safe) + None round-trip pin
+…
+0673dd5
+```
+WGSL/WebGPU permits finite-math-only implementations where isNan() and
+NaN comparisons may legally constant-fold to false, so the prior NaN
+sentinel for taper_small_r's None could silently misdecode tapered vs.
+untapered helices once Task 5's shader reads this buffer. Replace it
+with a negative sentinel (NO_TAPER_SENTINEL = -1.0, a physical radius
+can never be negative) decoded via an ordinary `< 0.0` comparison,
+reliable in both Rust and WGSL.
+
+Pin the common-case None round-trip directly
+(scene_uniforms_round_trips_none_taper_to_none_exactly). Update the
+documented Some(f64::NAN) edge case: it's unreachable through real
+family builders (geometry_hostile guards non-finite input upstream),
+and the chosen behavior is to let it round-trip as Some(NaN) rather
+than collapsing to None, so a violation of that invariant stays
+visibly poisoned instead of silently laundering into a valid
+untapered helix.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+feat(gui): shaded 3D shader — WGSL ray-marcher + iced pipeline
+…
+b67415a
+```
+Task 5 of the shaded-3D plan: viz/shader3d.wgsl mirrors viz/sdf.rs
+function-for-function (helix periodic reduction with the k-index/Jordan-chord/
+terminal-cap/phase-frame fixes, torus-arc, capsule, profile, scene union +
+ground cuts), sphere-traced in the fragment shader with Blinn-Phong shading.
+viz/shader3d.rs is the humble Pipeline/Primitive/Program plumbing: substitutes
+the shared sdf.rs constants into the WGSL template (instantiate_wgsl, chained
+str::replace), and implements iced's shader::Program/Primitive/Pipeline
+against real wgpu types (iced::wgpu / iced::widget::shader — no direct
+iced_wgpu dependency needed).
+
+Adds Message::Zoom(f32) to app.rs (a Task-5 scope deviation: needed so
+SpringShader::update can construct/publish it; a no-op placeholder arm keeps
+App::update's match exhaustive until Task 6 wires App.zoom + zoom_step).
+
+Tests (no GPU): instantiate_wgsl leaves no placeholders and pins the shared
+MAX_PARTS/MARCH_MAX_STEPS constants; naga::front::wgsl::parse_str +
+Validator::validate parse-validates the instantiated WGSL (added naga 27.0 as
+a dev-dependency, version-matched to iced_wgpu's own wgpu 27.0.1 dependency);
+event-mapping tests mirror OrbitCanvas's drag/publish discipline plus new
+wheel-to-Zoom handling.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(gui): march-loop far-distance bail — no f32 overflow on miss rays
+…
+479bcf0
+```
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+feat(gui): shaded/wireframe dispatch, zoom state, boot-time shader probe
+…
+902f35f
+```
+Task 6 of the shaded-3D plan: App.zoom + App.shader_available state, the
+real Message::Zoom arm (zoom_step accumulator, replacing the Task-5
+placeholder), main.rs's one-shot wgpu adapter probe (pollster-driven,
+catch_unwind-guarded), and viz::spring3d_element — the shared 3D slot
+builder with the pure use_shaded chooser, a degenerate short-circuit to
+the existing placeholder BEFORE choosing, and the wireframe fallback.
+All five family Spring3d arms now route through it with their SDF
+builders. from_store defaults shader_available to false (deterministic
+test path; snapshot HARD RULE documented on the field and on
+snapshot_hash). Camera aspect is the nominal CHART_W/CHART_H frame —
+live-bounds limitation documented on chart_aspect.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(gui): linear color packing for the sRGB target — background and m…
+…
+50d4b80
+```
+…aterial albedo
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(gui): shaded-3D camera — live widget bounds + true y-midpoint fra…
+…
+7044f43
+```
+…ming
+
+Panel R1 items 1+4 (+ simplifier F4). Two compounding camera bugs at
+50d4b80: `spring3d_element` baked a camera at the nominal 760x300 chart
+aspect once at view() time, distorting coils by up to ~25% at the
+default window width (worse at narrower panels) since the real widget
+never renders at that fixed aspect; and `scene_extent_mm` discarded
+the scene's y_min, so every camera assumed a symmetric [0, extent]
+body span — wrong for extension's asymmetric hook radii (r1=D/2,
+r2=D/4), which mis-centers the fitted view and can crop a shorter
+body's hook rim at the frame edge.
+
+Fixes:
+- `scene_extent_mm` now returns `(extent, y_mid)`, y_mid the TRUE
+  midpoint of the scene's y-span; its Helix arm also pads the
+  centerline range by the wire radius to cover the terminal cap's
+  overhang (the doc called this bound "conservative" without it being
+  true).
+- `camera_uniforms`/`eye_position`/`fit_sphere_radius` target/orbit
+  about `y_mid`, not an assumed `extent/2`.
+- `SpringShader` now carries the raw camera inputs (extent_mm,
+  y_mid_mm, orbit, zoom) instead of a pre-packed camera; `draw`
+  rebuilds `camera_uniforms` every frame from the widget's live
+  `Rectangle`, so the fitted view tracks the panel's actual aspect
+  ratio including across a resize. `chart_aspect` is removed.
+- `spring3d_element`'s redundant Option double-check collapses to one
+  `use_shaded` gate plus a documented `.expect` (simplifier F4).
+
+New/updated tests in viz::sdf, viz::shader3d, viz::tests cover the
+padded Helix y-range, the extension fixture's asymmetric y-midpoint
+and six-pole frustum containment, the live-bounds camera rebuild, and
+non-finite extent/y_mid/aspect fallbacks.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(gui): wheel-zoom rate stack-up + missing event capture
+…
+3920fd7
+```
+Panel R1 items 2+3. Two compounding wheel-zoom bugs at 50d4b80:
+`SpringShader::update` pre-normalized the wheel delta by an unnamed
+×0.1 (Lines) / ×0.002 (Pixels) factor before publishing
+`Message::Zoom`, and `zoom_step`'s own `ZOOM_SENSITIVITY` (0.1)
+applied a SECOND ×0.1 on top — ~1% zoom change per notch instead of
+the doc's ~10%, needing ~139 notches to go from 1x to 4x. The wheel
+arm also used `Action::publish` without `.and_capture()`, so the
+event kept bubbling to the outer results-panel `scrollable`, which
+scrolled the whole page mid-zoom.
+
+Fixes:
+- The widget now publishes the RAW line-equivalent scroll count
+  (`ScrollDelta::Lines` passed through unscaled; `ScrollDelta::Pixels`
+  divided by the new named `WHEEL_PIXELS_PER_LINE` constant, placed
+  beside `ZOOM_SENSITIVITY` in mod.rs). `ZOOM_SENSITIVITY` is now the
+  ONLY rate applied, restoring the documented ~10% change per line.
+- `.and_capture()` on the wheel-zoom `Action::publish`, so the event
+  no longer reaches the outer scrollable. Drag arms stay uncaptured
+  (OrbitCanvas precedent).
+
+New tests cover the raw/converted published deltas, the captured
+event status, and a composed-pipeline check (widget publish -> app's
+zoom_step) pinning the ~10%-per-line rate end to end.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(gui): finiteness sweeps, zero-pitch guard, numeric-gradient norma…
+…
+2dc9f2c
+```
+…ls test
+
+Panel R1 items 5+6+7.
+
+Item 5 (input-domain F-A/F-B, the subset-guard-bypass class): a
+form-reachable finite f64 (e.g. an extreme solved radius) can pass
+geometry_hostile's f64 finiteness check yet overflow to f32::INFINITY
+on the `as f32` packing cast, reaching the shader as a "representable"
+uniform and rendering garbage instead of the documented wireframe
+fallback. Fixes:
+- `scene_uniforms` sweeps the final packed buffer and returns `None`
+  if any float is non-finite (supersedes the prior per-field decision
+  that let a directly-constructed `Some(NaN)` taper round-trip as
+  `Some(NaN)`; that test is rewritten to expect `None`, with a new
+  test pinning `unpack_scene`'s own decode contract against a
+  hand-packed buffer instead).
+- `camera_uniforms` now returns `Option<[f32; 32]>`: an explicit
+  is_finite guard on zoom/orbit (an `f32::clamp` on a NaN `self`
+  returns the NaN unchanged) plus a sweep over the packed output
+  (catches a huge-but-finite extent/y_mid that overflows once the
+  eye/view/projection math scales with it).
+- `spring3d_element` gates the shaded choice on a new
+  `camera_representable` check (mirrors `use_shaded`); `SpringShader::
+  draw` falls back to a known-safe `fallback_camera()` rather than
+  unwrapping, since the `shader::Program` trait can't itself return
+  `Option`.
+
+Item 6 (input-domain F-C, latent/cheap): `sd_helix`'s `k_est` divides
+by `pitch_mm`; at pitch=0 this is NaN, and `f64::min`'s NaN-ignoring
+semantics silently drop every ring-plane candidate, leaving only the
+terminal caps — a ~20mm over-report INSIDE material. Unreachable via
+current builders (audited) but undefended in the hostility gate, and
+rectangular wire (coming next) reuses it. `compression_sdf`/
+`conical_sdf` (the two builders with a real, independent pitch
+parameter) now reject `pitch <= 0.0`; `sd_helix`'s doc states the
+precondition.
+
+Item 7 (spec §Testing, previously absent): a numeric-gradient normals
+test — central differences of `sdf_eval` at surface points on a
+helix, torus arc, capsule, the compression golden fixture's composed
+scene, and a point near (not on) a ground cut — asserting near-unit
+gradient magnitude (a loose band, since the Helix arm is conservative
+rather than exact) and a positive dot product against each point's
+analytically-known outward direction.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+docs+refactor(gui): doc fixes, five-view-arm collapse, P11 palette pin
+…
+4909711
+```
+Panel R1 items 8-10.
+
+Item 8 (doc-only):
+- naga validator now uses Capabilities::default() (validates cleanly;
+  the shader needs none of the optional GPU capabilities ::all() adds).
+- SpringPipeline's doc states the one-shaded-widget-per-frame
+  assumption (a future side-by-side comparison view would need
+  per-instance buffers).
+- MAX_PARTS's doc corrected: over-budget falls back to the wireframe
+  RENDER (the orbitable polyline scene), not the degenerate
+  placeholder text.
+
+Item 9 (simplifier sweep, all taken):
+- F1: `widgets::results_visual_element` collapses the five
+  byte-identical chart/3D dispatch match arms (compression, conical,
+  extension, torsion, assembly) into one shared helper; laziness
+  preserved via FnOnce closures.
+- F2: `sdf::coil_geom` — the (active, total, r, wire, pitch) reader +
+  hostility gate shared by `compression_sdf` and `assembly_sdf`'s
+  per-member loop. Folding the pitch<=0.0 guard in here closes a
+  sibling-family gap: assembly members are `SpringDesign`s too, so
+  they had the exact same zero-pitch exposure item 6 fixed in
+  compression/conical (new test:
+  assembly_sdf_member_zero_pitch_yields_default, confirmed red before
+  the fix).
+- F3: `SCENE_UNIFORM_FLOATS`/`CUTS_BASE_FLOATS` hoisted consts,
+  aliased at all four spellings (scene_uniforms, unpack_scene,
+  shader3d::SCENE_STORAGE_FLOATS, test fixtures).
+- F5: narrowed 10 sdf.rs items with zero cross-file references
+  (cut_plane, member_appearance, MEMBER_HUE_TABLE_LEN, sd_capsule,
+  sd_helix, sd_profile_2d, sd_torus_arc, sdf_eval, sdf_eval_part,
+  Vec3) from pub(crate) to module-private; the layout/march consts and
+  the SdfScene/ScenePart/SdfPart/HelixParams/GroundPlane/Appearance
+  type chain stay pub(crate) (E0446 — they're reachable through
+  SdfScene's own pub(crate) fields).
+- F6: `golden_min` test helper replaces two duplicated golden-section
+  search loops.
+- F7: `member_form` fixture helper collapses four duplicated
+  `AsmMemberForm { .., ..blank(..) }` literals.
+
+Item 10: adopted the stateful adversary's P11 as a permanent
+regression test — the wireframe 3D slot must render differently under
+the dark vs. light palette (shader_available stays false throughout,
+asserted explicitly).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(viz): kill phantom seam bands in sd_helix boundary windings (V3)
+…
+cec3bea
+```
+User-reported: the wire appears to kink ~90 deg up/down at the ground
+ends. Root cause: the virtual-boundary-winding branch froze the azimuth
+penalty at the sub-range endpoint nearest zero while letting the planar
+minimizer travel the whole sub-range, so at every segment seam azimuth
+the axial residual cancelled at near-zero azimuth cost and the SDF
+reported negative values up to a full coil gap outside the wire - an
+s*PI-tall vertical phantom band per seam (all three body segments share
+one seam azimuth via phase continuity, compounding the effect).
+
+Fix: boundary windings now keep the TIGHTER of two independent lower
+bounds - the clamped Jordan-chord quadratic (sign-correct at seams; the
+sub-range always sits inside [-PI, PI] where Jordan holds) and the
+frozen-azimuth planar form (exact at terminal cross-sections, where
+Jordan under-shoots). Max of two valid lower bounds is still a valid
+lower bound, so the conservativeness contract is preserved - never
+weakened. WGSL mirror updated token-for-token; naga parse+validate
+stays green.
+
+Tests: unit pin of the traced worst case (sd -0.79 at true distance
++1.75 pre-fix) plus a scene-level seam-band scan (232 phantom points
+pre-fix, zero post-fix); the existing conservativeness sweeps and the
+sub-turn terminal exactness pin all stay green.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(viz): hang extension hook loops axially outward, not centered on …
+…
+b380150
+```
+…the attach (V4)
+
+User-reported: hooks render too long, curling INTO the body, with a
+sharp corner at the transition. Investigation disproved the arc-overshoot
+hypothesis: the SDF torus arc and the wireframe arc trace the identical
+1.5-pi centerline (verified point-by-point, both hooks, both directions).
+The real defect, shared by BOTH geometry paths since PR #63: the loop
+circle was vertically CENTERED on the attach point, so its final
+quarter-sweep climbed hook_r up into the coil bore - subtle as a thin
+wireframe line, glaring as a shaded solid tube.
+
+Fix (sibling-consistent, both paths): the loop now hangs axially outward
+- circle center at radial coil_r, one hook radius beyond the attach -
+so its inner surface reaches 2*hook_r - d past the body face, exactly
+the per-end hook allowance in Shigley's inside-hooks free length
+(Fig. 10-7b / Eq. 10-39), which V5's free-length rendering builds on.
+The SDF part keeps the same (y_rotation, tilt) frame: the window
+[0, 1.5*pi] maps onto the new arc with the attach at the window end -
+only the torus center changed, so no WGSL change is needed.
+
+The sharp corner at the transition remains and is IDENTICAL in both
+paths (the loop plane is vertical, the coil tangent azimuthal) - the
+documented representative-arc limitation, not sharper than the shipped
+wireframe's.
+
+Tests: hang + axial-reach pins on both paths (RED against the centered
+loop), a two-sided arc-extent pin per the finding directive (isolated
+hook part must not contain continuation samples beyond either window
+end), and the existing wireframe/SDF centerline-agreement test held
+green through the change, proving the two paths moved together.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+feat(extension): render at the specified free length; reject below cl…
+…
+b0034b5
+```
+…ose-wound minimum (V5)
+
+User-reported: extension springs always rendered fully compressed
+(close-wound body, pitch = wire) regardless of the specified free
+length. USER DIRECTIVE: render at the specified length; free lengths
+below the close-wound physical minimum HARD-REJECT at solve time,
+mirroring compression's free < solid precedent.
+
+springcore:
+- New extension::mechanics::min_free_length - composed from the two
+  cited relations already in the engine, not a new formula: body coils
+  Nb = Na - G/E (Shigley Eq. 10-40; the solver's active count is the
+  rate-equivalent Na) fed into free_length_from_geometry (Eq. 10-39
+  inside-hooks relation). Using Na directly would over-state the
+  minimum by (G/E)*d and falsely reject Shigley's own Example 10-6
+  (the golden test: Na=12.574, L0=0.817in from Nb=12.17).
+- solve_forward rejects free_length < min_free_length via the existing
+  InconsistentInputs variant (no new variant - no ADR 0013 ripple),
+  message naming both values per the user decision.
+- free_length_from_geometry re-exported for the renderer.
+
+springmaker (both geometry paths, sibling-sweep):
+- Shared viz::sdf::extension_body_pitch_mm: pitch = wire +
+  max(0, L0 - close_wound_L0)/active - the wireframe and SDF builders
+  read one derivation and cannot drift. The max(0) keeps the builders
+  close-wound-clamped as defense in depth (decision point e).
+- BOTH hook loops now use r1, the loop mean bend radius the engine's
+  free-length relation models; r2 is the hook's side-bend torsion
+  radius, never a loop radius - the shipped r2-as-top-loop was a
+  misreading of Shigley's hook geometry (Fig. 10-6: r1/r2 are two bend
+  radii of ONE hook; both ends carry the same hook).
+- Rendered inside-hooks span now equals the specified free length
+  exactly (pinned by test); the deliberate wireframe-behavior change
+  vs PR #63 is user-directed.
+
+Fixture churn (decision point f): the D=40mm index-caution fixture's
+free length raised above its 97.2mm minimum.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(viz): runtime sRGB-encode flag for non-sRGB render targets (V1+V2)
+…
+eed6b80
+```
+User-reported on a real GPU (Metal surface): the spring renders black
+instead of music-wire silver (V1) and the dark-mode background renders
+black instead of pal.panel (V2). One mechanism: the pipeline composed in
+linear light and relied on an sRGB-format swapchain to encode on store,
+but iced_wgpu's compositor only PREFERS an sRGB format - when the
+surface hands it a non-sRGB format, shader output is stored raw and
+linear values display roughly a gamma power darker (dark panel ~0.01
+linear -> near-black; linearized steel + lighting -> near-black).
+
+Fix per the documented mechanism: SpringPipeline::new derives
+needs_encode = !format.is_srgb() from the REAL TextureFormat it
+receives; the flag rides to the shader in a new Camera.flags vec4
+(camera 32 + bg 4 + flags 4 floats); fs_main funnels every exit (miss
+background and shaded hit alike) through one encode_output gate that
+applies the exact sRGB OETF iff the flag is set - mirroring sdf.rs's
+linear_to_srgb token-for-token. Both format classes now render
+identically; an sRGB target keeps hardware encoding with no
+double-encode (verified single conversion per color end-to-end:
+pack_appearance/bg_rgba linearize once at pack time, encode happens
+exactly once at output, in hardware or in shader, never both).
+
+Headless pins: flag derivation for both format classes, camera-buffer
+float layout (flag at index 36), OETF presence in the instantiated
+WGSL, and naga parse+validate on the new shader. Actual pixels remain
+human-verifiable only (no GPU in CI).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(viz): close the pitch<=0 gate gap in extension/torsion SDF builders
+…
+f3df080
+```
+Review finding 6's pitch-positivity gate existed in three of four
+spellings (coil_geom, conical_sdf) but extension_sdf's derived pitch and
+torsion_sdf's close-wound pitch (= wire) were finiteness-gated only: a
+finite post-solve-mutated wire_dia <= 0 sailed through geometry_hostile
+and built a zero-pitch helix — sd_helix's documented precondition
+violation (NaN k_est drops every ring candidate; caps-only distance
+over-reports INSIDE material). Both builders now carry the sibling
+pitch <= 0.0 gate, and coil_geom's doc no longer claims those families'
+pitch is "always positive by construction" (R2 panel: simplifier F-1,
+input-domain F2, general Minor-1).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(viz): degrade wireframe scenes on zero-coil/non-finite-pitch bodies
+…
+e1d8527
+```
+The shared scene_from_radius gate was weaker than the SDF builders'
+coils_hostile/geometry_hostile verdicts: total <= 0 and a non-finite
+pitch built poisoned bodies whose stray finite points let extension
+attach floating hook arcs around a missing body (R2 input-domain F3 —
+active=0 or free_length=inf, post-solve mutation). The gate now
+mirrors the SDF path's verdicts; both hostile inputs are pinned at
+extension scene_model level.
+
+Consumer sweep: assembly's NaN-pitch member now routes through the
+entry guard (whole-scene bail — the verdict assembly_sdf already
+reaches for any hostile member, better cross-path parity); its
+pinned y-offset cascade semantics are preserved via wire_dia (the
+height input the gate deliberately leaves to per-point filtering)
+and the new verdict is pinned explicitly.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(extension): guard the body-coil correction against hostile moduli
+…
+391ab27
+```
+min_free_length computed Nb = active - G/E with no validation: an
+editor-representable E = 0.001 GPa (finite, positive - passes material
+validation) gives G/E = 80000, a minimum of about -160 m, and the V5
+close-wound reject silently never fired - a 1 mm free length solved
+while the renderer clamped to ~58 mm, the exact engine/render
+disagreement the guard exists to prevent (R2 input-domain F1). Twin
+route: youngs_modulus_gpa * 1e9 overflows to +Inf AFTER the finiteness
+check, driving Nb to -Inf/NaN.
+
+min_free_length now returns Result: Nb must be a positive finite count
+and the composed minimum finite (guards cover every derived value); on
+violation the design is InconsistentInputs. The adversary's exact
+probes (E=0.001 GPa, E=1e300 GPa, G=1e300 GPa, both=1e300 GPa) are
+pinned at solver level plus unit-level boundary pins (Nb == 0 exactly).
+The subnormal-active probe now rejects at this earlier, more actionable
+guard; the rate guard keeps its zero-rate pin.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+feat(core): structured FreeLengthBelowMinimum error with unit-aware d…
+…
+e8d1d50
+```
+…isplay
+
+The V5 extension reject baked '{:.3} mm' into InconsistentInputs — the
+one channel format_error's localization contract trusts to be
+unit-neutral, so US-mode users saw unconverted millimeters (R2
+stateful-UI F1). New structured variant carries free_length_m /
+min_free_length_m in SI meters (the DiameterOutOfRange pattern);
+springmaker relocalizes per the active unit system, including through
+Member wrapping. When both values round to the same 3-decimal display
+string the message appends the deficit instead of reading 'X is below
+X' (F2).
+
+Sibling sweep (F3, extended): compression's, conical's, and
+rectangular's free < solid rejects adopt the same variant in this pass
+— the solid length is each family's close-wound minimum — so all four
+families carry one error shape with both values named. Exact
+field-value pins at every construction site kill swapped-field mutants;
+the Display test pins field order.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(viz): mirror extension hook curl to Shigley handedness
+…
+f5e064b
+```
+User finding V6 (authoritative): hooks curled 180 degrees mirrored —
+counter-clockwise where Shigley Fig. 10-6(a)/10-7(b) show the loop
+departing the attach radially OUTWARD (max-bending point A on the
+outermost side), sweeping over the top, tip ending on the INNER side
+curling back toward the body with the gap facing the body. The V4 fix
+got the hang position right but shipped the in-plane mirror; the
+cross-path agreement test couldn't see it because BOTH paths carried
+the same mirror.
+
+Wireframe: hook_arc radial flips to coil_r + hook_r*sin(theta). SDF:
+the mirror is a pi rotation of the loop circle about the vertical axis
+through the torus center, i.e. y_rotation = -attach_angle - pi with
+everything else unchanged — the mirrored arc maps onto the identical
+local sweep window (verified algebraically both hooks, any attach
+angle). Axial-reach/hang pins and the inside-hook-span == free_length
+identity stay green (pure in-plane mirror). New asymmetric handedness
+pins in BOTH test modules fail under a re-mirrored curl; verified
+visually with the throwaway CPU tracer (not committed).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+style(springcore): un-break the workspace rustfmt gate on the R2 reje…
+…
+33e2f54
+```
+…ct tests
+
+The item-3 structured-reject sweep (e8d1d50) left three sites that
+`cargo fmt --all -- --check` (rustfmt 1.9.0, the CI gate) rejects:
+
+- conical/design.rs and rectangular/design.rs: a standalone block comment
+  immediately after a line ending in a trailing `//` comment, which rustfmt
+  wants to re-indent to the trailing comment's column. Fold the `< Ls` note
+  into the block comment so the trailing comment is gone.
+- form_helpers.rs: an over-length `format!` line rustfmt wants wrapped.
+
+Formatting only — no logic change; the reject tests still pin the same
+FreeLengthBelowMinimum fields.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+r6e
+and others
+added 10 commits
+July 13, 2026 11:00
+fix(viz): subdivide sd_helix per-winding bound to kill sibling-family…
+…
+64c1ecf
+```
+… seam phantoms
+
+The wave-2 V3 boundary-winding fix (max of a global-Jordan quadratic and a
+frozen-azimuth form) killed the compression seam-phantom band but stayed
+under-tight in the sibling regimes the R2 general reviewer flagged: the
+close-wound/torsion body (worst ~-0.024 at true +0.19 — 19% of wire_r, the
+torsion family's DEFAULT render) and steep conical taper (the global r_min
+under-counts the large end's azimuth penalty). Both are the safe direction
+(never over-estimated in ~800k probes) but paint an s*PI-tall phantom band at
+seam azimuths on a shaded torsion/conical render.
+
+Replace the interior-Jordan-plus-frozen max-of-two with a uniform
+subdivision: split each winding's real azimuth sub-range into
+HELIX_WINDING_SUBDIVISIONS (=8) equal pieces and bound each piece with its
+OWN local Jordan chord constant (jordan_chord_coeff = the sharp
+(1-cos U)/U^2 as a stable 0.5*sinc^2, rising to the exact 0.5 on a narrow
+seam piece vs the global 2/PI^2) and its OWN local minimum coil radius; keep
+the min over pieces. `min over a partition == min over the whole range`, so
+each winding value stays a valid lower bound — the never-over-estimate
+march-safety invariant is preserved (a 300k-point adversarial sweep — high
+turns, steep taper, sub-turn, seam-biased, verified against a turn-scaled
+per-winding ground truth — measured zero over-estimates), while the residual
+seam under-shoot drops below 0.05*wire_r across every family regime.
+
+The tightening is DECOUPLED from the window anchor: candidate_window_vertex
+and the k*=k** identity are untouched (they select WHICH windings on the
+global-c^2 objective; this sets the VALUE with local constants), so
+ring_plane_vertex_matches_jordan_refined_vertex stays green and meaningful.
+The subdivision also subsumes the frozen form's terminal-exactness role
+(sub-turn end now ~12.7 of true 13.14 from the pieces alone; the caps floor
+it exactly as belt).
+
+WGSL mirrored token-for-token (new jordan_chord_coeff + subdivided loop +
+the shared {{HELIX_WINDING_SUBDIVISIONS}} constant); naga gate green. Adds
+torsion_seam_band_contains_no_phantom_material and
+conical_seam_band_contains_no_phantom_material as sd_helix-level scans on the
+real fixture body geometry (the single-segment torsion body's seams sit under
+its legs, and conical's large-end seam under the ground cut, so a scene scan
+is masked/vacuous — the compression scene scan already exercises the fix at
+its interior segment joins). Both have teeth: they fail at one subdivision
+and pass at 8. Updates sd_helix's proof-carrying doc (decoupling note,
+subdivision bound, corrected seam claim, geometry-specific under-shoot
+envelope).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+docs(viz): correct the sRGB-encode and camera-fallback contract docs
+…
+bf921a8
+```
+Reviewer-flagged stale/incorrect documentation (no behavior change):
+
+- Three pre-wave-2 sites still asserted "the shader writes to an sRGB-format
+  target, the hardware always re-encodes" — the exact assumption whose
+  failure WAS the V1/V2 black-render bug. Reword bg_rgba, its test-section
+  comment, and Appearance's color-convention doc to state the
+  encode-exactly-once contract (linearize at pack, compose in linear, encode
+  once at output — hardware on sRGB targets else the shader) and defer to
+  shader3d::needs_srgb_encode as the authority.
+
+- fallback_camera vs camera_representable documented contradictory aspect
+  contracts (flagged by four reviewers). camera_uniforms substitutes aspect
+  1.0 for any non-finite aspect and returns Some, so fallback_camera's
+  "degenerate live aspect → None" trigger is unreachable; correct it to the
+  real residual (a tall aspect scales the packed matrix ~3x, so an extent in
+  ~2.5e37..7.5e37 mm passes the aspect-1.0 probe yet overflows at draw time)
+  plus defense in depth. Soften camera_representable's "aspect cannot flip
+  finiteness" overclaim to match, and note the 1e38 scene-sweep test is not
+  an end-to-end shaded guarantee (the camera overflows first → safe fallback).
+
+- free_length_from_geometry (now public) baked in "body coils = active coils",
+  which its own min_free_length caller deliberately violates (Nb = Na − G/E).
+  Document which count to pass for which purpose (Na for the rate-equivalent
+  render length, Nb for the physical minimum) instead of asserting the
+  equality.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+refactor(viz): simplifier Lows — dedup NDC-containment, shrink commen…
+…
+0d7ff9b
+```
+…ts, fold helper
+
+Simplifier R2 Low findings (no behavior change):
+
+- F-2: extract the six-pole NDC-containment loop duplicated across viz::mod
+  and viz::sdf tests into a shared #[cfg(test)] pub(crate) assert_poles_inside_ndc
+  in viz::mod. The sdf.rs copy hand-rolled `apply`, re-implementing the
+  private mat4_mul_vec4 — the helper uses the production fn, so both pins
+  exercise the same projection the shader consumes.
+- F-3: shrink the five near-identical results_visual_element call-site comment
+  blocks (compression/conical/extension/torsion/assembly views) to their
+  family-specific one-liner, pointing at the helper's doc for the shared
+  one-bitmap-per-render laziness rationale.
+- Nit: fold the four-way y-extreme fold in extension::scene_model's hook-span
+  tests into a two-line y_extremes(&Polyline3) -> (min, max) test helper.
+
+F-4 (extension_body_pitch_mm placement) is reasoned acceptance, not moved —
+the architect verified viz::sdf is its correct home: viz::mod is deliberately
+family-agnostic (zero springcore imports), so a helper over an engine type
+cannot live there, and viz::sdf already hosts every family builder taking
+engine types (ADR 0008 purity intact — no iced/wgpu types entered sdf.rs).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+test(viz): mutation-coverage pins for camera algebra and sdf builders
+…
+93652d4
+```
+Advisory springmaker mutation hardening (mutation-triage.md buckets 1/3/4). A
+scoped run exposed 114 pre-existing survivors in the pinned viz functions: the
+first-draft algebraic pins passed on clean code but every one used a DEGENERATE
+input that zeroed the very term a mutation would flip — mat4_invert's sparse
+camera matrices, perspective fov=pi/2 (tan=1), look_at target-at-origin, rotate
+90deg (cos=0), torsion integer turns (cos=1/sin=0), assembly max_wire=2 (2*2==
+2+2). Re-pinned over non-degenerate inputs:
+
+- mat4_invert 64->1: two dense generic matrices at 1e-9 (every cofactor a
+  product of three distinct nonzero factors) + a singular-matrix fallback pin
+- camera_uniforms 13->3: a 32-float composition snapshot (kills near/far plane
+  arithmetic) + input-fallback discrimination pins for the sanitizing guards
+- mat4_perspective/mat4_look_at/rotate_x: non-degenerate fov/geometry/angle
+- scene_extent_mm: radial-dominated helix + TorusArc reference pins
+- torsion_sdf/hook_torus_part/helical_body_parts/assembly_sdf: direct
+  endpoint/field/phase/gap pins on the built geometry
+- coils_hostile/vadd/sdf_eval_part: boundary and tie-break pins
+
+Scoped confirmation run: 132->29 missed, 770->873 caught (103 killed). The 11
+remaining viz survivors are all equivalent-class or dead-branch mutants
+(mat4_invert det-guard threshold at exactly 1e-12; camera_uniforms guard
+redundant with the final finiteness sweep + the dead .max(near*2) frustum floor;
+srgb_to_linear C0-continuous 0.04045 breakpoint; scene_extent_mm's correlated
+finiteness guards); the other 18 are advisory ungated GUI view-layer cosmetics
+(Font/Style/window::Settings field deletions). NOT a claimed zero: springmaker is
+not CI-mutation-gated, and the mandatory springcore in-diff diff stays 0-survivor.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(gui): guard non-finite display value in below-minimum message
+…
+19b4a34
+```
+An astronomical-but-finite GUI input (compression active_coils="3e307" →
+min≈1.92e305 m; extension mean_dia="1e308" similar) overflows the m→mm ×1000
+scale in the display layer past f64::MAX to +∞, rendering "…close-wound
+minimum inf mm". The engine guards SI-finiteness; the formatter did not.
+
+Guard the converted display value's finiteness in below_minimum_message
+(the single chokepoint both the top-level and Member-wrapped FreeLength-
+BelowMinimum arms flow through): a non-finite converted value falls back to
+an out-of-range phrasing carrying no bogus number. Display-layer defense-in-
+depth (R3 input-domain F-R3-1), the finding's minimum-required remedy.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+docs(viz): correct extension_sdf pitch-gate justification comment
+…
+2652ac2
+```
+The comment claimed a finite wire<=0 "derives zero/negative pitch" — FALSE
+when free_length>close_wound, where the derived pitch reduces to
+(free−close_wound)/active, strictly positive even at wire=0 (that case slips
+the gate benignly via a zero-radius profile, verified conservative). Restate
+the actual invariant: the pitch<=0 gate defends the degenerate wire=0 +
+free<=close_wound sub-case (pitch collapses to 0) plus any finite
+non-positive derived pitch as defense in depth. Behavior unchanged
+(R3 input-domain F-R3-2).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(extension): reword body-coil guard message to not misdirect to ma…
+…
+6134e21
+```
+…terial
+
+The body-coil moduli guard hinted "check the material's moduli", but for a
+low active-coil count (active ∈ (0, G/E) with normal steel — the extension
+active guard only enforces active > 0) the real cause is the ACTIVE COUNT
+sitting at or below the material's G/E hook-compliance turns (Nb = active −
+G/E went ≤ 0), not the material. Reword to name the active-coil cause and its
+remedy first ("increase the active coil count, or check the shear and Young's
+moduli") without asserting the material is at fault. Accurate across both
+reachable regimes (tiny active count OR extreme moduli). Add a message pin in
+the low-active-count regime (R3 stateful-UI F1). String-only; guard logic
+unchanged.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+test(viz): pin sd_helix conservativeness for turns<1 + taper
+…
+0c6b93d
+```
+The committed conservativeness sweeps cover turns ∈ [1, 9], and the sole
+sub-turn test is non-tapered. A conical spring with active_coils < 1 is
+reachable (the conical solver accepts active_coils > 0), so the turns<1 +
+taper regime was an untested corner of the sacred never-over-estimate
+invariant (the input-domain adversary verified it holds with a 520k-point
+sweep, but nothing pinned it). Add an 800-point randomized sweep over
+turns ∈ [0.3, 0.9] with mandatory taper, full-azimuth and axis/exterior/
+interior/past-both-ends queries, asserting sd_helix never over-estimates a
+FINE (100k-sample) per-winding ground truth (coarse ground truth spuriously
+inflates true distance and would mask an over-estimate).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(viz): add pitch<=0 parity gate to wireframe scene_from_radius
+…
+a13380f
+```
+The SDF builders gate `pitch <= 0.0` (an sd_helix NaN-precondition guard,
+SEPARATE from geometry_hostile), but the wireframe scene_from_radius entry
+guard only had the finiteness term `!pitch_mm.is_finite()`. So a finite
+non-positive pitch (post-solve wire<=0, the same mutation threat model)
+rendered a flat/inverted wireframe coil while the SDF degraded to a
+placeholder — a cross-path divergence (e1d8527's "mirrors exactly" was
+imprecise). Add the `pitch_mm <= 0.0` term so both geometry paths degrade to
+placeholder together, completing true SDF/wireframe parity. Pin the
+degenerate wireframe input (SDF side already pinned by
+compression_sdf_zero_pitch_yields_default). Cosmetic, post-mutation-only.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(gui): drop unit from non-finite below-minimum fallback; widen sub…
+…
+7f520da
+```
+…-turn conservativeness sweep
+
+The R4 panel surfaced two conceded non-blocking nits:
+
+- The non-finite display fallback in below_minimum_message named the unit,
+  rendering the ungrammatical "…range in in" in US mode. The fallback shows
+  no number, so the unit is uninformative — drop it. The astronomical-minimum
+  test now exercises BOTH unit systems with a minimum past both overflow
+  thresholds (mm ×1000 and inch ×39.37) and pins against the "in in" regression.
+- The sub-turn+taper conservativeness sweep sampled turns ∈ [0.3, 0.9], leaving
+  [0.9, 1.0) unsampled between it and the turns ∈ [1, 9] sweeps. Widen to
+  [0.3, 1.0) to meet the full-turn boundary (conservativeness already proven
+  there; this closes the test-coverage gap).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Copilot
+AI
+review requested due to automatic review settings
+July 13, 2026 22:51
+Copilot started reviewing on behalf of
+r6e
+July 13, 2026 22:51
+View session
+Copilot
+AI
+reviewed
+Jul 13, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Adds a new shaded 3D spring visualization path using SDF ray-marching (WGSL + iced shader widget), while keeping the existing wireframe renderer as the fallback/testable path. The PR also aligns solver/UI behavior around extension free-length realism and introduces a structured “free length below minimum” error that the GUI can localize to the active unit system.
+Changes:
+Introduces viz/sdf (pure Rust) + viz/shader3d (iced/wgpu plumbing) with shared constants and a no-GPU naga validation gate for WGSL.
+Wires shaded-vs-wireframe dispatch, adds wheel-zoom state (App.zoom / Message::Zoom), and performs a one-shot boot-time GPU adapter probe.
+Adds SpringError::FreeLengthBelowMinimum across springcore families and updates springmaker formatting to render the message in metric/US units safely.
+Reviewed changes
+Copilot reviewed 26 out of 28 changed files in this pull request and generated 1 comment.
+Show a summary per file
+File
+Description
+springmaker/src/widgets.rs
+Deduplicates per-family chart/3D slot dispatch into a shared lazy builder.
+springmaker/src/viz/shader3d.wgsl
+New WGSL ray-marching shader mirroring the Rust SDF implementation.
+springmaker/src/viz/shader3d.rs
+New iced shader Program/Pipeline plumbing, WGSL templating, and headless validation tests.
+springmaker/src/viz/mod.rs
+Adds shaded/wireframe chooser, zoom/camera math, and shaded element construction.
+springmaker/src/viz/canvas3d.rs
+Exposes placeholder wording helper for shared degenerate-path behavior.
+springmaker/src/ui_tests.rs
+Adds UI pins around shader determinism, palette differences, and zoom behavior.
+springmaker/src/torsion/view.rs
+Switches Spring3d slot to the shared results visual dispatcher + SDF builder.
+springmaker/src/main.rs
+Adds boot-time GPU adapter probe to decide shaded availability.
+springmaker/src/form_helpers.rs
+Localizes new structured free-length-minimum errors into active units with safe rendering.
+springmaker/src/extension/view.rs
+Switches Spring3d slot to shared dispatcher + SDF builder.
+springmaker/src/extension/scene_model.rs
+Updates extension wireframe geometry to render at solved free length and correct hook orientation/handedness.
+springmaker/src/conical/view.rs
+Switches Spring3d slot to shared dispatcher + SDF builder.
+springmaker/src/compression/view.rs
+Switches Spring3d slot to shared dispatcher + SDF builder.
+springmaker/src/assembly/view.rs
+Switches Spring3d slot to shared dispatcher + SDF builder.
+springmaker/src/assembly/scene_model.rs
+Adjusts degenerate/hostile handling for parity with SDF path.
+springmaker/src/app.rs
+Adds zoom state + shader availability flag and their update handling/tests.
+springmaker/Cargo.toml
+Adds pollster (runtime) and naga (dev) for adapter probe and shader validation gate.
+springcore/src/rectangular/design.rs
+Emits structured FreeLengthBelowMinimum instead of a generic inconsistent-inputs string.
+springcore/src/extension/mod.rs
+Re-exports free_length_from_geometry for shared use.
+springcore/src/extension/mechanics.rs
+Adds min_free_length and clarifies free-length geometry semantics (Na vs Nb).
+springcore/src/extension/design.rs
+Rejects extension free length below close-wound minimum using structured error payload.
+springcore/src/error.rs
+Adds SpringError::FreeLengthBelowMinimum and display formatting + tests.
+springcore/src/design.rs
+Uses structured FreeLengthBelowMinimum for compression free<solid rejection.
+springcore/src/conical/design.rs
+Uses structured FreeLengthBelowMinimum for conical free<solid rejection.
+docs/superpowers/specs/2026-07-12-shaded-3d-sdf-design.md
+New design doc capturing architecture, scope, and constraints.
+docs/superpowers/plans/2026-07-12-gui-shaded-3d.md
+New implementation plan doc for the shaded 3D work.
+Cargo.lock
+Captures new dependency additions.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+springmaker/src/viz/mod.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+perf(gui): skip SDF uniform packing on the no-adapter wireframe path
+…
+b18f400
+```
+`spring3d_element` packed `scene_uniforms` (up to MAX_PARTS×FLOATS_PER_PART
+floats) before deciding the shaded path was usable, so a GPU-less machine —
+`shader_available == false` for the whole session — packed and discarded the
+scene on every results render. Add a `!shader_available` early-out before the
+pack. Pure reorder: `use_shaded(false, _)` already returned the wireframe
+fallback, and `scene_uniforms` has no side effects, so the shaded/wireframe/
+placeholder verdict is unchanged for every input.
+
+Addresses Copilot review feedback on PR #69.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Copilot
+AI
+review requested due to automatic review settings
+July 13, 2026 23:54
+Copilot started reviewing on behalf of
+r6e
+July 13, 2026 23:55
+View session
+Copilot
+AI
+reviewed
+Jul 13, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 26 out of 28 changed files in this pull request and generated 2 comments.
+Comment thread
+springmaker/src/main.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+springmaker/src/viz/mod.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+perf(gui): build the SDF scene only when a GPU adapter is present
+…
+8614942
+```
+Extends b18f400. Copilot's follow-up noted that even with the packing
+early-out, `results_visual_element` still built the full `SdfScene` (the
+family `*_sdf` builders) on every render — including on GPU-less machines,
+where `spring3d_element` discards it.
+
+Split the `scene3d` closure into `wire3d` + `sdf3d` and invoke `sdf3d` only
+when `app.shader_available`, passing `SdfScene::default()` otherwise.
+`spring3d_element`'s no-adapter early-out moves to the top of the function so
+the wireframe verdict alone governs and the SDF scene is never consulted — its
+degenerate check is only meaningful when the shaded path is reachable. Real
+designs render identically (both geometry paths' degenerate verdicts agree for
+every real design). A new test pins that `sdf3d` is not invoked without an
+adapter.
+
+Addresses Copilot review feedback on PR #69.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Copilot
+AI
+review requested due to automatic review settings
+July 14, 2026 00:41
+Copilot started reviewing on behalf of
+r6e
+July 14, 2026 00:41
+View session
+Copilot
+AI
+reviewed
+Jul 14, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 26 out of 28 changed files in this pull request and generated no new comments.
+Hide details
+View details
+r6e
+merged commit 80386c8
+into
+main
+Jul 14, 2026
+21 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+r6e
+deleted the
+feat/gui-shaded-3d
+branch
+July 14, 2026 00:59
+r6e
+mentioned this pull request
+Jul 14, 2026
+feat(gui): 2d engineering diagram view for all five families
+#70
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

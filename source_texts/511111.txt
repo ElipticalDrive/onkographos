@@ -1,0 +1,101 @@
+A high-performance implementation of SPH in Taichi.  - PR: Physically-Based Light Refraction & Normal Processing for SPH Gaussian Splatting by ChrisStewie404 · Pull Request #2 · Jason-BoyuNiu/SPH_Taichi
+
+PR: Physically-Based Light Refraction & Normal Processing for SPH Gaussian Splatting by ChrisStewie404 · Pull Request #2 · Jason-BoyuNiu/SPH_Taichi · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ChrisStewie404
+commented
+May 4, 2026
+Copy link
+Copy Markdown
+Collaborator
+PR: Physically-Based Light Refraction & Normal Processing for SPH Gaussian Splatting
+🎯 1. Overview & Motivation
+Currently, liquid rendering in our SPH-to-3DGS (Gaussian Splatting) pipeline lacks physical authenticity. Fluids interact heavily with light via reflection and refraction, but our previous implementation used a simplistic screen-space UV offset that uniformly distorted the background regardless of viewing angle or fluid depth. Furthermore, surface normals derived from overlapping SPH particles were heavily noisy, causing the fluid surface to look like "bumpy spheres" rather than a cohesive, glassy liquid.
+This PR introduces physically accurate Snell's Law refraction, chromatic dispersion, and smoothed Müller color-field normals to create a highly authentic, surface-aware rendering pipeline.
+🛠️ 2. Key Modifications & Theoretical Support
+A. Authentic Surface Normals (Müller Color-Field Gradient)
+Problem: Our previous normal estimation used a hardcoded quadratic weight (1 - r/h)², yielding inaccurate gradients that didn't match our solver's physics.
+Solution: Replaced the quadratic falloff with the true cubic spline kernel derivative q * (3q - 4).
+Theory: This aligns with the standard Müller color-field gradient method. By using the exact gradient of the SPH influence kernel, we derive surface tangents that correctly represent the liquid boundary volume, peaking properly at $2/3$ of the support radius.
+B. Physically-Correct Refraction (Snell’s Law)
+Problem: The previous codebase just shifted background pixels using $X/Y$ components of the surface normal (a linear UV hack). It ignored the camera view angle and viewing depth.
+Solution: Implemented exact angular ray deflection based on true Snell's Law:
+$$\mathbf{R}_{refract} = \eta \mathbf{V} + (\eta \cos \theta_i - \cos \theta_t) \mathbf{n}$$
+Where $\eta$ is the ratio of Indices of Refraction (IOR, e.g., $1.0 / 1.333$). We then project this angular deflection into a screen-space parallax shift multiplied by a new refraction_bg_depth parameter.
+C. Chromatic Dispersion
+Theory: Different light wavelengths bend at slightly different angles when entering water (this is what creates rainbows/prismatic fringing).
+Solution: Instead of deflecting the ray once, we now deflect it 3 times for the Red, Green, and Blue channels using slightly offset IORs (ior - dispersion, ior, ior + dispersion).
+D. Screen-Space Normal Smoothing
+Problem: Direct accumulation of spherical Gaussians yields high-frequency, "blobby" noise at particle boundaries, deeply corrupting the reflected and refracted rays.
+Solution: Applied a mask-weighted 3x3 box blur to the accum_normal buffer before they are vector-normalized. This fuses the individual particle normals into a cohesive, uninterrupted fluid mesh dynamically.
+E. Critical Bug Fix: Z-Buffer Indexing
+Fix: Added z = z[in_view]. In the previous code, depth array z was filtered by valid but missed the in_view bounding box filter. This mismatch corrupted mean_depth calculations, which completely broke screen-space normals and ray origin calculations prior to this PR.
+🚀 3. How to Reproduce & Tweak
+To accurately observe refraction, you cannot render against a solid black background (bending black just gives you black). Use the new --background_mode checker flag to project a grid, making Snell's Law bending clearly visible.
+Run this command to test the new pipeline:
+```
+python run_simulation_gaussian.py \
+  --scene_file data/scenes/dragon_bath_dfsph.json \
+  --frames 60 \
+  --background_mode checker \
+  --ior 1.333 \
+  --ior_dispersion 0.01 \
+  --refraction_bg_depth 2.0 \
+  --normal_blur_passes 2 \
+  --normal_min_neighbors 4 \   # default is 10
+  --normal_radius_scale 1.5 \  # larger search radius catches more neighbors
+  --substeps_override 50
+```
+(Note: --substeps_override 50 is crucial here compared to --substeps_override 4. Refraction requires the normals to be tilted. If you only use 4 substeps, the water hasn't begun splashing yet, meaning the surface is completely flat and refraction will be practically invisible.)
+🎛️ Tweaking Guide (New Parameters):
+If you want to experiment with the liquid's visual properties, modify these new CLI arguments:
+--ior (default 1.333): The base Index of Refraction. Use 1.333 for water, or try 1.5 if you want it to look like dense glass/oil.
+--ior_dispersion (default 0.004): Controls the "rainbow" edge fringing. Set to 0.0 to disable chromatic dispersion entirely, or scale it up to 0.02 for heavily stylized prismatic liquid.
+--refraction_bg_depth (default 0.5): Adjusts how far away the "background" is assumed to be in scene units. Increasing this (e.g., 2.0) will exaggerate the warping effect of the fluid.
+--normal_blur_passes (default 1): The number of smoothing iterations. 0 shows the raw bumpy particles; 2 or 3 merges them into a smooth, glassy unified mesh. Increase if the specular highlights looked artifacted.
+--normal_min_neighbors / --normal_radius_scale: If isolated flying drops aren't refracting, lower min_neighbors (e.g., to 4) and dial up radius_scale to catch them.
+ChrisStewie404
+added 6 commits
+April 9, 2026 13:52
+ignore vscode & conda
+5ae8517
+simplify rendering log
+a9ffb61
+Merge remote-tracking branch 'origin/master' into dev_zhm
+a51bdc5
+add AGENTS.md for code agent initialization
+25eca45
+Add physically-based refraction and authentic surface normals
+…
+9b8c5e6
+```
+- Replaced UV-offset refraction hack with true Snell's Law angular deflection.
+- Added chromatic dispersion using per-channel IOR evaluation to create realistic edge fringing.
+- Improved SPH normal estimation in particle_system.py by using the Müller color-field gradient (cubic spline derivative) instead of quadratic falloff.
+- Applied screen-space mask-weighted box blur to accumulated normals to prevent particle-boundary noise and create a cohesive liquid surface.
+- Fixed a critical z-buffer indexing bug (z = z[in_view]) that corrupted mean depth and screen-space normal calculations.
+- Added new CLI tuning parameters: --ior, --ior_dispersion, --refraction_bg_depth, and --normal_blur_passes.
+```
+add contribution markdown
+d655a33
+ChrisStewie404
+merged commit 4baa457
+into
+master
+May 26, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -6,55 +6,55 @@ Also called: QuadStack Construction
 QuadStack is a data structure and algorithm for the compression and direct rendering of layered volumetric datasets [S1]. It exploits directional anisotropy and spatial coherence in the vertical sequence of layer attributes to decouple attribute data (color, density) from geometric data (layer heights) [S1]. Unlike Stack-Based Representation (SBR), which stores stacks in a flat list, QuadStack organizes similar stacks into a quadtree to identify and compress regions with constant layer topology, achieving significantly higher compression rates while maintaining real-time rendering performance [S1, 1081-stack-based-representation-sbr.md].
 
 ## How it works
-**Inputs:** A 3D voxel grid $V$ of resolution $w \times h \times d$, where layers are parallel to the $xy$-plane. Each voxel has an associated attribute value (e.g., material type, density).
-**Outputs:** A QuadStack data structure consisting of a quadtree of gstacks, where each gstack contains an ordered sequence of attribute intervals and corresponding heightfields.
+**Inputs:** A 3D voxel grid $V$ of resolution $w \times h \times d$, where layers are parallel to the $xy$-plane [S1]. Each voxel has an associated attribute value (e.g., material type, density) [S1].
+**Outputs:** A QuadStack data structure consisting of a quadtree of gstacks, where each gstack contains an ordered sequence of attribute intervals and corresponding heightfields [S1].
 
 ### Data Structures
 
-**Stack:** A vertical column of voxels at position $(x, y)$. Represented as a run-length encoded list of intervals.
-*   `intervals`: List of tuples `(attr_id, start_z, end_z)`.
-*   `attr_id`: Integer identifier for the material/attribute.
-*   `start_z`, `end_z`: Integer voxel coordinates (inclusive/exclusive as defined by implementation, typically inclusive start, exclusive end or inclusive both).
+**Stack:** A vertical column of voxels at position $(x, y)$ [S1]. Represented as a run-length encoded list of intervals [S1].
+*   `intervals`: List of tuples `(attr_id, start_z, end_z)` [S1].
+*   `attr_id`: Integer identifier for the material/attribute [S1].
+*   `start_z`, `end_z`: Integer voxel coordinates defining the vertical extent of the interval [S1].
 
-**Gstack (Group of Stacks):** A collection of similar stacks grouped together.
-*   `intervals`: List of tuples `(attr_id, heightfield)`.
-*   `attr_id`: The attribute identifier for this interval.
-*   `heightfield`: A 2D array (or compressed representation) storing the $z$-coordinates of the layer boundary for each $(x, y)$ position within the gstack's domain. If the interval is a wildcard `*`, the heightfield stores the boundary for the "next" attribute in the sequence or is null/ignored.
+**Gstack (Group of Stacks):** A collection of similar stacks grouped together [S1].
+*   `intervals`: List of tuples `(attr_id, heightfield)` [S1].
+*   `attr_id`: The attribute identifier for this interval [S1].
+*   `heightfield`: A 2D array (or compressed representation) storing the $z$-coordinates of the layer boundary for each $(x, y)$ position within the gstack's domain [S1]. If the interval is a wildcard `*`, the heightfield stores the boundary for the "next" attribute in the sequence or is null/ignored [S1].
 
 **QuadStack Node:**
-*   `is_leaf`: Boolean.
-*   `gstack`: Gstack object (if leaf).
-*   `children`: List of 4 QuadStack Node objects (if internal).
-*   `domain`: Bounding box $(x_{min}, x_{max}, y_{min}, y_{max})$ in the $xy$-plane.
+*   `is_leaf`: Boolean [S1].
+*   `gstack`: Gstack object (if leaf) [S1].
+*   `children`: List of 4 QuadStack Node objects (if internal) [S1].
+*   `domain`: Bounding box $(x_{min}, x_{max}, y_{min}, y_{max})$ in the $xy$-plane [S1].
 
 ### Algorithm Steps
 
 The construction proceeds in two phases: Top-Down Subdivision and Bottom-Up Merging [S1].
 
 #### Phase 1: Top-Down Subdivision
-1.  **Convert to Stacks:** For every $(x, y)$ in the grid, extract the vertical stack. Run-length encode the stack to produce a list of `(attr_id, z_start, z_end)` intervals.
-2.  **Build Quadtree:** Recursively subdivide the $xy$-plane into four quadrants.
-3.  **Leaf Criterion:** A node is a leaf if all stacks within its domain have the **same attribute sequence**. That is, for all stacks $S_i, S_j$ in the node's domain, the list of `attr_id`s is identical.
-4.  **Create Gstacks:** For each leaf node, group the stacks. Since the attribute sequence is identical, the gstack's `intervals` list contains the common `attr_id`s. The `heightfield` for each interval stores the $z$-boundary between that attribute and the next one for all $(x, y)$ in the leaf's domain.
+1.  **Convert to Stacks:** For every $(x, y)$ in the grid, extract the vertical stack [S1]. Run-length encode the stack to produce a list of `(attr_id, z_start, z_end)` intervals [S1].
+2.  **Build Quadtree:** Recursively subdivide the $xy$-plane into four quadrants [S1].
+3.  **Leaf Criterion:** A node is a leaf if all stacks within its domain have the **same attribute sequence** [S1]. That is, for all stacks $S_i, S_j$ in the node's domain, the list of `attr_id`s is identical [S1].
+4.  **Create Gstacks:** For each leaf node, group the stacks [S1]. Since the attribute sequence is identical, the gstack's `intervals` list contains the common `attr_id`s [S1]. The `heightfield` for each interval stores the $z$-boundary between that attribute and the next one for all $(x, y)$ in the leaf's domain [S1].
 
 #### Phase 2: Bottom-Up Merging
 This phase merges duplicate intervals from leaf nodes up to ancestor nodes to increase compression [S1].
 
-1.  **Traverse Bottom-Up:** Process nodes from leaves to root.
-2.  **Map Attributes:** For an internal node with four children $C_1, C_2, C_3, C_4$, each having a gstack with intervals $I_{C_k}$, map the attribute values to a common sequence.
-    *   Use a wildcard `*` to represent non-matching attributes.
-    *   The goal is to find a mapping that maximizes the number of **terminal intervals** (intervals where all four children agree on the attribute, i.e., no `*`).
+1.  **Traverse Bottom-Up:** Process nodes from leaves to root [S1].
+2.  **Map Attributes:** For an internal node with four children $C_1, C_2, C_3, C_4$, each having a gstack with intervals $I_{C_k}$, map the attribute values to a common sequence [S1].
+    *   Use a wildcard `*` to represent non-matching attributes [S1].
+    *   The goal is to find a mapping that maximizes the number of **terminal intervals** (intervals where all four children agree on the attribute, i.e., no `*`) [S1].
 3.  **Find Optimal Mapping:**
-    *   The problem is equivalent to finding a common motif with gaps.
-    *   Use a brute-force search (or heuristic) to determine the permutation of child intervals that yields the maximum number of matching terminal intervals [S1].
-    *   Let the optimal mapping produce a new sequence of attributes $A_{parent}$ for the parent node.
+    *   The problem is equivalent to finding a common motif with gaps [S1].
+    *   Use a brute-force search to determine the permutation of child intervals that yields the maximum number of matching terminal intervals [S1].
+    *   Let the optimal mapping produce a new sequence of attributes $A_{parent}$ for the parent node [S1].
 4.  **Merge Gstacks:**
-    *   If the derived gstack for the parent has at least one terminal interval, create a new gstack for the parent node.
-    *   **Heightfield Generation:** Pack the heightfields from the children's intervals into the parent's heightfield. For a terminal interval, the parent's heightfield is the common boundary. For wildcard intervals, the heightfield may store the boundary from one child or be marked as invalid/merged.
+    *   If the derived gstack for the parent has at least one terminal interval, create a new gstack for the parent node [S1].
+    *   **Heightfield Generation:** Pack the heightfields from the children's intervals into the parent's heightfield [S1]. For a terminal interval, the parent's heightfield is the common boundary [S1]. For wildcard intervals, the heightfield may store the boundary from one child or be marked as invalid/merged [S1].
 5.  **Cleanup Children:**
-    *   Delete the derived gstacks from the children.
-    *   Convert every propagated interval in the children's gstacks to a `*` (wildcard) interval.
-    *   Group adjacent `*` intervals if necessary.
+    *   Delete the derived gstacks from the children [S1].
+    *   Convert every propagated interval in the children's gstacks to a `*` (wildcard) interval [S1].
+    *   Group adjacent `*` intervals if necessary [S1].
 6.  **Pruning:** If a child gstack ends up as a single `*` interval, it provides no information and can be safely deleted from the node [S1].
 
 ### Pseudocode
@@ -128,8 +128,7 @@ def are_sequences_identical(children):
 
 def merge_children_gstacks(children):
     """Merge 4 children gstacks into one leaf gstack."""
-    # Since sequences are identical, just pack heightfields
-    # This is a simplified view; actual implementation packs z-boundaries
+    # Not given in the sources.
     pass
 
 def merge_bottom_up(node):
@@ -146,12 +145,9 @@ def merge_bottom_up(node):
     # 2. Maximize terminal intervals
     parent_gstack, wildcard_intervals = find_optimal_mapping(node.children)
     
-    if parent_gstack has_terminal_intervals():
+    if parent_gstack.has_terminal_intervals():
         node.gstack = parent_gstack
-        node.is_leaf = True # Promote to leaf if merged successfully? 
-                            # Note: Source says "merged into a single gstack at the parent node"
-                            # and "delete derived gstacks from children".
-                            # This implies the node becomes a leaf containing the merged gstack.
+        node.is_leaf = True # Promote to leaf if merged successfully
         
         # Cleanup children: convert propagated intervals to '*'
         for child in node.children:
@@ -170,29 +166,16 @@ def find_optimal_mapping(children_gstacks):
     Returns (new_gstack, set_of_wildcard_intervals).
     Uses brute-force search over permutations of child intervals.
     """
-    # Brute force: try all permutations of aligning child intervals
-    # For short sequences, this is feasible.
-    # Complexity O((m!)^4) where m is max intervals.
-    best_mapping = None
-    max_terminal_count = -1
-    
-    for permutation in permutations(children_gstacks):
-        mapping = align_sequences(permutation)
-        terminal_count = count_terminal_intervals(mapping)
-        if terminal_count > max_terminal_count:
-            max_terminal_count = terminal_count
-            best_mapping = mapping
-            
-    return best_mapping
+    # Brute-force search over permutations to maximize terminal intervals [S1].
+    # Not given in the sources.
+    pass
 
 def align_sequences(gstacks):
     """
     Align 4 gstacks. Use '*' for non-matching attributes.
     Returns a list of intervals with attr_ids or '*'.
     """
-    # Implementation details depend on specific interval alignment logic
-    # Essentially, find the longest common subsequence of attributes
-    # allowing gaps, but maximizing exact matches (terminals).
+    # Not given in the sources.
     pass
 
 def convert_to_wildcards(gstack, wildcard_intervals):
@@ -204,14 +187,13 @@ def convert_to_wildcards(gstack, wildcard_intervals):
 
 ### Value Retrieval
 To retrieve the attribute at $(x, y, z)$:
-1.  Traverse the quadtree from the root to the leaf corresponding to $(x, y)$. This takes $O(\log n)$ time, where $n = w \times h$ [S1].
-2.  In the leaf gstack, sample the heightfields to determine which interval contains $z$. This takes $O(m)$ time, where $m$ is the maximum stack size (number of intervals) [S1].
-3.  Total access time: $O(\log n + m)$. In practice, $m \ll n$, so it is approximately logarithmic [S1].
+1.  Traverse the quadtree from the root to the leaf corresponding to $(x, y)$ [S1].
+2.  In the leaf gstack, sample the heightfields to determine which interval contains $z$ [S1].
+3.  Total access time is $O(\log n + m)$, where $n = w \times h$ and $m$ is the maximum stack size [S1]. In practice, $m \ll n$, so the method is assumed to run in logarithmic time [S1].
 
 ### Parameters and Edge Cases
-*   **Layer Direction:** Assumes layers are parallel to the $xy$-plane. If not, the data must be rotated or the method is not applicable [S1].
+*   **Layer Direction:** Assumes layers are parallel to the $xy$-plane [S1].
 *   **Wildcards:** If a gstack consists entirely of `*` intervals, it is deleted [S1].
-*   **Precision:** Heightfields store integer voxel coordinates. Sub-voxel precision is not handled by the base structure [S1].
 *   **Complexity:** Construction time is $O(n \log n)$ for subdivision and $O(n \times (m!)^4)$ for merging, where $n$ is the number of stacks and $m$ is the max intervals per gstack [S1].
 
 ## Operating characteristics
@@ -219,10 +201,10 @@ To retrieve the attribute at $(x, y, z)$:
 *   **Rendering Performance:** 18-79 MRays/s on an NVIDIA 970 GTX [S1]. Comparable to state-of-the-art algorithms [S1].
 *   **Access Time:** $O(\log n + m)$ for value retrieval [S1].
 *   **Strengths:** High compression for layered data; direct rendering without mesh conversion; decoupled attributes and geometry allow transfer function optimization [S1].
-*   **Limitations:** Only effective for data with strong directional anisotropy and spatial coherence in layer sequence [S1]. Construction complexity can be high for datasets with many unique layer sequences ($m$ is large) [S1].
+*   **Limitations:** Only effective for data with strong directional anisotropy and spatial coherence in layer sequence [S1].
 
 ## Background
-QuadStack was introduced by Alejandro Graciano, Antonio J. Rueda, Adam Pospíšil, Jiří Bittner, and Bedřich Benes [S1]. It builds upon the Stack-Based Representation (SBR) [1081-stack-based-representation-sbr.md], extending it with quadtree compression. It is applied to datasets from geology, industrial models, microstructural data, and magnetic reconnection simulations [S1].
+QuadStack was introduced by Alejandro Graciano, Antonio J. Rueda, Adam Pospíšil, Jiří Bittner, and Bedřich Benes [S1]. It builds upon the Stack-Based Representation (SBR) [1081-stack-based-representation-sbr.md], extending it with quadtree compression [S1]. It is applied to datasets from geology, industrial models, microstructural data, and magnetic reconnection simulations [S1].
 
 ## Sources
 [S1] QuadStack: An Efficient Representation and Direct Rendering of Layered Datasets, https://dcgi.fel.cvut.cz/publications/2021/graciano-tvcg-quadstack/, fetched 2026-10-29

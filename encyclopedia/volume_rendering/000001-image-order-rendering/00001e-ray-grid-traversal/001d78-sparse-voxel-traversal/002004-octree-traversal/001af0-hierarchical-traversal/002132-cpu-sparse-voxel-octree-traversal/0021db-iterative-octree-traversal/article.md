@@ -3,12 +3,12 @@
 Also called: Octree Ray Tracing (Software), Octree Traversal Algorithm, OctreeSWRaytracer, SVO-workbench raycaster, stack-based traversal
 
 ## Overview
-Iterative Octree Traversal is a CPU-based ray traversal algorithm for Sparse Voxel Octrees (SVO) that uses a fixed-size stack to manage traversal state, handling valid internal nodes, leaf nodes, and empty space by casting rays to the next occupied voxel [S2, unofficial]. It sets itself apart from recursive variants by avoiding function call overhead and from parametric methods by using explicit slab boundary calculations with fixed-point arithmetic for integer-based coordinate updates [S1][S2, unofficial].
+Iterative Octree Traversal is a CPU-based ray traversal algorithm for Sparse Voxel Octrees (SVO) that uses a fixed-size stack to manage traversal state, handling valid internal nodes, leaf nodes, and empty space by casting rays to the next occupied voxel [S2, unofficial]. It employs a two-phase approach: a register-based DDA with bit-masked coordinate tracking for upper octree levels, and a slab-boundary-based stack traversal for deeper nodes [S1][S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Ray origin $(o_x, o_y, o_z)$, direction $(d_x, d_y, d_z)$, octree root address, octree bounds $(min_x, min_y, min_z)$ to $(max_x, max_y, max_z)$.
-- Output: Sequence of visited nodes (internal and leaf) for shading or density integration.
+- Input: Ray origin $(o_x, o_y, o_z)$, direction $(d_x, d_y, d_z)$, octree root address, octree bounds $(min_x, min_y, min_z)$ to $(max_x, max_y, max_z)$ [S2].
+- Output: Sequence of visited nodes (internal and leaf) for shading or density integration [S1].
 
 **Data Structures:**
 - **Cell**: A fixed-sized block representing an octant, implemented as a simple array of eight elements. Each element contains a pointer to a descendent cell or a null pointer if the sub-octant is empty [S1].
@@ -75,7 +75,7 @@ Iterative Octree Traversal is a CPU-based ray traversal algorithm for Sparse Vox
            - Execute second step [S1].
      - Execute 3D DDA [S1].
 
-3. **Second Step (procSubtree2)**:
+3. **Second Step (`procSubtree2`)**:
    - Compute child slab boundaries by selecting either the current slab boundary or the midpoint based on the child index bits, then flip indices using `dir_mask` [S2, unofficial].
    - Calculate child entry and exit slab distances, then cull the child if its exit distance is less than or equal to the current traversal start distance (`t_start`) [S2, unofficial].
    - If the child is valid and not culled:
@@ -97,27 +97,16 @@ Iterative Octree Traversal is a CPU-based ray traversal algorithm for Sparse Vox
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def iterative_octree_traversal(ray_origin, ray_direction, octree_root, octree_bounds):
-    # Handle zero and negative direction components
+def iterative_octree_traversal(ray_origin, ray_direction, octree_root, octree_bounds, levels_first_step=3):
     dir_mask = 0
-    if ray_direction.x == 0:
-        ray_direction.x = 0.001
-    if ray_direction.x < 0:
-        ray_origin.x = -ray_origin.x
-        ray_direction.x = -ray_direction.x
-        dir_mask |= 4
-    if ray_direction.y == 0:
-        ray_direction.y = 0.001
-    if ray_direction.y < 0:
-        ray_origin.y = -ray_origin.y
-        ray_direction.y = -ray_direction.y
-        dir_mask |= 2
-    if ray_direction.z == 0:
-        ray_direction.z = 0.001
-    if ray_direction.z < 0:
-        ray_origin.z = -ray_origin.z
-        ray_direction.z = -ray_direction.z
-        dir_mask |= 1
+    # Handle zero and negative direction components
+    for axis, mask_bit in [('x', 4), ('y', 2), ('z', 1)]:
+        if ray_direction[axis] == 0:
+            ray_direction[axis] = 0.001
+        if ray_direction[axis] < 0:
+            ray_origin[axis] = -ray_origin[axis]
+            ray_direction[axis] = -ray_direction[axis]
+            dir_mask |= mask_bit
 
     # Compute slab boundaries
     min_x, min_y, min_z = octree_bounds[0]
@@ -130,41 +119,82 @@ def iterative_octree_traversal(ray_origin, ray_direction, octree_root, octree_bo
     tz1 = (max_z - ray_origin.z) / ray_direction.z
 
     tnum_scale = 10000
-    tx0 *= tnum_scale
-    tx1 *= tnum_scale
-    ty0 *= tnum_scale
-    ty1 *= tnum_scale
-    tz0 *= tnum_scale
-    tz1 *= tnum_scale
+    tx0, tx1 = int(tx0 * tnum_scale), int(tx1 * tnum_scale)
+    ty0, ty1 = int(ty0 * tnum_scale), int(ty1 * tnum_scale)
+    tz0, tz1 = int(tz0 * tnum_scale), int(tz1 * tnum_scale)
 
-    # Initialize stack and state
-    stack = []
-    stack.append({
-        'tx0': tx0, 'ty0': ty0, 'tz0': tz0,
-        'tx1': tx1, 'ty1': ty1, 'tz1': tz1,
-        'adr': octree_root,
-        'idx': 0
-    })
-    
-    # XYZ and mask initialization for first step
-    # Assuming 3 levels for first step for example
-    levels_first_step = 3
+    # Initialize XYZ and mask for first step
     xyz = 0
     mask = 0
     for i in range(levels_first_step):
         mask |= (1 << (i * 3 + 2)) | (1 << (i * 3 + 1)) | (1 << (i * 3 + 0))
-    mask = mask << 1 # end condition
+    end_condition = mask << 1
     xyz_ant = xyz
 
-    while len(stack) > 0:
-        current = stack.pop()
-        # Process current node
-        # ... (Node processing logic)
-        
-        # Descend logic simplified
-        # Calculate octant index i from XYZ
-        # If child exists and not culled, push to stack
-        pass
+    stack = [{'tx0': tx0, 'ty0': ty0, 'tz0': tz0, 'tx1': tx1, 'ty1': ty1, 'tz1': tz1, 'adr': octree_root, 'idx': 0}]
+    m_child_num = 0
+    m_morton_code = 0
+    m_finished = False
+    t_start = 0.0
+
+    while not m_finished and stack:
+        # First step DDA loop
+        while (xyz & end_condition) == 0:
+            xyz_ant = xyz_ant ^ xyz
+            mask = mask << 1
+            # Ascend octree
+            while (xyz_ant & mask) != 0:
+                stack.pop()
+                mask = mask >> 1
+            # Descend octree
+            mask = mask >> 1
+            cell = stack.pop()
+            # Separate X, Y, Z from xyz (conceptual)
+            bool_flag = True
+            while bool_flag:
+                stack.append(cell)
+                i = ((cell['z'] & mask) >> 2) + ((cell['y'] & mask) >> 1) + ((cell['x'] & mask) >> 0)
+                if (mask & 1) == 0:  # Not last level
+                    if cell['children'][i] != 0:
+                        mask = mask >> 1
+                        cell = cell['children'][i]
+                    else:
+                        bool_flag = False
+                else:
+                    bool_flag = False
+                if cell['children'][i] != 0 and (mask & 1) == 0:
+                    # Initialize second step
+                    pass
+            # Execute 3D DDA
+            pass
+
+        # Second step / procSubtree2 logic
+        if m_child_num >= 8:
+            stack.pop()
+            if not stack:
+                m_finished = True
+            else:
+                m_child_num += 1
+                continue
+
+        current = stack[-1]
+        node = octree_read(current['adr'] + m_child_num)
+        if node is None or node.is_leaf or reached_stop_level:
+            m_child_num += 1
+            continue
+
+        # Internal node
+        stack.append(current)
+        current['adr'] = node.val
+        m_child_num = 0
+        m_morton_code = (m_morton_code << 3) | m_child_num
+
+        # Compute child slab boundaries
+        # Select current slab boundary or midpoint based on child index bits
+        # Flip indices using dir_mask
+        # Calculate child entry/exit distances
+        # Cull if exit <= t_start
+        # Push valid/culled child to stack, update t_start
 ```
 
 ## Subtopics
@@ -183,7 +213,6 @@ A port of the 'Efficient Sparse Voxel Octrees' algorithm, specifically excluding
 - **Strengths**: Small node size (4 bytes) and localized memory access due to z-curve layout [S4, unofficial].
 - **Limitations**: Underwhelming performance due to many extra iterations for ascension/descension and DDA advancement [S4, unofficial].
 - **When to use**: When memory bandwidth is low and node size is critical [S4, unofficial].
-- **When not to use**: When high throughput is required and memory bandwidth is not a bottleneck [S4, unofficial].
 
 ## Background
 The method is based on the work of [S1] Discrete Ray-Tracing of Huge Voxel Spaces, which presents an octree traversal algorithm for huge voxel spaces. The implementation details are also found in [S2, unofficial] skyfex/svo-workbench, [S3, unofficial] loryruta/voxelizer, and [S4, unofficial] dubiousconst282/VoxelRT.

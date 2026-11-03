@@ -1,0 +1,1303 @@
+To appear in IEEE Transactions on Visualization and Computer Graphics.
+AtlasLC: Fast Codec-Ready Compression of Object-Centric 3D
+Gaussian Splatting
+arXiv:2607.26525v1 [cs.GR] 29 Jul 2026
+ByungHyun Kim
+, Jinwoo Jeon
+, and Woontack Woo
+Figure 1: Pipeline of AtlasLC for object-centric 3DGS compression. AtlasLC first builds a single-pass sort-based conditional
+coordinate system over the input Gaussians, then applies local-competition pruning within coarse coordinate cells to remove locally
+redundant splats while preserving object-wide foreground support (a – d). The retained Gaussians are finally deterministically packed
+into a codec-friendly atlas for standard image/video compression (e – g). The resulting pipeline is training-free, lightweight, and designed
+for deployable XR object assets, balancing compactness, fast preparation, decoding efficiency, and geometry preservation.
+Abstract— 3D Gaussian Splatting (3DGS) enables photorealistic novel-view synthesis with real-time rendering, but deploying
+compressed object-centric 3DGS in XR requires more than image-space rate–distortion. In practical XR asset pipelines, reusable
+objects are repeatedly packaged, transmitted, decoded, and instantiated, making asset-preparation cost, codec compatibility, decoding
+latency, and preservation of depth and silhouette cues first-class concerns. Existing 3DGS compression methods are largely developed
+for scene-scale captures and often rely on heavy layout generation or aggressive global pruning, assumptions that transfer poorly to
+semantically concentrated foreground objects. We present AtlasLC, a source-free, training-free compression pipeline for object-centric
+3DGS that operates directly on released Gaussian assets, without original images, camera poses, or per-asset optimization. AtlasLC
+couples local-competition pruning with deterministic atlas packing to remove the mapping/remapping bottleneck while preserving
+object-wide foreground support; a lightweight single-pass sort-based conditional transport is used as a shared coordinate backbone
+for these stages. Across the evaluated assets, AtlasLC reduces atlas-preparation time by up to 25× and end-to-end compression
+time by up to 5×, while offering a favorable deployment-aware balance of payload, decode latency, runtime FPS, and 3D geometry
+relative to the evaluated compressed baselines. Relative to similarly compact structured baselines, it uses about 6–8% fewer bits
+while maintaining comparable perceptual and geometric quality. These results show that object-centric 3DGS compression should be
+optimized for a deployment-aware operating point enabling scalable XR asset libraries.
+Index Terms—3D Gaussian splatting, 3D data compression, extended reality, real-time rendering
+1
+I NTRODUCTION
+3D Gaussian Splatting (3DGS) has rapidly emerged as a strong representation for photorealistic novel-view synthesis, combining high
+visual fidelity with real-time rendering [21]. As 3DGS moves from
+reconstruction benchmarks toward deployable XR and mobile content,
+however, the bottlenecks shift from rendering quality alone to end-toend deployability [10, 12, 29]. In practical XR systems, especially on
+untethered head-mounted and low-power mobile devices, immersive
+content is increasingly fetched from a server or edge system and rendered under tight wireless throughput, latency, reliability, and power
+• ByungHyun Kim is with KAIST UVR Lab. E-mail: kimbh00@kaist.ac.kr.
+• Jinwoo Jeon is with KAIST KI-ITC ARRC. E-mail: zkrkwlek@kaist.ac.kr.
+• Woontack Woo is with KAIST UVR Lab. E-mail: wwoo@kaist.ac.kr.
+© 2026 IEEE. Personal use of this material is permitted. Permission from IEEE
+must be obtained for all other uses, in any current or future media, including
+reprinting/republishing this material for advertising or promotional purposes,
+creating new collective works, for resale or redistribution to servers or lists, or
+reuse of any copyrighted component of this work in other works.
+1
+constraints [1, 14, 36]. This pressure is already well recognized for
+volumetric 6DoF media and, more recently, for 3DGS itself, where
+scene delivery and adaptive streaming have become explicit research
+problems [34, 44, 48]. Compression therefore matters not only for
+storage and transmission, but also for startup delay, decoding latency,
+and whether an asset can be fetched and rendered quickly enough for
+interactive XR use [10, 14, 29, 48].
+In many XR pipelines, the deployable unit is not a full captured scene
+but a reusable object asset: for example, a product preview, tool, or
+furniture item loaded on demand in a mixed-reality experience [8]. This
+shift is reflected in internet-scale object repositories [6], object-centric
+3D benchmarks [32], digital-twin catalogs [9], and generative asset
+pipelines [57]. In such settings, assets are repeatedly packaged, compressed, transmitted, decoded, cached, updated, and redeployed across
+authoring and runtime stages [13, 48]. For object libraries, compression
+is therefore not merely a final archival step. The turnaround of asset preparation itself —including preprocessing, packaging, encoding,
+and decoding—directly affects how quickly assets can be published,
+refreshed, and redeployed across heterogeneous XR systems.
+We focus on a source-free, post-hoc setting where compression operates on a released 3DGS asset only, without original images, camera
+poses, or per-asset fine-tuning. This framing aligns with recent post-hoc
+3DGS compression settings that operate on trained Gaussian assets
+rather than on the original capture data [2,47,54]. Recent source-free or
+optimization-free methods such as MesonGS, FlexGaussian, and FCGS
+further suggest that compression-time cost itself is a practical concern,
+not just the final bitrate [4,47,54]. In the XR object-asset regime, preprocessing cost, codec compatibility, decoding latency, and stable repeated
+deployment matter alongside rate–distortion [4, 10, 12, 29, 47, 54].
+For such assets, preserving geometry-related cues is also essential.
+Geometry-aware Gaussian variants already show that depth fidelity
+and surface consistency matter beyond appearance alone [16, 20, 59].
+In AR/MR and XR, reliable depth ordering supports occlusion [38,
+49]; stable silhouettes and boundaries matter for alignment, selection,
+and interaction [8, 19, 31, 46]; and depth-faithful geometry proxies
+are useful for collision handling, editing, physics, and simulationoriented workflows [15, 16, 30, 35, 37]. A method that reduces bytes by
+destabilizing silhouettes or depth is therefore less useful for deployment
+than one that preserves these cues under a similar bitrate.
+Most prior 3DGS compression methods were developed under
+scene-centric assumptions and are commonly evaluated through scenelevel rate–distortion [2, 56]. Existing approaches either impose
+structure on unordered Gaussians for codec compatibility or reduce storage through pruning, quantization, and learned compaction
+[3–5, 11, 24, 27, 28, 39–43, 47, 52, 54, 55]. For object-centric assets,
+however, two mismatches matter: layout generation can dominate
+asset-preparation cost, and removable redundancy is often local rather
+than globally disposable. Because much of the Gaussian budget lies
+near the visible object surface, aggressive global pruning can damage
+silhouettes and depth support even when bitrate is reduced. These
+observations suggest that object-centric 3DGS compression should
+be treated as a distinct XR deployment problem. The goal is to
+reduce bytes under an asset-only, training-free constraint while also
+minimizing asset-preparation and total compression pipeline time
+and preserving the foreground support needed for silhouettes, depth,
+and interaction [4, 16, 17, 20, 35, 37, 47, 54, 59]. This favors methods that are training-free, fast to prepare, HMD codec-compatible,
+deterministic across runs, and conservative about local foreground
+support [4, 18, 24, 28, 47, 54, 60]. To address this need, we present
+AtlasLC, a training-free compression pipeline for object-centric 3D
+Gaussian Splatting that operates directly on a released 3DGS asset,
+without original captures, camera metadata, fine-tuning, or per-asset
+learned adaptation. AtlasLC is centered on two deployment-critical
+operations: local-competition pruning, which removes redundancy
+within coarse neighborhoods while preserving object-wide support, and
+deterministic atlas packing, which converts the retained Gaussians
+into a stable, collision-free, codec-friendly representation for standard
+image/video codecs. A lightweight single-pass sort-based conditional
+transport is used only as a shared coordinate backbone for these two
+(a) Payload–PSNR.
+(b) Payload–total time.
+(c) Payload–3D F1 precision.
+(d) Payload–3D F1 recall.
+Figure 2: Rate-dependent fidelity, geometry components, and deployment cost. We sweep HEVC QP {1, 4, 8, 12, 16, 20} for AtlasLC,
+PLAS, LGSCV, and UVGS, and use the native rate ladder for FlexGaussian. Payload–PSNR shows the image-space fidelity trade-off, 3D
+precision and recall decompose geometry preservation, and payload–
+total time summarizes end-to-end deployment cost. Within the common
+AtlasLC/PLAS/LGSCV payload range, AtlasLC trades a small PSNR
+decrease for higher precision and recall while maintaining substantially
+lower total pipeline time. The timing curve is a deployment diagnostic
+rather than a strict monotonic rate–distortion envelope because measured runtime can vary across codec operating points.
+stages, avoiding iterative transport optimization and any additional
+remapping stage.
+As shown in Fig. 2, AtlasLC exhibits a favorable rate-dependent
+trade-off on Objaverse. Over the common AtlasLC/PLAS/LGSCV
+payload range, it incurs a small PSNR decrease while improving both
+3D precision and recall, showing that the geometry gain is supported
+by both accurate retained support and improved surface coverage. The
+total-time curve further shows that AtlasLC maintains a substantially
+lower end-to-end deployment cost across the evaluated operating points.
+Complementary stage-wise results in Sec. 4 show that AtlasLC reduces
+atlas-preparation time from roughly 900–1700 ms for prior atlas-based
+pipelines to about 68 ms, yielding up to 25× faster atlas preparation and
+3–5× faster end-to-end compression. Together, these results support
+deployment-aware object-centric 3DGS compression, where compactness, preparation cost, decoding efficiency, and geometry preservation
+are considered jointly.
+Our contributions are threefold:
+• We identify object-centric, asset-only 3DGS compression as a
+distinct deployment setting in which mapping cost, decoding
+efficiency, and geometry preservation matter alongside bitrate.
+• We propose AtlasLC, which combines local-competition pruning with deterministic atlas packing over a lightweight shared
+ordering backbone, eliminating post-pruning remapping.
+• We evaluate compression under deployment-aware criteria spanning payload, total pipeline time, runtime efficiency, image fidelity, and geometry, showing that AtlasLC provides a favorable
+trade-off among the evaluated compressed baselines.
+2
+2.1
+R ELATED W ORK
+Post-Hoc 3DGS Compression and Compaction
+Since the introduction of 3D Gaussian Splatting (3DGS) for real-time
+radiance-field rendering [21], a large body of work has studied how to
+reduce its storage and runtime cost. Recent surveys organize this space
+2
+To appear in IEEE Transactions on Visualization and Computer Graphics.
+Table 1: Baseline assumptions relative to AtlasLC. ✓: native support;
+△: partial or adapted support; ✗: not native; –: not applicable because
+the method does not construct an atlas/UV map. “Src.” denotes strict
+source-free compression without images, poses, rendered validation
+views, or per-object quality feedback. PUP is included because it is used
+only in the prune-only diagnostic.
+around pruning and compaction, quantization and entropy coding, and
+structured parameterization for codec compatibility [2, 56]. Representative scene-scale compaction methods span pruning, vector quantization,
+entropy/context modeling, predictive coding, and rate–distortion optimization [3, 5, 11, 18, 33, 40, 42, 50, 52, 60]. These methods demonstrate
+substantial bitrate reduction, but are primarily motivated by scene-scale
+storage reduction or rendering-oriented compaction.
+A more deployment-relevant direction considers post-hoc compression that operates on a trained Gaussian asset without the original capture workspace. MesonGS studies post-training compression through
+attribute transformation [54], FlexGaussian emphasizes training-free
+compression [47], and FCGS highlights fast compression-time behavior [4]. For reusable XR assets, this distinction is central: compression
+is often performed after asset release by a packaging or deployment
+stage without original images, camera poses, or scene-specific optimization. We build on this source-free, post-hoc viewpoint, but target
+a different bottleneck from most prior compaction methods: quickly
+turning an unordered object-centric Gaussian asset into a codec-ready
+representation for repeated deployment.
+Method
+Obj. Src. No train Std. codec Atlas/UV No opt./remap
+PLAS/SOG [39]
+LGSCV [55]
+UVGS [43]
+FlexGaussian [47]
+PUP [18]
+✗
+✗
+✓
+✗
+✗
+△
+✓
+△
+✓
+✗
+△
+✓
+△
+✓
+✗
+✓
+✓
+△
+✗
+✗
+✓
+✓
+✓
+✗
+✗
+✗
+△
+△
+–
+–
+AtlasLC
+✓
+✓
+✓
+✓
+✓
+✓
+This operating regime changes how compression should be designed
+and evaluated. Compared with scene-scale captures, object-centric
+assets devote most of their Gaussian budget to a single foreground
+instance, so removable redundancy is often local rather than globally disposable. Scene-scale pruning methods such as LightGaussian, LP-3DGS, PUP, Fragment Pruning, and GoDe are effective for
+compaction [7, 11, 18, 58, 60], but object assets place more pressure
+on preserving silhouettes, thin structures, and depth-consistent support. Geometry-aware Gaussian representations such as 2DGS, SuGaR,
+Gaussian Frosting, GaussianUDF, MaGS, and ArtGS likewise show
+that depth fidelity and surface consistency matter beyond RGB reconstruction [15, 16, 20, 30, 35, 37].
+XR studies on occlusion, positioning, and interaction further motivate preserving these geometry cues [19, 31, 38, 46, 49]. We therefore
+evaluate object-centric 3DGS compression not only by payload and
+image fidelity, but also by total pipeline time, runtime efficiency, and
+geometry preservation. While structured object-centric methods such
+as UVGS point in this direction [43], the combination of source-free
+compression, low mapping cost, and deployment-aware evaluation
+remains underexplored.
+Table 1 positions the baselines used in our experiments. PLAS and
+LGSCV are structured standard-codec layout baselines, UVGS is an
+object-structured UV-domain baseline, FlexGaussian is a training-free
+parameter-compression baseline, and PUP is used only for the pruneonly diagnostic. AtlasLC targets the combined constraint of source-free,
+training-free, standard-codec-compatible atlas construction for reusable
+object-centric XR assets.
+2.2 Structured Layouts, Codec Compatibility, and Mapping
+Cost
+A complementary line of work imposes spatial structure on unordered
+Gaussians so that standard image or video codecs can exploit local correlation. Compressed 3D Gaussian Splatting showed that compressed
+splat representations can reduce bandwidth and rendering cost for accelerated novel-view synthesis [41]. More recent methods organize
+Gaussian attributes into 2D layouts or codec-friendly parameterizations:
+Self-Organizing Gaussian Grids use PLAS to arrange Gaussians into
+coherent grids [39]. UVGS maps unordered Gaussians to a regular
+UV domain using spherical projection [43], while OT-UVGS reframes
+UV assignment as a fixed-capacity allocation problem and applies a
+lightweight rank-based separable OT-inspired mapping to improve UVslot utilization and reduce collisions without changing the underlying
+UVGS representation [23]. CodecGS uses optimized feature planes
+for standard video codecs [28], LGSCV and VQ/HEVC-style pipelines
+pursue lighter map generation or hybrid coding [24, 55], and recent
+work studies global size allocation or hierarchical atlas optimization
+for rate–distortion improvement [51, 53].
+These methods show that codec-friendly layouts improve compactness and decoding practicality, but the layout stage itself can become a
+preprocessing bottleneck when it requires iterative self-organization,
+UV assignment, feature-plane optimization, mixed-integer size allocation, or extra remapping [28, 39, 43, 51, 53, 55]. This cost matters for
+object-centric XR asset pipelines, where many reusable objects must be
+packaged, refreshed, and redeployed repeatedly rather than amortized
+over a few offline scenes. AtlasLC is motivated by this gap: it keeps the
+practical advantage of codec-compatible atlases, but replaces heavier
+mapping/remapping with local-competition pruning and deterministic
+atlas packing over a lightweight shared ordering.
+3
+M ETHOD
+We present AtlasLC, a training-free compression pipeline for objectcentric 3D Gaussian Splatting. The method is designed for the deployment regime: reusable object assets must be compressed post hoc,
+without source data or per-asset optimization, and prepared quickly
+enough for repeated packaging and redeployment. AtlasLC therefore focuses on two deployment-critical operations: local-competition
+pruning, which removes redundancy while preserving object-wide foreground support, and deterministic atlas packing, which converts the
+retained Gaussians into a stable, codec-friendly representation with
+low mapping overhead. A lightweight sort-based conditional transport
+is used as a shared coordinate backbone for these stages; it is not an
+optimization-heavy mapping objective in itself.
+2.3 Object-Centric 3DGS Assets and Deployment-Aware
+Evaluation
+Beyond general 3DGS compression, radiance fields are increasingly
+treated as deployable XR content rather than only offline scene reconstructions [29]. This shift is reflected in large object repositories
+such as Objaverse [6], object-centric datasets and benchmarks such as
+DTC [9] and uCO3D [32], and generative asset pipelines for reusable
+3D content [57]. At the scene-composition level, recent spatial-MR
+authoring systems generate layout-consistent 3D scenes from RGB
+sequences through object-level semantic scene graphs, enabling virtual
+content to reflect user-specific physical environments [25]. At the systems level, scene delivery, adaptive streaming, XR traffic, and remote
+rendering have also become first-class concerns for volumetric and
+Gaussian content [1, 14, 34, 36, 44, 48]. In this setting, the practical
+unit is often a reusable object asset that must be prepared, transmitted,
+decoded, cached, and instantiated quickly across heterogeneous XR
+systems [8, 13].
+3.1
+Problem Setup
+Let
+G = {gi }N
+i=1
+denote an object-centric 3DGS model. Each Gaussian gi has a 3D center
+xi ∈ R3 , opacity αi ∈ R+ , and an attribute vector pi ∈ RC containing
+the parameters to be encoded, such as scale, rotation, color, and higherorder appearance coefficients.
+Our goal is to transform the unordered set G into a codec-compatible
+atlas of spatial resolution H ×W with K slots per pixel. We represent
+3
+Table 2: Prune-only comparison between PUP [18] and AtlasLC localcompetition pruning for pruning ratios from 30% to 90%. |∆G| denotes
+the absolute difference in kept-Gaussian counts between the two methods. Metric values are ∆(AtlasLC − PUP); positive favors AtlasLC for
+PSNR/SSIM/3D F1, and negative favors AtlasLC for LPIPS.
+the final discrete assignment by an index tensor
+M ∈ {0, 1, . . . , N}H×W ×K ,
+where M(r, c, k) = i indicates that slot k at pixel (r, c) stores Gaussian
+gi , and 0 denotes an empty token. The total atlas capacity is
+T = HW K.
+AtlasLC therefore seeks (i) a retained index set
+S ⊆ {1, . . . , N},
+and (ii) a deterministic, collision-free mapping from the retained indices
+in S into M, such that the resulting atlas is compact, codec-friendly, and
+conservative with respect to the foreground support needed for appearance, silhouettes, and stable depth. Under our deployment setting, the
+method should also keep asset-preparation cost low: the atlas should
+be constructed without iterative remapping, scene-specific learning, or
+expensive global assignment.
+Prune
+|∆G|
+∆PSNR↑
+∆SSIM↑
+∆LPIPS↓
+∆3D F1↑
+90%
+80%
+70%
+60%
+50%
+40%
+30%
+0
+0
+1
+1
+0
+0
+0
++0.498
++0.592
++0.434
++0.311
++0.298
++0.018
++0.015
++0.068
++0.061
++0.041
++0.015
++0.005
++0.001
++0.001
+-0.015
+-0.013
+-0.010
+-0.005
+-0.001
++0.001
++0.002
++0.053
++0.063
++0.024
++0.008
++0.010
++0.029
++0.041
+For a sorted one-dimensional sequence, we use the weighted mid-rank
+transform
+∑t w(ℓ) − 12 w(t)
+.
+F(x(t) ; w) = ℓ=1 n
+∑ℓ=1 w(ℓ)
+3.2 Overview
+AtlasLC consists of three stages:
+1. Lightweight shared ordering. We build a cheap sort-based
+conditional 2D ordering over the input Gaussians. Its role is to
+regularize the unordered set into a stable coordinate backbone
+that can be reused downstream.
+This step is used only to produce a stable shared ordering; it is not itself
+an optimization-heavy transport objective.
+3.4
+3.4.1
+2. Local-competition pruning. We quantize this ordering into
+coarse competition cells and prune within each cell using local
+quotas, so that redundancy is removed locally rather than by a
+single global top-k rule.
+Local-Competition Pruning
+Competition cells
+p
+p
+We quantize the shared ordering into a coarse pruning grid of Bx × By
+cells:
+
+
+ci = ⌊Bxp ui ⌋ , Byp vi .
+3. Deterministic atlas packing. The retained Gaussians are packed
+directly into the atlas using a stable, collision-free packing policy
+that preserves locality and avoids additional remapping.
+AtlasLC is faster than prior atlas-based pipelines because it replaces
+iterative layout construction, post-pruning remapping, and optimizationheavy refinement with a single shared ordering and direct deterministic
+packing. The ordering is computed once and reused by both pruning and
+packing, so atlas preparation does not require repeated self-organization
+or a second map-generation stage. At the same time, AtlasLC remains
+competitive in quality because the shared ordering still regularizes
+global density for codec efficiency, local-competition pruning removes
+redundancy only within coarse neighborhoods rather than globally
+eroding foreground support, and deterministic packing preserves local
+attribute smoothness that standard codecs can exploit.
+Each cell defines a local competition neighborhood. Gaussians assigned
+to the same cell are interpreted as likely competitors for nearby atlas
+support.
+This local view is especially important for object-centric assets.
+A global pruning rule tends to over-allocate budget to already dense
+regions and can erase thin structures or boundary support elsewhere
+on the object. By contrast, cell-wise competition removes redundancy
+inside neighborhoods while preserving support diversity across the
+object.
+3.4.2
+Input-adaptive budget and quota allocation
+For an asset a with Na input Gaussians, AtlasLC computes the keep
+ratio and target survivor count as
+
+
+
+
+M0
+βT
+, ρmin , ρmax ,
+,
+ρa = min clip
+Na
+Na
+ma = min (⌊ρa Na ⌉ , T ) .
+3.3 Lightweight Shared Ordering Backbone
+3.3.1 Base parameterization
+For each Gaussian gi , we first compute a deterministic base coordinate
+Here, M0 , ρmin , ρmax , and β are fixed globally for the codec-atlas
+configuration. The budget depends only on Na and the atlas capacity
+T = HW K; it uses no source images, camera poses, rendered views,
+PSNR, SSIM, LPIPS, 3D F1, depth, or per-object validation feedback.
+Thus, “adaptive” denotes input adaptation rather than per-object quality
+tuning.
+Let na,c denote the occupancy of competition cell c for asset a. Its
+ideal quota is
+q̂a,c = ρa na,c .
+u0i = (u0i , v0i ) ∈ [0, 1)2 .
+In all experiments, we use a deterministic spherical parameterization.
+The method only requires the initializer to be deterministic and inexpensive.
+3.3.2 Sort-based Conditional rank transform
+We convert the base coordinates into structured 2D coordinates
+ui = (ui , vi ) ∈ [0, 1)2
+We convert the ideal quotas into bounded integer quotas qa,c using
+largest-remainder apportionment, subject to
+using weighted rank transforms with weights
+wi = max(αi , ε)γ .
+0 ≤ qa,c ≤ na,c ,
+∑ qa,c ≈ ma .
+c
+After choosing a seam shift δ ⋆ that minimizes weighted mass near
+the wrap boundary, we apply a global weighted CDF along u and a
+conditional weighted CDF along v within coarse u-bins:
+
+
+
+
+ui = FU (u0i − δ ⋆ ) mod 1 ,
+vi = FV |U v0i | bin(ui ) .
+When feasible, one survivor is assigned to every non-empty cell so
+that isolated support is not removed entirely. This distributes survivor
+capacity across the object rather than allowing a single global ranking
+to absorb the budget into the densest regions.
+4
+To appear in IEEE Transactions on Visualization and Computer Graphics.
+Figure 3: Visualization of prune-only behavior on an object-centric 3DGS asset. Red points denote Gaussians pruned by PUP [18] (left), yellow
+points denote Gaussians pruned by AtlasLC local-competition pruning (right). PUP removes splats more diffusely across the object support, including
+points spread over visible surface regions. By contrast, AtlasLC removes Gaussians in more spatially concentrated local groups, indicating that it
+suppresses locally redundant splats while preserving broader surface coverage and geometry-critical support. This behavior is consistent with our
+local-competition design and helps explain why AtlasLC better preserves object surface structure and geometry under matched pruning budgets.
+3.4.3
+Local survivor selection
+3.5.2
+Let
+Within each cell, Gaussians are ranked by a lightweight value score si .
+In all experiments, we use the fixed opacity score si = αi , without perobject tuning or validation feedback. The retained set is then selected
+as
+
+
+[
+S = TopK {i | ci = c}, qa,c ; si .
+Sb = {i ∈ S | bi = b}
+be the set of retained Gaussians assigned to block b. AtlasLC uses two
+deterministic orders:
+• a slot order over the pixels and K slots within Rb , and
+c
+• a point order over the Gaussians in Sb .
+In all experiments, the slot order is raster scan and the point order is
+3D Morton order. These choices keep the packing stage cheap while
+preserving local attribute smoothness that standard codecs can exploit.
+Unlike heavier mapping pipelines, AtlasLC does not perform a
+second learned or optimization-based remapping after pruning. The
+retained Gaussians are placed directly according to these stable orders, which makes the atlas deterministic across runs and keeps map
+generation cost low.
+If rounding produces a slight budget mismatch, we resolve it globally
+by trimming or filling according to the same score si . Finally, we
+enforce the atlas-capacity constraint
+|S| ≤ T.
+This local-competition formulation is one of the two core components of AtlasLC. It does not ask which Gaussians are globally most
+salient in isolation; instead, it asks which Gaussians are most valuable
+relative to their local competitors. That bias is particularly appropriate
+for object assets, where many splats are locally redundant but globally
+important for preserving a semantically concentrated foreground object.
+3.5
+3.5.3 Overflow handling
+If a block is overfull, i.e., |Sb | > Cb , the excess Gaussians form an
+overflow set Ob . We concatenate all overflow sets into a global overflow
+set
+[
+O = Ob ,
+Deterministic Atlas Packing
+b
+After pruning, AtlasLC performs deterministic atlas packing over the
+retained coordinates
+and then place these remaining Gaussians into empty atlas slots in a
+deterministic global order.
+This two-stage procedure yields a collision-free mapping by construction. The shared ordering regularizes the retained distribution before placement, while deterministic packing resolves the discrete capacity constraints of the atlas with negligible additional overhead. Across
+the evaluated assets, 2.55% of the 16 × 16 packing bins were temporarily overfull before spill handling, and 1.95% of retained Gaussians
+were temporarily relocated. After deterministic global spill placement,
+the final collision, dropped-retained-Gaussian, and unplaced-retainedGaussian counts were all zero. Temporary overflow is therefore a local
+placement event rather than retained-Gaussian loss. The final output is
+an index map M together with the gathered payload atlas, which can be
+quantized and encoded directly with a standard image or video codec.
+{ui | i ∈ S}.
+This is the deployment-critical stage that turns the retained Gaussian set
+into a practical codec asset. Because the retained set is already capped
+by atlas capacity, the role of packing is not to decide what to keep, but
+to place the retained Gaussians into the atlas in a stable, collision-free,
+and codec-efficient way.
+3.5.1
+Coarse packing bins
+We quantize the retained coordinates into Bx × By coarse packing bins:
+
+
+bi = ⌊Bx ui ⌋ , By vi ,
+Stable point and slot orders
+i ∈ S.
+3.6 Complexity and Practical Properties
+AtlasLC is entirely training-free. It uses only geometric initialization,
+weighted sorting, cell histogramming, quota allocation, and deterministic packing. No learned prior, no scene-specific adaptation, and no
+Sinkhorn-style transport optimization are required.
+Let N be the number of input Gaussians. The dominant cost arises
+in shared-ordering construction, where weighted sorting determines the
+overall time complexity of the pipeline as
+Each bin b corresponds to a rectangular atlas region Rb . The slot
+capacity of that region is
+Cb = |Rb |K.
+This coarse binning step converts the shared ordering into a discrete
+packing prior. It preserves broad spatial regularity without requiring
+any iterative reassignment or optimization-heavy layout refinement.
+O(N log N).
+5
+Table 3: Main comparison on the 320-object Objaverse evaluation set. Best values are in bold; second-best values are underlined. N/A indicates
+that the corresponding stage is not directly comparable; for such rows, Total sums only the comparable stages. FLEX* denotes FlexGaussian [47].
+Method
+Payload (MB)↓ PSNR (dB)↑ SSIM↑ LPIPS↓ 3D F1↑ Depth RMSE↓ Map (ms)↓ Encode (ms)↓ Decode (ms)↓ FPS↑ Total (ms)↓
+VANILLA [21]
+PLAS [39]
+LGSCV [55]
+UVGS [43]
+FLEX* [47]
+22.223
+0.686
+0.700
+1.370
+0.850
+28.078
+27.226
+27.132
+24.373
+25.739
+0.9461
+0.9406
+0.9394
+0.8857
+0.9026
+0.0579
+0.0740
+0.0744
+0.0922
+0.0749
+0.870
+0.860
+0.858
+0.827
+0.851
+0.0310
+0.0350
+0.0354
+0.0514
+0.0497
+N/A
+1731.0
+911.7
+43.8
+N/A
+N/A
+170.8
+194.6
+216.7
+334.5
+N/A
+122.7
+127.0
+133.2
+141.4
+129.8
+130.2
+131.7
+128.3
+131.9
+N/A
+2024.4
+1233.3
+393.7
+475.9
+AtlasLC
+0.643
+27.034
+0.9301 0.0732
+0.865
+0.0361
+68.5
+189.0
+108.1
+135.8
+365.6
+Table 4: Evaluation on the 30-object Stanford-ORB dataset. Best values are in bold; second-best values are underlined. N/A indicates that the
+corresponding stage is not directly comparable; for such rows, Total sums only the comparable stages. FLEX* denotes FlexGaussian [47].
+Method
+Payload (MB)↓ PSNR (dB)↑ SSIM↑ LPIPS↓ 3D F1↑ Depth RMSE↓ Map (ms)↓ Encode (ms)↓ Decode (ms)↓ FPS↑ Total (ms)↓
+VANILLA [21]
+PLAS [39]
+LGSCV [55]
+UVGS [43]
+FLEX* [47]
+28.014
+1.376
+1.273
+2.516
+1.616
+30.808
+27.276
+27.253
+24.099
+27.523
+0.9573
+0.8964
+0.8963
+0.8343
+0.9027
+0.0147
+0.0244
+0.0245
+0.0308
+0.0225
+0.650
+0.617
+0.618
+0.621
+0.634
+0.0604
+0.0848
+0.0908
+0.2337
+0.1249
+N/A
+1575.3
+1069.8
+59.0
+N/A
+N/A
+297.6
+292.0
+329.1
+484.6
+N/A
+222.3
+221.7
+247.8
+232.6
+44.4
+44.8
+45.5
+53.4
+46.8
+N/A
+2095.3
+1583.5
+635.8
+717.1
+AtlasLC
+1.080
+27.016
+0.8814 0.0277
+0.647
+0.1001
+97.4
+279.2
+207.5
+58.4
+584.2
+The subsequent stages do not change this bound: cell formation and
+quota allocation are linear in the number of Gaussians, local survivor
+selection is linear once elements are organized by cell and score, and
+deterministic packing is linear in the number of retained Gaussians |S|
+and the atlas size. Thus, after the initial sorting-dominated stage, the
+rest of the pipeline remains lightweight in practice.
+Two practical properties are especially important for XR deployment. First, AtlasLC is codec-compatible by construction: the output is an ordered atlas representation that can be directly encoded by
+off-the-shelf image or video codecs. Second, AtlasLC is deploymentoriented by design: local-competition pruning preserves object-wide
+foreground support, while deterministic packing removes the heavy
+mapping/remapping bottleneck that otherwise inflates asset-preparation
+and total compression pipeline time.
+only on the input Gaussian count and the fixed atlas capacity, without
+rendered-quality or per-object validation feedback. material.
+Geometry evaluation. We report 3D F1 to measure bidirectional
+geometric consistency between the predicted point set P and sampled
+GT mesh surface points G. Specifically, precision is defined as the
+fraction of predicted points that lie within a distance threshold τ of the
+GT surface, and recall is defined as the fraction of GT surface samples
+that are covered within τ by the prediction. We then report
+F13D =
+2 Precτ Recτ
+.
+Precτ + Recτ
+Unless otherwise noted, we sample 30k points from the GT mesh
+surface, subsample the predicted point set to at most 30k points, and
+set τ to 1% of the GT bounding-box diagonal. Higher is better.
+4 R ESULTS
+We evaluate AtlasLC along three complementary axes. We first report the full end-to-end comparison because AtlasLC is proposed as a
+deployment-oriented pipeline, not as a pruning-only method. We then
+isolate the contribution of local-competition pruning under matched
+survivor budgets, and finally ablate the two main design choices—
+deterministic atlas packing and local competition—to identify which
+component removes the deployment bottleneck and which preserves
+geometry under a tight codec budget.
+Depth evaluation. For depth RMSE, we render per-view depth
+maps from the Gaussian representation using RaDe-GS [59]. Unless
+otherwise noted, the same rasterized depth formulation is applied to
+the decompressed Gaussian assets of all Gaussian-based methods so
+that depth error is measured under a consistent extraction rule across
+methods.
+VANILLA denotes the uncompressed 3DGS reference [21]. PUP is
+used for the prune-only comparison, while PLAS [39], LGSCV [55],
+UVGS [43], and FLEX* (FlexGaussian [47]) are included in the fullpipeline comparison. Map denotes layout, atlas, or UV-assignment
+construction; Encode denotes standard-codec packaging or a method’s
+native compression; Decode denotes decompression and reconstruction
+into renderable Gaussian parameters; and Total is the sum of all applicable measured stages. FlexGaussian has Map = N/A because it does
+not construct a 2D atlas or UV map; its native parameter compression
+is counted under Encode and its dequantization/reconstruction under
+Decode.
+4.1 Experimental Protocol
+Hardware and codec settings. Main experiments were conducted on a desktop with a 13th Gen Intel Core i9-13900K CPU
+(3.00 GHz), 32 GB system RAM, and an NVIDIA RTX 4090 GPU
+with 24 GB VRAM. Codec evaluation uses FFmpeg 5.1 HEVC with the
+medium preset. Desktop packages use YUV444, while GalaxyXR packages use YUV420. For AtlasLC, all experiments use a 512 × 512 atlas
+with K = 1 slot per pixel (T = 262,144), a 64 × 64 local-competition
+grid, and a 16 × 16 packing grid.
+We report averages over the 320-object Objaverse evaluation set [6]
+and the 30-object Stanford-ORB [26], where each object is evaluated
+on 48 and 10 held-out views, respectively. Because our target is deployable object-centric 3DGS for XR, we evaluate four aspects together:
+compactness (payload), image fidelity (PSNR, SSIM, LPIPS), geometry (3D F1, depth RMSE), and deployment efficiency (atlas preparation,
+encoding, decoding, FPS, and total pipeline time). AtlasLC uses the
+globally fixed input-adaptive budget in Sec. 3.4.2. Its budget depends
+4.2
+Main Comparison: Deployment-Aware Compression
+Table 3 reports a representative deployment operating point on the
+320-object Objaverse evaluation set, while Fig. 2 summarizes ratedependent PSNR, total pipeline time, and the precision and recall
+components of 3D geometry preservation. The main result is that heavy
+layout generation remains a real bottleneck for object-centric asset
+compression. AtlasLC largely removes this bottleneck and shifts the
+operating point toward lower payload, lower total pipeline time, and
+6
+To appear in IEEE Transactions on Visualization and Computer Graphics.
+Table 5: Ablation of the two main design choices, with the shared ordering backbone kept fixed. Deterministic packing is essential for compact,
+codec-efficient deployment, while local-competition pruning further improves compactness and geometry under the same packing backbone. Best
+values are shown in bold; second-best values are underlined.
+Variant
+Deterministic packing only
+LC pruning only
+AtlasLC
+LC prune Det. pack Payload (MB)↓ PSNR (dB)↑ SSIM↑ LPIPS↓ 3D F1↑ Depth RMSE↓ Map (ms)↓ Encode (ms)↓ Decode (ms)↓ FPS↑ Total (ms)↓
+✗
+✓
+✓
+✓
+✗
+✓
+1.003
+2.848
+0.643
+27.314
+25.195
+27.034
+0.9393 0.0725
+0.8820 0.0902
+0.9301 0.0732
+0.864
+0.853
+0.865
+0.0366
+0.0382
+0.0361
+51.7
+76.6
+68.5
+197.9
+224.8
+189.0
+118.2
+152.7
+108.1
+129.3
+134.1
+135.8
+367.8
+454.1
+365.6
+Figure 4: Representative RGB comparison on three Objaverse assets. We compare VANILLA, PLAS, AtlasLC (Ours), UVGS, and FLEX using
+RGB renderings. AtlasLC remains visually close to VANILLA and PLAS, while UVGS and FLEX* show slight boundary degradation in thin structures
+(e.g., the narrow ankle region of the boot). Corresponding depth-error visualizations are provided in Figure 5.
+higher average 3D F1, with a small PSNR trade-off relative to these
+structured baselines.
+Overall, AtlasLC provides a favorable deployment-aware operating
+point among the evaluated compressed baselines. At this representative
+point, it obtains the lowest average payload (0.643 MB), lowest decode
+time (108.1 ms), highest FPS (135.8), highest average 3D F1 (0.865),
+and lowest total pipeline time (365.6 ms) among the compressed methods, while remaining close to the strongest structured baselines in
+image-space fidelity.
+The reduction in mapping overhead is especially significant. Relative
+to PLAS, AtlasLC reduces atlas-preparation time 25.3× and shortens
+total time 5.54×. Relative to LGSCV, it reduces atlas-preparation time
+13.3× and total time 3.37×. These results directly support our claim
+that preprocessing and map generation become a first-order bottleneck when scene-scale structured compression pipelines are applied to
+reusable object assets.
+To avoid over-interpreting this representative operating point, we
+additionally perform matched-payload interpolation. The common
+AtlasLC/PLAS/LGSCV range is 0.700–0.952 MB. UVGS has no valid
+payload overlap with AtlasLC in this sweep, so we do not make equalrate claims against UVGS. Over the matched range, AtlasLC trades
+0.20–0.30 dB lower PSNR for +0.005 3D F1 and 1.47–1.66 s lower
+total time against PLAS, and 0.09–0.21 dB lower PSNR for +0.007 3D
+F1 and 0.90–0.98 s lower total time against LGSCV.
+Paired bootstrap over Objaverse assets supports the geometry claim:
+AtlasLC improves 3D F1 over PLAS by +0.0050, with a 95% CI of
+[+0.0014,+0.0089], and over LGSCV by +0.0070, with a 95% CI
+of [+0.0036,+0.0107]. LPIPS, depth RMSE, FPS, and decode-time
+differences are therefore reported as trends when their intervals cross
+zero.
+FlexGaussian provides a cross-family comparison because it compresses Gaussian parameters rather than constructing a standard-codec
+atlas. For this comparison, the matched point uses the AtlasLC
+0.851 MB operating point rather than the 0.643 MB point in Table 3; at
+this point, AtlasLC improves PSNR by +1.326 dB, 3D F1 by +0.014,
+decode time by -29.7 ms, and total time by -108.7 ms.
+Table 4 further supports this trend on the object-only Stanford-ORB
+dataset. While the photometric ranking is more mixed than on Objaverse, AtlasLC retains a favorable deployment profile, combining the
+lowest payload and total pipeline time with the highest FPS and 3D
+F1 among the evaluated compressed baselines. This suggests that the
+deployment-oriented behavior of AtlasLC is not limited to virtual object
+assets, but also transfers to high-quality real-world object captures.
+Qualitatively, Figs. 4 and 5 compare representative examples against
+VANILLA, PLAS, UVGS, and FLEX. We use PLAS as the representative structured atlas baseline in the main paper because PLAS is slightly
+7
+Figure 5: Representative depth-error comparison on three Objaverse assets. We compare VANILLA, PLAS, AtlasLC (Ours), UVGS, and
+FLEX using per-pixel depth-error visualizations. AtlasLC exhibits cleaner depth boundaries and lower depth error than UVGS and FLEX, particularly
+around thin and detailed structures. Methods are shown at the representative operating points used in Table 3.
+Table 6: On-device HMD evaluation after server-side packaging.
+Tx@5Mbps denotes the estimated one-shot server-to-HMD transfer time
+under a fixed 5 Mbps downlink, computed from payload.
+Method
+Payload (MB)↓
+Tx@5Mbps (s)↓
+PSNR↑
+3D F1↑
+Decode (ms)↓
+FPS↑
+PLAS
+LGSCV
+UVGS
+AtlasLC
+0.496
+0.530
+1.031
+0.453
+0.79
+0.85
+1.65
+0.72
+24.480
+24.234
+20.390
+24.131
+0.644
+0.639
+0.612
+0.656
+143.276
+430.732
+145.406
+133.044
+22.33
+19.91
+30.82
+45.69
+in image quality while providing a clearly stronger runtime operating
+point on the HMD.
+Payload is especially important in this setting because server-todevice delivery time scales directly with the transmitted package size.
+For interpretability, the measured HMD payload can be converted into
+an illustrative one-shot transfer proxy under a 5 Mbps downlink as
+ttx ≈
+8B
+s,
+5
+where ttx denotes the estimated server-to-HMD transmission time, B
+is the payload in MB, and the resulting value is expressed in seconds
+(s). This quantity is a payload-derived proxy rather than a measured
+live networked-delivery result. Under this proxy, AtlasLC yields the
+shortest estimated server-to-HMD transmission time, reinforcing the
+same deployment trend observed in decode time and FPS.
+stronger quantitatively than LGSCV overall. Full qualitative comparisons including LGSCV, across additional scenes and viewpoints, are
+provided in the supplementary material.
+AtlasLC approaches VANILLA closely in geometry: the 3D F1
+gap is only 0.005, while the payload is reduced from 22.223 MB to
+0.643 MB. Because AtlasLC is intended for deployable XR object
+assets, we additionally evaluate the client-side stage on a head-mounted
+device. In this setting, mapping and HEVC encoding are performed
+on the server, and only the compressed package is transmitted to the
+HMD. The device then decodes the received package and renders
+the decompressed Gaussian asset. Accordingly, Table 6 isolates the
+HMD-side deployment behavior and excludes server-side mapping
+and encoding cost, which are already reported in the desktop pipeline
+measurements.
+4.4 Why Local-Competition Pruning Helps
+We next isolate AtlasLC’s pruning rule by comparing its localcompetition pruning against PUP in a prune-only setting at matched or
+nearly matched kept-Gaussian counts (Tab. 2). The survivor counts are
+exactly matched at 90%, 80%, 50%, 40%, and 30% pruning, and differ
+by only one Gaussian at 70% and 60%, so performance differences
+reflect which Gaussians are retained rather than how many.
+The main pattern is clear: AtlasLC provides the largest advantage
+in the aggressive pruning regime, where survivor selection is most
+critical. At 90% pruning, it improves PSNR by 0.498 dB, SSIM by
+0.068, reduces LPIPS by 0.015, and increases 3D F1 by 0.053. At
+80%, the gains are +0.592 dB PSNR, +0.061 SSIM, -0.013 LPIPS, and
++0.063 3D F1. At 70%, 60%, 50% AtlasLC still improves all four
+metrics, and at 50% the result remains favorable overall.
+At lighter pruning ratios, the effect becomes more selective. At 40%
+and 30% pruning, PSNR and SSIM are nearly unchanged and LPIPS
+is slightly worse (+0.001 and +0.002), but 3D F1 still improves by
+0.029 and 0.041. This suggests that when the pruning budget is loose,
+4.3 On-Device HMD Evaluation
+The main result is that the deployment advantage of AtlasLC carries
+over to the actual device (GalaxyXR) setting. We exclude FLEX* [47]
+since it is incompatible with the standard codec used on GalaxyXR.
+AtlasLC achieves the fastest on-device decode time and the highest
+average FPS, while also achieving the highest average 3D F1 at the
+evaluated operating point among the compressed baselines. Although
+PLAS attains a slightly higher PSNR, AtlasLC remains competitive
+8
+To appear in IEEE Transactions on Visualization and Computer Graphics.
+both methods already preserve most photometric support, while the
+main remaining benefit of local competition is better preservation of
+geometry-relevant support.
+Figure 3 is consistent with this interpretation. PUP prunes splats
+more diffusely across the object support, whereas AtlasLC removes
+Gaussians in compact local groups. This is the intended effect of local
+competition: neighboring splats that explain similar support compete
+against one another, so redundancy is removed within a neighborhood
+rather than subtracted more globally from the object surface. Under
+tight budgets, this yields clear gains in both image fidelity and geometry;
+under looser budgets, the advantage appears primarily in geometry
+preservation.
+Taken together, Tab. 2 and Fig. 3 support the design of AtlasLC’s
+pruning stage. For object-centric assets, pruning should resolve redundancy at the local-support level rather than by a purely global removal
+rule.
+4.5
+with task-level user studies that measure startup responsiveness, occlusion correctness, and interaction performance under matched payload
+budgets.
+A second limitation concerns scope. AtlasLC targets released, static,
+object-centric Gaussian assets in a source-free setting and is evaluated
+with a fixed codec-friendly atlas pipeline. This makes the method practical for reusable XR object libraries, but the present study does not yet
+address dynamic, articulated, or deformable assets, scene-scale multiobject captures, or alternative device- and codec-specific packaging
+strategies. More broadly, because AtlasLC is intentionally post hoc
+and training-free, it does not use original multiview images or per-asset
+optimization that could further improve absolute rate–distortion performance. Future work could explore device-adaptive packing and streaming, as well as a source-assisted authoring-to-deployment pipeline.
+Given a single image or a small set of source views, efficient segmentation models could isolate the target object [22, 61]. A single-image
+Gaussian generator such as LGM [45] could then create an objectcentric Gaussian asset, after which AtlasLC could perform the final
+compression and standard-codec packaging for transmission, caching,
+and XR deployment. This source-assisted extension is complementary
+to, and outside, the source-free setting evaluated in this work.
+A further limitation is the globally fixed opacity-only survivor score.
+The observed failure cases are predominantly photometric and concentrate in thin, transparent, or high-anisotropy silhouette-support regions,
+where visually important low-opacity splats can be under-ranked relative to nearby opaque support in the same local-competition cell. Because the final counts of packing collisions, dropped retained Gaussians,
+and unplaced retained Gaussians are all zero, these observations suggest that the artifacts primarily arise from the limits of source-free local
+selection rather than atlas placement. Additional examples and the full
+failure taxonomy are provided in the supplementary material. Future
+work could investigate lightweight multi-attribute survivor scores that
+combine opacity with scale or anisotropy while preserving source-free
+operation; source-assisted variants could additionally exploit boundary
+or semantic cues.
+Ablation
+Table 5 ablates the two main design choices of AtlasLC while keeping
+the shared ordering backbone fixed. The clearest result is that deterministic atlas packing is the dominant systems component: it is the stage
+that turns a reasonable retained set into a compact, codec-efficient, and
+fast-to-deploy asset.
+The most consequential comparison is LC pruning only versus full
+AtlasLC, which isolates deterministic packing. Without deterministic
+packing, the pruned representation is not yet a practical codec asset:
+payload grows from 0.643 MB to 2.848 MB, PSNR drops from 27.034
+to 25.195, SSIM drops from 0.9301 to 0.8820, LPIPS worsens from
+0.0732 to 0.0902, 3D F1 drops from 0.865 to 0.853, decode time rises
+from 108.1 ms to 152.7 ms, and total pipeline time rises from 365.6 ms
+to 454.1 ms. Adding deterministic packing reduces payload by 4.43×,
+improves PSNR by 1.839 dB, improves 3D F1 by 0.012, lowers decode
+time by 44.6 ms, and lowers total time by 88.5 ms. Deterministic
+packing is therefore not a cosmetic implementation detail; it is the
+mechanism that removes the mapping/remapping bottleneck while
+making the final asset compact and codec-friendly.
+We then compare Deterministic packing only with full AtlasLC
+to isolate local-competition pruning. Without LC pruning, the model
+reaches the strongest photometric scores among our variants: 27.314 dB
+PSNR, 0.9393 SSIM, and 0.0725 LPIPS, together with the fastest atlaspreparation stage (51.7 ms). However, this higher-fidelity point comes
+with a larger payload (1.003 MB vs. 0.643 MB) and slightly weaker
+geometry (3D F1 0.864 vs. 0.865; depth RMSE 0.0366 vs. 0.0361).
+Adding LC pruning reduces payload by 35.9%, improves 3D F1 and
+depth RMSE, increases FPS from 129.3 to 135.8, and reduces decode
+time from 118.2 ms to 108.1 ms, at the cost of a modest drop in raw
+image-space fidelity.
+The ablation reveals a clean division of labor. The shared ordering
+backbone provides a lightweight coordinate system reused by all variants. Deterministic packing decides how retained support is laid out for
+compression and reconstruction, and is essential for payload, decoding
+efficiency, and total pipeline time. Local-competition pruning decides
+which support survives under a tight budget, improving compactness
+and geometry.
+5
+6 C ONCLUSION
+We presented AtlasLC, a source-free, training-free compression
+pipeline for object-centric 3D Gaussian Splatting aimed at deployable
+XR assets. AtlasLC combines local-competition pruning and deterministic atlas packing over a lightweight shared ordering backbone,
+removing the heavy mapping/remapping overhead of prior structured
+pipelines while preserving object-wide foreground support. Across the
+evaluated representative operating points, AtlasLC provides a favorable combination of payload, preparation time, decode latency, FPS,
+and 3D F1 among the compressed baselines. These results support
+a simple conclusion: for object-centric 3DGS in XR, the right target is not bitrate alone, but a deployment-aware operating point that
+jointly balances compactness, preparation cost, decoding efficiency,
+and geometry preservation. We hope AtlasLC helps make scalable
+libraries of reusable radiance-field object assets more practical for XR
+and motivates future work on interaction-aware, device-aware, and
+codec-friendly deployment of 3DGS assets.
+ACKNOWLEDGMENTS
+This work was supported by the Institute of Information & Communications Technology Planning & Evaluation (IITP) grant funded by the
+Korea government (MSIT) (RS-2019-II191270, WISE AR UI/UX Platform Development for Smartglasses). This research was supported by
+the Institute of Information & Communications Technology Planning
+& Evaluation (IITP) under the virtual convergence support program to
+nurture the best talents (IITP-2022(2026)-RS-2022-00156435) grant
+funded by the Korea government (MSIT). This work was supported
+by Institute of Information & Communications Technology Planning
+& Evaluation (IITP) grant funded by the Korea government (MSIT)
+(RS-2026-25523396, Core Technology Development for Immersive
+Content).
+L IMITATIONS AND F UTURE W ORK
+AtlasLC is evaluated using deployment-oriented metrics spanning payload, atlas-preparation time, decode latency, rendering FPS, 3D F1,
+and depth RMSE. These metrics provide useful proxies for asset compactness, preparation and runtime efficiency, and the preservation of
+geometry and depth cues, but they do not directly measure downstream
+user performance or perceived interaction quality in live XR experiences. Accordingly, our claims concern deployment-aware asset quality
+rather than demonstrated interaction benefits. In particular, we do not
+yet test whether the observed geometry preservation and latency reductions translate into more accurate occlusion judgments, more stable
+object boundaries during interaction, or higher accuracy in selection
+and manipulation tasks. A natural next step is therefore to pair AtlasLC
+9
+R EFERENCES
+for 3d-positioning objects in mobile augmented reality. In ICMI ’21:
+International Conference on Multimodal Interaction, pp. 604–612. ACM,
+2021. doi: 10.1145/3462244.3479945 2, 3
+[20] B. Huang, Z. Yu, A. Chen, A. Geiger, and S. Gao. 2d gaussian splatting for
+geometrically accurate radiance fields. In SIGGRAPH 2024 Conference
+Papers, art. no. 32, 11 pp. Association for Computing Machinery, 2024.
+doi: 10.1145/3641519.3657428 2, 3
+[21] B. Kerbl, G. Kopanas, T. Leimkühler, and G. Drettakis. 3d gaussian
+splatting for real-time radiance field rendering. ACM Transactions on
+Graphics, 42(4):139:1–139:14, 2023. doi: 10.1145/3592433 1, 2, 6
+[22] B. Kim. Semantic-Fast-SAM: Efficient semantic segmenter. In 2025 Asia
+Pacific Signal and Information Processing Association Annual Summit
+and Conference (APSIPA ASC), pp. 1158–1163. IEEE, 2025. doi: 10.
+1109/APSIPAASC65261.2025.11249315 9
+[23] B. Kim. OT-UVGS: Revisiting UV mapping for gaussian splatting as a
+capacity allocation problem. In Eurographics 2026 – Short Papers. The
+Eurographics Association, 2026. doi: 10.2312/egs.20261023 3
+[24] D.-H. Kim, B.-Y. Choi, K.-J. Oh, G. Lee, and J.-G. Kim. A vq-hevc hybrid
+compression method for learned 3dgs (3d gaussian splatting) models.
+Journal of Broadcast Engineering, 30(7):1155–1166, December 2025. doi:
+10.5909/JBE.2025.30.7.1155 2, 3
+[25] S.-Y. Kim, D. Kim, W. Cho, H. Song, S. Kang, and W. Woo. Scenelinker:
+Compositional 3d scene generation via semantic scene graph from rgb
+sequences. IEEE Transactions on Visualization and Computer Graphics,
+32(5):3125–3135, 2026. doi: 10.1109/TVCG.2026.3679893 3
+[26] Z. Kuang, Y. Zhang, H.-X. Yu, S. Agarwala, S. Wu, and J. Wu. StanfordORB: A real-world 3d object inverse rendering benchmark. In Advances in
+Neural Information Processing Systems, vol. 36, pp. 46938–46957. Curran
+Associates, Inc., December 2023. NeurIPS 2023 Datasets and Benchmarks
+Track. 6
+[27] J. C. Lee, D. Rho, X. Sun, J. H. Ko, and E. Park. Compact 3d gaussian representation for radiance field. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), pp. 21719–21728,
+June 2024. doi: 10.1109/CVPR52733.2024.02052 2
+[28] S. Lee, F. Shu, Y. Sanchez, T. Schierl, and C. Hellge. Compression of
+3d gaussian splatting with optimized feature planes and standard video
+codecs. In Proceedings of the IEEE/CVF International Conference on
+Computer Vision (ICCV), pp. 25496–25505, October 2025. 2, 3
+[29] K. Li, M. Masuda, S. Schmidt, and S. Mori. Radiance fields in XR:
+A survey on how radiance fields are envisioned and addressed for XR
+research. IEEE Transactions on Visualization and Computer Graphics,
+31(11):9709–9719, 2025. doi: 10.1109/TVCG.2025.3616794 1, 2, 3
+[30] S. Li, Y.-S. Liu, and Z. Han. Gaussianudf: Inferring unsigned distance
+functions through 3d gaussian splatting. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR), pp.
+27113–27123, June 2025. 2, 3
+[31] K. Lilija, H. Pohl, S. Boring, and K. Hornbæk. Augmented reality views
+for occluded interaction. In Proceedings of the 2019 CHI Conference on
+Human Factors in Computing Systems, pp. 1–12. Association for Computing Machinery, 2019. doi: 10.1145/3290605.3300676 2, 3
+[32] X. Liu, P. Tayal, J. Wang, J. Zarzar, T. Monnier, K. Tertikas et al. Uncommon objects in 3d. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), pp. 14102–14113, June
+2025. 2, 3
+[33] X. Liu, X. Wu, P. Zhang, S. Wang, Z. Li, and S. Kwong. Compgs: Efficient
+3d scene representation via compressed gaussian splatting. In Proceedings
+of the 32nd ACM International Conference on Multimedia, pp. 2936–
+2944. Association for Computing Machinery, 2024. doi: 10.1145/3664647.
+3681468 3
+[34] Y. Liu, B. Han, F. Qian, A. Narayanan, and Z.-L. Zhang. Vues: Practical mobile volumetric video streaming through multiview transcoding.
+In Proceedings of the 28th Annual International Conference on Mobile
+Computing and Networking (MobiCom ’22), pp. 514–527, 2022. doi: 10.
+1145/3495243.3517027 2, 3
+[35] Y. Liu, B. Jia, R. Lu, J. Ni, S.-C. Zhu, and S. Huang. Building interactable
+replicas of complex articulated objects via gaussian splatting. In The
+Thirteenth International Conference on Learning Representations (ICLR),
+2025. Published as a conference paper at ICLR 2025. 2, 3
+[36] Q. Luo, H. Zhang, M. Xu, B. Di, A. Chen, S. Mao et al. An overview of
+3gpp standardization for extended reality (xr) in 5g and beyond. GetMobile: Mobile Computing and Communications, 27(3):10–17, 2023. doi: 10.
+1145/3631588.3631592 2, 3
+[37] S. Ma, Y. Luo, W. Yang, and Y. Yang. Mags: Reconstructing and sim-
+[1] A. Alnajim, S. Salehi, C.-C. Shen, and M. Smith. Traffic characteristics
+of extended reality. arXiv preprint arXiv:2304.07908, 2023. doi: 10.
+48550/arXiv.2304.07908 2, 3
+[2] M. T. Bagdasarian, P. Knoll, Y.-H. Li, F. Barthel, A. Hilsmann, P. Eisert et
+al. 3DGS.zip: A survey on 3d gaussian splatting compression methods.
+Computer Graphics Forum, 2025. doi: 10.1111/cgf.70078 2, 3
+[3] J. Cao, V. Goel, C. Wang, A. Kag, J. Hu, S. Korolev et al. Lightweight
+predictive 3d gaussian splats. In The Thirteenth International Conference on Learning Representations (ICLR), 2025. Also available as
+arXiv:2406.19434. 2, 3
+[4] Y. Chen, Q. Wu, M. Li, W. Lin, M. Harandi, and J. Cai. Fast feedforward 3d gaussian splatting compression. In The Thirteenth International
+Conference on Learning Representations (ICLR), 2025. Also available as
+arXiv:2410.08017. 2, 3
+[5] Y. Chen, Q. Wu, W. Lin, M. Harandi, and J. Cai. Hac: Hash-grid assisted
+context for 3d gaussian splatting compression. In Computer Vision – ECCV
+2024, pp. 422–438. Springer, 2024. doi: 10.1007/978-3-031-72667-5_24 2, 3
+[6] M. Deitke, D. Schwenk, J. Salvador, L. Weihs, O. Michel, E. VanderBilt
+et al. Objaverse: A universe of annotated 3d objects. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), pp. 13142–13153, 2023. 2, 3, 6
+[7] F. Di Sario, R. Renzulli, M. Grangetto, A. Sugimoto, and E. Tartaglione.
+Gode: Gaussians on demand for progressive level of detail and scalable
+compression. arXiv preprint arXiv:2501.13558, 2025. 3
+[8] M. D. Dogan, E. J. Gonzalez, K. Ahuja, R. Du, A. Colaço, J. Lee et al.
+Augmented object intelligence with xr-objects. In Proceedings of the
+37th Annual ACM Symposium on User Interface Software and Technology
+(UIST ’24), pp. 1–15. Association for Computing Machinery, 2024. Also
+available as arXiv:2404.13274. doi: 10.1145/3654777.3676379 2, 3
+[9] Z. Dong, K. Chen, Z. Lv, H.-X. Yu, Y. Zhang, C. Zhang et al. Digital
+twin catalog: A large-scale photorealistic 3d object digital twin dataset.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pp. 753–763, June 2025. 2, 3
+[10] X. Du, Y. Wang, K. Zhan, and X. Yu. Mobile-gs: Real-time gaussian
+splatting for mobile devices. In The Fourteenth International Conference
+on Learning Representations (ICLR), 2026. ICLR 2026 Poster. 1, 2
+[11] Z. Fan, K. Wang, K. Wen, Z. Zhu, D. Xu, and Z. Wang. Lightgaussian:
+Unbounded 3d gaussian compression with 15x reduction and 200+ fps. In
+Advances in Neural Information Processing Systems 37 (NeurIPS), 2024.
+Also available as arXiv:2311.17245. 2, 3
+[12] L. Franke, L. Fink, and M. Stamminger. Vr-splatting: Foveated radiance
+field rendering via 3d gaussian splatting and neural points. Proceedings of
+the ACM on Computer Graphics and Interactive Techniques, 8(1), art. no.
+18, May 2025. doi: 10.1145/3728302 1, 2
+[13] S. Friston, C. Fan, J. Doboš, T. Scully, and A. Steed. 3drepo4unity:
+Dynamic loading of version controlled 3d assets into the unity game
+engine. In Proceedings of the 22nd International Conference on 3D Web
+Technology (Web3D ’17), art. no. 15, 9 pp. Association for Computing
+Machinery, 2017. doi: 10.1145/3055624.3075941 2, 3
+[14] S. Gao, J. Liu, Q. Jiang, F. Sinclair, W. Sentosa, B. Godfrey et al. Xrgo:
+Design and evaluation of rendering offload for low-power extended reality
+devices. In Proceedings of the 16th ACM Multimedia Systems Conference
+(MMSys ’25), pp. 124–135, 2025. doi: 10.1145/3712676.3714444 2, 3
+[15] A. Guédon and V. Lepetit. Gaussian frosting: Editable complex radiance
+fields with real-time rendering. In Computer Vision – ECCV 2024, pp. 413–
+430. Springer, 2024. ECCV 2024 Oral. doi: 10.1007/978-3-031-73650-6_24
+2, 3
+[16] A. Guédon and V. Lepetit. Sugar: Surface-aligned gaussian splatting
+for efficient 3d mesh reconstruction and high-quality mesh rendering. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), pp. 5354–5363, June 2024. 2, 3
+[17] J. Guo, Y. Xin, G. Liu, K. Xu, L. Liu, and R. Hu. Articulatedgs: Selfsupervised digital twin modeling of articulated objects using 3d gaussian
+splatting. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), pp. 27144–27153, June 2025. 2
+[18] A. Hanson, A. Tu, V. Singla, M. Jayawardhana, M. Zwicker, and T. Goldstein. Pup 3d-gs: Principled uncertainty pruning for 3d gaussian splatting.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pp. 5949–5958, June 2025. Also available
+as arXiv:2406.10219. 2, 3, 4, 5
+[19] C.-P. Hellmuth, M. Bachinski, and J. Müller. Interaction techniques
+10
+To appear in IEEE Transactions on Visualization and Computer Graphics.
+10.1145/3746027.3755370 3
+[54] S. Xie, W. Zhang, C. Tang, Y. Bai, R. Lu, S. Ge et al. Mesongs: Posttraining compression of 3d gaussians via efficient attribute transformation.
+In Computer Vision – ECCV 2024, pp. 434–452. Springer, 2024. Also
+available as arXiv:2409.09756. doi: 10.1007/978-3-031-73414-4_25 2, 3
+[55] Q. Yang, G. Van der Auwera, and Z. Li. Lightweight 3d gaussian splatting
+compression via video codec. arXiv preprint arXiv:2512.11186, 2025.
+arXiv preprint. 2, 3, 6
+[56] Q. Yang, K. Yang, Y. Xing, Y. Xu, and Z. Li. A benchmark for gaussian
+splatting compression and quality assessment study. In Proceedings of
+the 6th ACM International Conference on Multimedia in Asia, MMAsia
+’24, art. no. 12, 8 pp. Association for Computing Machinery, 2024. doi: 10
+.1145/3696409.3700172 2, 3
+[57] Z. Yang, J. Wang, H. Zhang, S. Manivasagam, Y. Chen, and R. Urtasun.
+Genassets: Generating in-the-wild 3d assets in latent space. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), pp. 22392–22403, June 2025. 2, 3
+[58] Z. Ye, C. Wan, C. Li, J. Hong, S. Li, L. Li et al. 3d gaussian rendering can
+be sparser: Efficient rendering via learned fragment pruning. In Advances
+in Neural Information Processing Systems 37 (NeurIPS), 2024. 3
+[59] B. Zhang, C. Fang, R. Shrestha, Y. Liang, X. Long, and P. Tan. Rade-gs:
+Rasterizing depth in gaussian splatting. ACM Transactions on Graphics,
+2026. Online publication date: January 16, 2026. doi: 10.1145/3789201 2,
+6
+[60] Z. Zhang, T. Song, Y. Lee, L. Yang, C. Peng, R. Chellappa et al. Lp3dgs: Learning to prune 3d gaussian splatting. In Advances in Neural
+Information Processing Systems 37 (NeurIPS), 2024. Also available as
+arXiv:2405.18784. 2, 3
+[61] X. Zhao, W. Ding, Y. An, Y. Du, T. Yu, M. Li et al. Fast segment anything,
+2023. doi: 10.48550/arXiv.2306.12156 9
+ulating dynamic 3d objects with mesh-adsorbed gaussian splatting. In
+Proceedings of the IEEE/CVF International Conference on Computer
+Vision (ICCV), pp. 8745–8755, October 2025. 2, 3
+[38] M. C. F. Macedo and A. L. Apolinario. Occlusion handling in augmented
+reality: Past, present, and future. IEEE Transactions on Visualization
+and Computer Graphics, 29(2):1590–1609, 2023. doi: 10.1109/TVCG.2021.
+3117866 2, 3
+[39] W. Morgenstern, F. Barthel, A. Hilsmann, and P. Eisert. Compact 3d
+scene representation via self-organizing gaussian grids. In Computer
+Vision – ECCV 2024, pp. 18–34. Springer, 2024. Also available as
+arXiv:2312.13299. doi: 10.1007/978-3-031-73013-9_2 2, 3, 6
+[40] K. L. Navaneet, K. Pourahmadi Meibodi, S. Abbasi Koohpayegani, and
+H. Pirsiavash. Compgs: Smaller and faster gaussian splatting with vector
+quantization. In Computer Vision – ECCV 2024, pp. 330–349. Springer,
+2024. doi: 10.1007/978-3-031-73411-3_19 2, 3
+[41] S. Niedermayr, J. Stumpfegger, and R. Westermann. Compressed 3d
+gaussian splatting for accelerated novel view synthesis. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), pp. 10349–10358, June 2024. doi: 10.1109/CVPR52733.2024.00985
+2, 3
+[42] P. Papantonakis, G. Kopanas, B. Kerbl, A. Lanvin, and G. Drettakis.
+Reducing the memory footprint of 3d gaussian splatting. Proceedings of
+the ACM on Computer Graphics and Interactive Techniques, 7(1), art. no.
+16, 2024. Also available as arXiv:2406.17074. doi: 10.1145/3651282 2, 3
+[43] A. Rai, D. Wang, M. Jain, N. Sarafianos, K. Chen, S. Sridhar et al. Uvgs:
+Reimagining unstructured 3d gaussian splatting using uv mapping. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), pp. 5927–5937, June 2025. 2, 3, 6
+[44] Y. Shi, G. Morin, S. Gasparini, and W. T. Ooi. Lapisgs: Layered progressive 3d gaussian splatting for adaptive streaming. In Proceedings of the
+2025 International Conference on 3D Vision (3DV), pp. 991–1000. IEEE,
+2025. Also available as arXiv:2408.14823. doi: 10.1109/3DV66043.2025.
+00096 2, 3
+[45] J. Tang, Z. Chen, X. Chen, T. Wang, G. Zeng, and Z. Liu. LGM: Large
+multi-view gaussian model for high-resolution 3D content creation. In
+Computer Vision – ECCV 2024, vol. 15062 of Lecture Notes in Computer
+Science, pp. 1–18. Springer, Cham, 2025. doi: 10.1007/978-3-031-73235-5_1
+9
+[46] X. Tang, X. Hu, C.-W. Fu, and D. Cohen-Or. Grabar: Occlusion-aware
+grabbing virtual objects in ar. In Proceedings of the 33rd Annual ACM
+Symposium on User Interface Software and Technology, pp. 697–708. Association for Computing Machinery, 2020. doi: 10.1145/3379337.3415835
+2, 3
+[47] B. Tian, Q. Gao, S. Xianyu, X. Cui, and M. Zhang. Flexgaussian: Flexible
+and cost-effective training-free compression for 3d gaussian splatting. In
+Proceedings of the 33rd ACM International Conference on Multimedia, pp.
+7287–7296. Association for Computing Machinery, 2025. Also available
+as arXiv:2507.06671. doi: 10.1145/3746027.3754744 2, 3, 6, 8
+[48] Y.-Z. Tsai, X. Zhang, Z. Li, and J. Chen. L3gs: Layered 3d gaussian splats
+for efficient 3d scene delivery. In Proceedings of the 31st Annual International Conference on Mobile Computing and Networking. Association for
+Computing Machinery, 2025. Also available as arXiv:2504.05517. doi: 10
+.1145/3680207.3723485 2, 3
+[49] D. R. Walton and A. Steed. Accurate real-time occlusion for mixed reality.
+In Proceedings of the 23rd ACM Symposium on Virtual Reality Software
+and Technology, pp. 1–10. Association for Computing Machinery, 2017.
+doi: 10.1145/3139131.3139153 2, 3
+[50] H. Wang, H. Zhu, T. He, R. Feng, J. Deng, J. Bian et al. End-to-end
+rate-distortion optimized 3d gaussian representation. In Computer Vision –
+ECCV 2024, pp. 76–92. Springer, 2024. doi: 10.1007/978-3-031-73636-0_5
+3
+[51] T. Wang, M. Li, G. Zeng, C. Meng, and Q. Zhang. Gaussian herding across
+pens: An optimal transport perspective on global gaussian reduction for
+3dgs. In Advances in Neural Information Processing Systems (NeurIPS),
+2025. NeurIPS 2025 Spotlight. 3
+[52] Y. Wang, Z. Li, L. Guo, W. Yang, A. C. Kot, and B. Wen. Contextgs:
+Compact 3d gaussian splatting with anchor level context model. In Advances in Neural Information Processing Systems 37 (NeurIPS), 2024.
+Also available as arXiv:2405.20721. 2, 3
+[53] S. Xie, J. Liu, W. Zhang, S. Ge, S. Pan, C. Tang et al. Sizegs: Size-aware
+compression of 3d gaussian splatting via mixed integer programming. In
+Proceedings of the 33rd ACM International Conference on Multimedia.
+Association for Computing Machinery, 2025. Best Paper Candidate. doi:
+11

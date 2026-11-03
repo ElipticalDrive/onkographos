@@ -3,133 +3,132 @@
 Also called: Area Weighted Average, Box Filter Resampling
 
 ## Overview
-Area-Averaged Resampling is a downsampling technique that computes the average color of an input image region mapped to a single output pixel, weighted by the area of overlap between the input pixel grid and the mapped output pixel region [S1, unofficial]. It differs from nearest-neighbor or simple box filtering by explicitly calculating the geometric intersection area between the continuous output pixel footprint and the discrete input pixel grid, ensuring accurate energy conservation during resolution reduction [S1, unofficial].
+Area-Averaged Resampling is a downsampling technique that computes the average color of an input image region mapped to a single output pixel, weighted by the area of overlap between the input pixel grid and the mapped output pixel region [S1, unofficial]. It builds on [Volume Resampling](2939-volume-resampling.md) by explicitly calculating the geometric intersection area between the continuous output pixel footprint and the discrete input pixel grid, rather than using nearest-neighbor or uniform box filtering [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A read-only `rgba8` image2D (input image) with dimensions $W_{in} \times H_{in}$.
-- Output: A write-only `rgba8` image2D (output image) with dimensions $W_{out} \times H_{out}$.
-- Parameters: Input and output dimensions.
+- Input: A read-only `rgba8` image2D with dimensions $W_{\text{in}} \times H_{\text{in}}$ [S1, unofficial].
+- Output: A write-only `rgba8` image2D with dimensions $W_{\text{out}} \times H_{\text{out}}$ [S1, unofficial].
+- Parameters: Input and output dimensions [S1, unofficial].
 
 **Data Structures:**
-- The method operates on floating-point coordinates for region calculation and integer indices for texture sampling.
+- The method operates on floating-point coordinates for region calculation and integer indices for texture sampling [S1, unofficial].
 - The implementation uses a Compute Shader with a local size of $8 \times 8 \times 1$ (`layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;`) [S1, unofficial].
-- Input image is bound at binding point 0.
-- Output image is bound at binding point 1 [S1, unofficial].
+- The input image is bound at binding point 0 and the output image is bound at binding point 1 [S1, unofficial].
 
 **Algorithm Steps:**
-1.  **Calculate Ratio:** Determine the scaling ratio between input and output dimensions.
-    $$ \text{ratio} = \left( \frac{W_{in}}{W_{out}}, \frac{H_{in}}{H_{out}} \right) $$
-2.  **Determine Output Pixel Region:** For the current output pixel at coordinates $(u, v)$, calculate the corresponding continuous region in the input image space.
-    $$ \text{inputRegionMin} = (u \cdot \text{ratio}_x, v \cdot \text{ratio}_y) $$
-    $$ \text{inputRegionMax} = ((u + 1) \cdot \text{ratio}_x, (v + 1) \cdot \text{ratio}_y) $$
-    $$ \text{inputRegionSize} = \text{inputRegionMax} - \text{inputRegionMin} $$
-3.  **Iterate Intersecting Input Pixels:** Determine the range of input pixel indices $(x, y)$ that intersect the `inputRegion`.
-    $$ x_{start} = \lfloor \text{inputRegionMin}_x \rfloor, \quad x_{end} = \lceil \text{inputRegionMax}_x \rceil $$
-    $$ y_{start} = \lfloor \text{inputRegionMin}_y \rfloor, \quad y_{end} = \lceil \text{inputRegionMax}_y \rceil $$
-    Iterate $x$ from $x_{start}$ to $x_{end}-1$ and $y$ from $y_{start}$ to $y_{end}-1$.
-4.  **Calculate Overlap Area:** For each input pixel at $(x, y)$, calculate the intersection area with the `inputRegion`. The pixel covers the unit square $[x, x+1] \times [y, y+1]$.
-    $$ \text{pixelMin} = (x, y) $$
-    $$ \text{pixelMax} = (x + 1, y + 1) $$
-    $$ \text{overlapMin} = \max(\text{pixelMin}, \text{inputRegionMin}) $$
-    $$ \text{overlapMax} = \min(\text{pixelMax}, \text{inputRegionMax}) $$
-    $$ \text{overlapSize} = \max(\text{overlapMax} - \text{overlapMin}, 0.0) $$
-    $$ \text{overlapArea} = \text{overlapSize}_x \cdot \text{overlapSize}_y $$
-5.  **Accumulate Weighted Sum:** Sample the input pixel color and add to the accumulator weighted by the overlap area.
-    $$ \text{color} = \text{texture}(inputImage, \text{vec2}(x + 0.5, y + 0.5)) $$
-    $$ \text{areaWeightedSum} += \text{color} \cdot \text{overlapArea} $$
-6.  **Normalize:** Divide the accumulated sum by the total area of the input region to get the average.
-    $$ \text{totalArea} = \text{inputRegionSize}_x \cdot \text{inputRegionSize}_y $$
-    $$ \text{areaWeightedAvg} = \frac{\text{areaWeightedSum}}{\text{totalArea}} $$
-7.  **Store Result:** Write the result to the output image.
-    $$ \text{textureStore}(outputImage, \text{ivec2}(u, v), \text{areaWeightedAvg}) $$
+1. **Calculate Ratio:** Determine the scaling ratio between input and output dimensions: $\text{ratio} = \text{inputSize} / \text{outputSize}$ [S1, unofficial].
+2. **Determine Input Region:** For the current output pixel at coordinates $\text{outputCoords} = (u, v)$, calculate the corresponding continuous region in the input image space: $\text{inputRegionMin} = \text{outputCoords} \times \text{ratio}$ and $\text{inputRegionMax} = (\text{outputCoords} + 1) \times \text{ratio}$ [S1, unofficial].
+3. **Iterate Intersecting Input Pixels:** Determine the range of input pixel indices $(x, y)$ that intersect the input region by looping from $\lfloor \text{inputRegionMin} \rfloor$ to $\lceil \text{inputRegionMax} \rceil$ [S1, unofficial].
+4. **Calculate Overlap Area:** For each input pixel at $(x, y)$, calculate the intersection area with the input region [S1, unofficial]. The pixel covers the unit square $[x, x+1] \times [y, y+1]$ [S1, unofficial]. Compute $\text{overlapMin} = \max(\text{pixelMin}, \text{inputRegionMin})$, $\text{overlapMax} = \min(\text{pixelMax}, \text{inputRegionMax})$, $\text{overlapSize} = \max(\text{overlapMax} - \text{overlapMin}, 0.0)$, and $\text{overlapArea} = \text{overlapSize}_x \cdot \text{overlapSize}_y$ [S1, unofficial].
+5. **Accumulate Weighted Sum:** Sample the input pixel color and add to the accumulator weighted by the overlap area: $\text{areaWeightedSum} += \text{imageLoad}(\text{inputImage}, \text{ivec2}(x, y)) \times \text{overlapArea}$ [S1, unofficial].
+6. **Normalize:** Divide the accumulated sum by the total area of the input region to get the average [S1, unofficial]. Compute $\text{totalArea} = \text{inputRegionSize}_x \cdot \text{inputRegionSize}_y$ where $\text{inputRegionSize} = \text{inputRegionMax} - \text{inputRegionMin}$, then $\text{areaWeightedAvg} = \text{areaWeightedSum} / \text{totalArea}$ [S1, unofficial].
+7. **Store Result:** Write the result to the output image: $\text{imageStore}(\text{outputImage}, \text{outputCoords}, \text{areaWeightedAvg})$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Compute Shader Entry Point
-# Globals: inputImage (sampler2D), outputImage (image2D), inputSize (vec2), outputSize (vec2)
+import math
 
-def main():
-    # Get global output coordinates
-    u = gl_GlobalInvocationID.x
-    v = gl_GlobalInvocationID.y
-    
-    # Boundary check: prevent out-of-bounds writes [S1, unofficial]
-    if u >= outputSize.x or v >= outputSize.y:
-        return
+# Standard image I/O operations (defined for completeness)
+def read_image(img, coord):
+    return img[coord] # Returns rgba8 value
 
-    # 1. Calculate ratio
-    ratio_x = inputSize.x / outputSize.x
-    ratio_y = inputSize.y / outputSize.y
-    
-    # 2. Determine input region for this output pixel
-    input_region_min_x = u * ratio_x
-    input_region_min_y = v * ratio_y
-    input_region_max_x = (u + 1) * ratio_x
-    input_region_max_y = (v + 1) * ratio_y
-    
-    input_region_size_x = input_region_max_x - input_region_min_x
-    input_region_size_y = input_region_max_y - input_region_min_y
-    total_area = input_region_size_x * input_region_size_y
-    
-    # 3. Iterate over intersecting input pixels
-    x_start = floor(input_region_min_x)
-    x_end = ceil(input_region_max_x)
-    y_start = floor(input_region_min_y)
-    y_end = ceil(input_region_max_y)
-    
-    area_weighted_sum = vec4(0.0)
-    
-    for x in range(x_start, x_end):
-        for y in range(y_start, y_end):
-            # 4. Calculate overlap area
-            pixel_min_x = float(x)
-            pixel_min_y = float(y)
-            pixel_max_x = float(x + 1)
-            pixel_max_y = float(y + 1)
+def write_image(img, coord, value):
+    img[coord] = value # Stores rgba8 value
+
+def area_averaged_resampling(input_image, output_image, input_size, output_size):
+    # input_image: read-only rgba8 image2D
+    # output_image: write-only rgba8 image2D
+    # input_size: (W_in, H_in)
+    # output_size: (W_out, H_out)
+
+    for v in range(output_size[1]):
+        for u in range(output_size[0]):
+            output_coords = (u, v)
             
-            overlap_min_x = max(pixel_min_x, input_region_min_x)
-            overlap_min_y = max(pixel_min_y, input_region_min_y)
-            overlap_max_x = min(pixel_max_x, input_region_max_x)
-            overlap_max_y = min(pixel_max_y, input_region_max_y)
-            
-            overlap_size_x = max(overlap_max_x - overlap_min_x, 0.0)
-            overlap_size_y = max(overlap_max_y - overlap_min_y, 0.0)
-            
-            overlap_area = overlap_size_x * overlap_size_y
-            
-            # 5. Accumulate weighted sum
-            # Sample center of input pixel
-            sample_coord = vec2(float(x) + 0.5, float(y) + 0.5)
-            color = texture(inputImage, sample_coord)
-            
-            area_weighted_sum += color * overlap_area
-            
-    # 6. Normalize
-    area_weighted_avg = area_weighted_sum / total_area
-    
-    # 7. Store result
-    imageStore(outputImage, ivec2(u, v), area_weighted_avg)
+            # Boundary check: prevent out-of-bounds writes if dispatch grid exceeds output dimensions [S1, unofficial]
+            if u >= output_size[0] or v >= output_size[1]:
+                continue
+
+            # 1. Calculate ratio
+            ratio_x = input_size[0] / output_size[0]
+            ratio_y = input_size[1] / output_size[1]
+
+            # 2. Determine input region for this output pixel
+            input_region_min_x = u * ratio_x
+            input_region_min_y = v * ratio_y
+            input_region_max_x = (u + 1) * ratio_x
+            input_region_max_y = (v + 1) * ratio_y
+
+            input_region_size_x = input_region_max_x - input_region_min_x
+            input_region_size_y = input_region_max_y - input_region_min_y
+            total_area = input_region_size_x * input_region_size_y
+
+            # 3. Iterate over intersecting input pixels
+            x_start = int(math.floor(input_region_min_x))
+            x_end = int(math.ceil(input_region_max_x))
+            y_start = int(math.floor(input_region_min_y))
+            y_end = int(math.ceil(input_region_max_y))
+
+            area_weighted_sum = (0.0, 0.0, 0.0, 0.0)
+
+            for x in range(x_start, x_end):
+                for y in range(y_start, y_end):
+                    # 4. Calculate overlap area
+                    pixel_min_x = float(x)
+                    pixel_min_y = float(y)
+                    pixel_max_x = float(x + 1)
+                    pixel_max_y = float(y + 1)
+
+                    overlap_min_x = max(pixel_min_x, input_region_min_x)
+                    overlap_min_y = max(pixel_min_y, input_region_min_y)
+                    overlap_max_x = min(pixel_max_x, input_region_max_x)
+                    overlap_max_y = min(pixel_max_y, input_region_max_y)
+
+                    overlap_size_x = max(overlap_max_x - overlap_min_x, 0.0)
+                    overlap_size_y = max(overlap_max_y - overlap_min_y, 0.0)
+
+                    overlap_area = overlap_size_x * overlap_size_y
+
+                    # 5. Accumulate weighted sum
+                    color = read_image(input_image, (x, y))
+                    area_weighted_sum = (
+                        area_weighted_sum[0] + color[0] * overlap_area,
+                        area_weighted_sum[1] + color[1] * overlap_area,
+                        area_weighted_sum[2] + color[2] * overlap_area,
+                        area_weighted_sum[3] + color[3] * overlap_area
+                    )
+
+            # 6. Normalize
+            area_weighted_avg = (
+                area_weighted_sum[0] / total_area,
+                area_weighted_sum[1] / total_area,
+                area_weighted_sum[2] / total_area,
+                area_weighted_sum[3] / total_area
+            )
+
+            # 7. Store result
+            write_image(output_image, output_coords, area_weighted_avg)
 ```
 
 **Edge Cases and Pitfalls:**
 - **Boundary Checks:** The shader must return early if the output coordinate exceeds the output image dimensions to prevent out-of-bounds writes [S1, unofficial].
-- **Precision:** Floating-point precision in ratio calculations and overlap area computations can introduce minor artifacts at extreme aspect ratios.
-- **Degenerate Input:** If input or output dimensions are zero, the ratio calculation results in division by zero or undefined behavior. Implementation should guard against zero dimensions.
+- **Precision:** Not given in the sources. [S1, unofficial]
+- **Degenerate Input:** Not given in the sources. [S1, unofficial]
 
 ## Operating characteristics
-- **Time Complexity:** $O(W_{out} \cdot H_{out} \cdot \text{avg\_overlap\_pixels})$. The number of input pixels processed per output pixel is small (typically 1-4 for downsampling, more for upsampling).
-- **Memory Complexity:** $O(1)$ auxiliary memory per thread.
-- **Performance:** Efficient on GPU due to parallel execution in Compute Shaders. The explicit overlap calculation adds computational overhead compared to simple box filtering but provides higher accuracy.
-- **Strengths:** Accurate downsampling with proper area weighting; handles arbitrary aspect ratios and non-integer scaling factors well.
-- **Limitations:** More computationally expensive than nearest-neighbor or simple box filters; requires careful handling of boundary conditions.
-- **When to Use:** When high-quality downsampling is required, especially for texture atlases or mip-map generation where aliasing and color bleeding must be minimized.
-- **When Not to Use:** When performance is critical and visual quality is less important; simple box filtering or nearest-neighbor may suffice.
+- **Time Complexity:** Not given in the sources. [S1, unofficial]
+- **Memory Complexity:** Not given in the sources. [S1, unofficial]
+- **Performance:** Not given in the sources. [S1, unofficial]
+- **Strengths:** Not given in the sources. [S1, unofficial]
+- **Limitations:** Not given in the sources. [S1, unofficial]
+- **When to Use:** Not given in the sources. [S1, unofficial]
+- **When Not to Use:** Not given in the sources. [S1, unofficial]
 
 ## Background
-Area-Averaged Resampling is a standard technique in image processing and computer graphics for downsampling images while preserving color accuracy. It is based on the principle of integrating the input image over the area covered by each output pixel. The specific implementation described here is found in a GitHub repository for voxel ray traversal, where it is used to generate mipmaps or downsample textures for rendering [S1, unofficial].
+Area-Averaged Resampling is a standard technique in image processing and computer graphics for downsampling images while preserving color accuracy [G]. The specific implementation described here is found in a GitHub repository for voxel ray traversal [S1, unofficial]. Not given in the sources for origin, history, or broader usage. [S1, unofficial]
 
 ## Sources
 [S1] GitHub - DeadlockCode/voxel_ray_traversal, https://github.com/DeadlockCode/voxel_ray_traversal, fetched 2026-10-25 [S1, unofficial]
