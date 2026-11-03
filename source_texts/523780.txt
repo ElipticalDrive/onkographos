@@ -1,0 +1,1476 @@
+1
+Gaussian Splashing:
+Direct Volumetric Rendering Underwater
+Nir Mualem∗ , Roy Amoyal∗ , Oren Freifeld∗ , and Derya Akkaynak†
+∗ Ben-Gurion University of the Negev, Israel
+Email: nirmu@post.bgu.ac.il, amoyalr@post.bgu.ac.il, orenfr@cs.bgu.ac.il
+† The Inter-University Institute for Marine Sciences and the University of Haifa, Israel
+arXiv:2411.19588v2 [cs.CV] 2 Nov 2025
+Email: dakkaynak@univ.haifa.ac.il
+Fig. 1: The proposed method, Gaussian Splashing, reconstructs accurate geometry for underwater scenes in minutes and achieves
+real-time rendering at 140 frames fer second. Here, we demonstrate an application in color reconstruction: we used the depth
+maps produced by our method from raw (but white balanced - WB) images as inputs to the original Sea-thru algorithm [1],
+which requires an accurate depth map to estimate medium parameters. The results, shown here on images from two different
+distances from the new TableDB dataset we contribute, show excellent visual quality, even for distant scene details.
+Abstract—In underwater images, most useful features are
+occluded by water. The extent of the occlusion depends on
+imaging geometry and can vary even across a sequence of burst
+images. As a result, 3D reconstruction methods robust on inair scenes, like Neural Radiance Field methods (NeRFs) or 3D
+Gaussian Splatting (3DGS), fail on underwater scenes. While a
+recent underwater adaptation of NeRFs achieved state-of-the-art
+results, it is impractically slow: reconstruction takes hours and
+its rendering rate, in frames per second (FPS), is less than 1.
+Here, we present a new method that takes only a few minutes for
+reconstruction and renders novel underwater scenes at 140 FPS.
+Named Gaussian Splashing, our method unifies the strengths and
+speed of 3DGS with an image formation model for capturing
+scattering, introducing innovations in the rendering and depth
+estimation procedures and in the 3DGS loss function. Despite
+the complexities of underwater adaptation, our method produces
+images at unparalleled speeds with superior details. Moreover, it
+reveals distant scene details with far greater clarity than other
+methods, dramatically improving reconstructed and rendered
+images. We demonstrate results on existing datasets and a new
+dataset we have collected.
+Index Terms—Underwater Imaging, 3D Reconstruction, Gaussian Splatting
+I. I NTRODUCTION
+Understanding and interpreting underwater scenes pose
+unique challenges for computer vision. Image features that
+would be important for downstream tasks such as detection,
+segmentation, classification, and tracking, etc., are commonly
+occluded by color distortions and haze, which arise due to
+the distance- and wavelength-dependent attenuation of light
+in the water. It may seem straightforward that, if we could
+consistently remove the degrading effects of water from
+underwater photographs, existing computer vision methods
+would be readily applicable. However, in practice, this is
+challenging.
+In the physical world, light attenuation in water is governed
+only by the constituents of the water body. In a photograph,
+the attenuation parameters have little relation to those of the
+real world scene; they are specific to the image, the imager,
+and the conditions under which the image was captured [2],
+[3]. Consequently, in wideband terms, there are no universal
+medium parameters representing a water ‘type’, or rules that
+can be generalized to all underwater images. Therefore, for
+successful color reconstruction—and, by extension, to perform
+downstream tasks like detection and segmentation—medium
+parameters must be estimated per image, alongside scene depth.
+Recently, Akkaynak & Treibitz demonstrated with the Seathru algorithm [1] that if the scene depth is known, medium
+parameters can easily be estimated (Figure 1). Depth for
+underwater scenes is most commonly obtained from multi-
+2
+Gaussian Splashing, avg. training time = 12 min
+30
+WS [12], avg. training time = 20 min
+SeaSplat [13], avg. training time = 1.5 hrs
+PSNR[dB]
+29
+3DGS [14], avg. training time = 10 min
+28
+Splatfacto [15], avg. training time = 30 min
+STNeRF [5], avg. training time = 10 hrs
+27
+STNeRFacto, avg. training time = 3 hrs
+26
+0
+50
+100
+150
+FPS
+Fig. 2: Comparison of methods by Frames Per Second (FPS)
+and Peak Signal-to-Noise Ratio (PSNR). Our approach (red
+diamonds) achieves an impressive PSNR average of 29.11 while
+maintaining high inference speeds for real-time rendering. The
+PSNR values were averaged over the Red Sea, Curaçao, Panama
+and TableDB datasets (the FPS rates are fairly consistent across
+datasets).
+ple images in pre-processing, e.g., through Structure-FromMotion (SFM) [1], [4], or more recently, neural radiance
+fields (NeRFs) [5]. Unfortunately, however, it is not yet
+possible to obtain scene depth underwater, in real-time, without
+using multiple cameras or specialized sensors. Underwaterspecific monocular depth estimation methods (e.g., [6]–[10])
+are performing increasingly better, but do not yet produce
+accurate enough results when scenes are turbid or objects
+are heavily occluded by backscatter, and do not generalize
+to scenes captured under different optical conditions. Depth
+Anything [11], while not trained exclusively for underwater,
+also fails in generalizing to underwater scenes even though
+it boasts excellent zero-shot depth estimation ability for a
+diverse set of land scenes. Thus, robust estimation of scene
+geometry from multiple images—but using as few images as
+possible—remains the most promising direction to pursue.
+When it comes to recovering scene geometry from a sparse
+set of images, NeRFs have achieved immense success [16], [17].
+While classic approaches for scene representation relied on
+explicit geometric models (e.g., meshes [18]), neural rendering
+employs functions [19] or data structures ( [20], [21]) to capture
+the scene’s appearance and geometry. In a fresh perspective in
+neural rendering, NeRFs learn an implicit function to represent
+the scene’s radiance at every point in space. Levy et al. [5]
+were the first to take NeRFs underwater, adapting the original
+rendering equation for image formation in a scattering medium.
+That method, Seathru-NeRF, achieved state-of-the-art (SOTA)
+results for novel-view synthesis and color reconstruction for
+underwater scenes. However, while successful as a prototype
+algorithm, the practicality of Seathru-NeRF is limited by its
+performance—requiring 15-20 images and approximately 3
+hours for training [22], [23]. Even on more powerful hardware
+and with more optimized implementations, it is difficult to
+achieve faster training and near real-time rendering as the
+requirement to evaluate the implicit function along viewing
+rays during rendering makes NeRF-based methods inherently
+computationally expensive.
+Fortunately, a recent (non-neural) radiance field method, 3D
+Gaussian Splatting (3DGS) [14], emerges as an alternative
+that, we argue, is intrinsically more suitable for adaptation to
+underwater scenes. Briefly, 3DGS represents the scene via a
+finite set of anisotropic 3D Gaussians, augmented with opacity
+and color information. Importantly, the algorithm from [14]
+achieves accelerated training (∼ mins) and lends itself to
+real-time novel view synthesis. As with most computer-vision
+methods, however, 3DGS does not readily work on underwater
+scenes. To fill this gap, we proposed a new method, called
+Gaussian Splashing, which is an adaptation of 3DGS specific
+to underwater scenes, and yet its speed is on par with 3DGS.
+The key insight behind the proposed approach is that the entire
+underwater image formation formulation can be integrated
+seamlessly into the 3DGS data representation and the 3DGS
+rendering pipeline. Consequently, we were able to implement
+our new algorithm, in its entirety, in CUDA, without having
+to resort to external (i.e., non-CUDA) computations. In turn,
+this facilitates a smoother backpropagation process and lets
+the method achieve state-of-the-art performance with minimal
+rendering time, establishing it as the fastest in this domain.
+Moreover, unlike several recent methods, which try, and often
+fail, to estimate medium parameters directly (e.g., via an
+expensive neural net), we are able to recover those parameters
+by feeding the Sea-thru image formation model [3] with our
+estimated depth maps. Our main contributions are:
+1. New method: The novelty of the method is fourfold. 1)
+At its core Gaussian Splashing uses a new rendering equation
+based on the Sea-thru image formation model [1] for scattering
+media. 2) The new rendering equation alters the original
+loss function (from [14]) by making it also dependent on
+learnable backscatter coefficients and depth. 3) We also add
+a new loss term related to those coefficients. 4) We propose
+a new depth estimation procedure and combine it within the
+overall optimization. 2. SOTA results: for geometry estimation
+(especially for far away pixels under high backscatter), scene
+color reconstruction, and reconstruction of high-frequency areas
+(i.e., sharp visual detail); see, e.g., Figure 1. 3. Speed: Fast
+training (∼mins) and real-time rendering (see, e.g., Figure 2)
+despite the fact that we work with the images in their original
+high resolution (i.e., no down-sampling as is mandated by the
+NeRF-based methods), and real-time novel-view synthesis of
+original and color-reconstructed scenes. This speed is obtained
+by virtue of both our algorithm design and the fact that the
+entire algorithm is implemented in pure CUDA (with a userfriendly Python wrapper). 4. New dataset: We collected a
+dataset of images of an underwater 3D scene. Unlike existing
+such datasets, ours presents a large variability in terms of
+camera-to-scene distances.
+Our results and the speed of our method are a significant step
+forward towards overcoming the primary bottleneck—robust
+depth estimation—that has prevented underwater computer
+vision from achieving the progress and performance in-air
+computer vision has enjoyed in the last decade.
+II. R ELATED W ORK
+Given the different and more complex image formation
+process underwater, we focus here on works in the underwater
+realm. For the in-land case, recent reviews of NeRF-based
+3
+methods and 3DGS methods can be found in [24] and [25],
+respectively. Due to the logistical difficulties and costs of
+collecting high-quality, calibrated data at sea, there are markedly
+fewer studies on scene reconstruction and novel-view synthesis
+underwater than for scenes on land.
+NeRF-based methods. WaterNeRF [26] uses an atmospheric image formation model and histogram-equalized images
+to estimate medium parameters. WaterHE-NeRF [27] utilizes
+the Retinex theory for attenuation removal, which is meant
+to compensate for spatially-varying illumination. That method
+is limited to close-range scenes where backscatter is small.
+Seathru-NeRF [5] was the first NeRF using an image
+formation model for scattering. While it achieved SOTA results
+on novel-view synthesis and color reconstruction, both its
+training and inference were very slow. Moreover, that method
+has difficulties with accurately capturing scene details that are
+far from the camera (that said, in that aspect other existing
+methods do even worse as capturing such details underwater
+is hard). Lian et al. [28] proposed a framework to quantify
+the uncertainty in underwater scenes rendered via NeRFs, but
+did not propose a new way to render. Additionally, it focused
+only on scenes illuminated with white light (i.e., deep sea
+imagery), which makes it inapplicable to the outputs of all
+other methods using physics-based image formation models,
+such as Seathru-NeRF.
+3DGS [14], central to our paper, offers a different approach
+to scene representation by explicitly modeling scenes with
+3D Gaussians, augmented with color and opacity information.
+Unlike NeRFs, which rely on implicit representations, 3DGS
+offers both enhanced interpretability and intuitive manipulation
+of scene geometry. Its rendering method, utilizing splatting (i.e.,
+projecting 3D Gaussians to 2D), analytic derivatives, and a tilebased processing, enables rapid estimation of the parameters
+of the augmented Gaussians. Importantly, by replacing the
+complex processes of NeRF with a discrete representation and
+direct rendering, 3DGS achieves real-time rendering during
+inference, marking a significant improvement in rendering
+efficiency and performance.
+A work that applied 3D Gaussian Splatting (3DGS) to
+underwater scenes is Z-Splat [29], introduced by Qu et
+al. It extends 3DGS by incorporating sonar data to address the
+“missing cone problem”. However, that method requires both
+optical and acoustic data (and thus specialized instrumentation),
+in contrast to our purely vision-based multi-view approach.
+Several other recent works have also addressed the problem
+of adapting 3DGS to underwater environments, including
+WaterSplatting [12], UW-GS [30], and SeaSplat [13].
+While these methods tackle similar challenges of underwater
+rendering, they either combine 3DGS with neural networks
+( [12], [30]) , which increases rendering time, or introduce additional learnable parameters and multiple loss terms
+( [13]) to achieve model fitting. Among those methods,
+WaterSplatting [12] and SeaSplat [13], have released
+their code, allowing us to perform a direct comparison.
+Notably, our method, unlike these alternatives, (1) does not
+rely on deep neural networks and (2) is implemented entirely
+in CUDA, making it significantly faster. In terms of reconstruction quality, our approach achieves results comparable
+to WaterSplatting—the best-performing method among
+these works—as shown in Figure 2.
+III. P RELIMINARIES
+A. 3D Gaussian Splatting (3DGS)
+3DGS [14] represents a 3D scene by N 3D Gaussians,
+each of which is augmented with two more attributes: color
+and opacity. Let θi = (µi , Σi , ci , σi ) denote the parameters
+of Gaussian i, where µi ∈ R3 is its 3D position (i.e., its
+mean), Σi , a 3-by-3 symmetric positive-definite matrix, is
+its covariance matrix, ci ∈ R3 is the color (represented by
+Spherical Harmonics), and σi ≥ 0 is the opacity. Thus, Θ ≜
+(θi )N
+i=1 represents the entire scene.
+If Θ and the camera pose are known, the corresponding
+2D image can be generated by rendering the scene. The
+rendering process accumulates the contributions from each
+Gaussian (based on differentiable point-based rendering techniques [31] [32] [33]) along viewing rays to generate the image
+as follows. Given the camera pose, the 2D location of a pixel
+defines a ray, in 3D, from the camera origin to the pixel. Let
+pi ∈ R3 be the closest point, among all of the points on the
+ray, to µi . The pixel’s color, denoted by C, is computed using
+a technique called α-compositing:
+XM
+Yi−1
+C=
+ci αi Ti ,
+Ti ≜
+(1 − αj ) ,
+(1)
+i=1
+j=0
+where M < N , and, in a slight abuse of notation, possibly
+renaming indices, the M Gaussians participating in Eq. 1 are
+sorted in an increasing order according to their depth (i.e.,
+the distance from the camera), and αi > 0 is the opacity
+contribution of Gaussian i to this pixel, defined by
+1
+T
+−1
+αi = sigmoid(σi )e− 2 (pi −µi ) Σi (pi −µi ) .
+(2)
+Typically, the pixel-dependent number M ≪ N ; i.e., only a
+small subset of the N Gaussians affects the pixel’s color. How
+the subset is chosen will be clear later when we discuss tiles.
+Also, in practice, (pi − µi )T Σ−1
+i (pi − µi ) is computed in
+2D (not 3D) using an affine projection that approximates the
+camera’s projection of pi , µi , and Σi ; see [34] for details. Note
+that αi ∈ [0, 1] ∀i, and that the effect of Ti , which is called the
+transmittance of Gaussian i (for that particular pixel), is that
+the first i − 1 Gaussians (whose depths are smaller than that
+of Gaussian i) downweight the color contribution of Gaussian
+i according to their opacity, covariance matrices, and distances
+from the ray.
+To achieve real-time rendering, 3DGS employs two strategies [35]: 1) Tiles: To avoid computing contribution of every
+Gaussian for every pixel, the image is divided into nonoverlapping patches, called tiles, of 16 × 16 pixels. Among the
+N 2D projected Gaussians, only those close enough (e.g., less
+than several standard deviations) to the tile are deemed relevant
+for that tile (the other Gaussians are ignored). Thus, during the
+rendering of a pixel, the α-compositing (Eq. 2) uses only the
+projected Gaussians associated with the tile containing the pixel.
+In other words, all the pixels within the a tile share the value of
+M . 2) Parallel Rendering: The tile-based approach, together
+with the direct rendering, facilitates massive parallelism that
+leads to huge speedups.
+4
+So far we discussed the forward problem; i.e., how a 2D
+image is rendered given Θ and the camera pose. The inverse
+problem, which uses the forward one as a sub-routine, is as
+follows: given a collection of 2D images and the associated
+estimated camera poses, reconstruct the 3D scene by optimizing
+over Θ. This reconstruction is also referred to as the learning
+of the scene. After the reconstruction, novel view synthesis
+(i.e., generalization) is done by rendering the scene given a
+new camera pose. Finally, compositing techniques are often
+employed during post-processing of 3DGS to combine the
+contributions from various effects (e.g., lighting, materials,
+anti-aliasing [36], [15], [37]).
+B. Underwater Image Formation
+By definition, clear air does not attenuate light so image
+formation models for clear air do not include the medium
+parameters. When the medium is attenuating (e.g., atmospheric
+haze, fog, smog, and all water bodies), an image formation
+model must include, at a minimum, two processes that affect
+light: out-scattering from the scene as light travels towards the
+camera (commonly referred to as attenuation, which causes
+color distortions), and in-scattering from the water volume
+between the camera and the scene (i.e., commonly referred to
+as backscatter or path radiance, which causes haze/visibility
+loss). We adapt the Sea-thru image formation model [3] that
+includes both these processes and is applicable to scenes that
+are either in air or underwater:
+direct signal
+I=
+z
+backscatter signal
+}|
+{ z
+}|
+{
+∞
+−βd (vd )·z
+−βb (vb )·z
++
+J
+B
+·
+(e
+)
+·
+(1
+−
+e
+).
+|{z} |
+|{z} |
+{z
+}
+{z
+}
+clean image
+attenuation
+color at ∞
+(3)
+backscatter
+Here, I is the image captured by the camera and has attenuated
+colors while J is the clean image “without water”. The terms βd
+and βb are wideband medium parameters governing attenuation
+and backscatter, respectively, and they have dependencies vd
+and vb on object reflectance, spectrum of ambient light, spectral
+response of the camera, and physical attenuation coefficients
+of the water body, all of which are wavelength-dependent
+functions. B ∞ is the saturated color of water at infinity, i.e.,
+the signal present in areas without objects, and z is the scene
+depth, which must be known for each pixel. The direct signal
+governs how the colors of the objects in the scene are affected
+by the distance that the light travels in a given water body,
+and the backscatter signal governs the density and color of
+the “fog” occluding the scene. The backscatter signal exists
+due to the scattering in the water volume and is independent
+of the scene/objects.
+It is important to note that the camera sensor is assumed
+to have a linear response to light, otherwise Eq. 3 does not
+hold. Similarly, the image from which the parameters will be
+estimated must also be linear, meaning in-camera processed
+.jpg images or gamma-corrected images cannot be used,
+unless the non-linearities can be reversed.
+3DGS by introducing three additional learnable parameters
+and adapt the rendering procedure to accommodate scattering
+(§ IV-A). Similarly, we modify depth estimation for underwater
+conditions (§ IV-B), thereby altering the original loss terms
+used in 3DGS, and introduce an additional related loss term
+(§ IV-C). In § IV-D we discuss our pure-CUDA implementation.
+Figure 3 depicts the entire method.
+A. Direct Rendering for Underwater Scenes
+According to [3], βb (vd ) can be treated as constant within
+an image, while βd mainly varies with the object distance (i.e.,
+z) and to a lesser extent with object reflectance. Similarly, all
+dependencies of βd (vd ) can be assumed to be small [2], except
+for that on the scene depth z, which we model to be linear.
+Thus, Eq. 4 is well approximated by
+direct signal
+I=
+z
+clean image
+attenuation
+Unsurprisingly, as we will show in § V, in underwater
+scenes 3DGS is very limited. Hence, we extend the traditional
+color at ∞
+(4)
+backscatter
+where Bb is a constant approximating βb (vb ) and Bd is a
+constant such that Bd ·z ≈ βd (vd )·z (i.e., the linear dependency
+of βd (vd ) on z is absorbed into Bd )
+Analogously to [5], who extended NeRF to underwater
+scenes, we incorporate backscatter and attenuation effects into
+the 3DGS formulation. Utilizing the coefficients from Eq. 4,
+we propose a new rendering formula for Gaussian Splashing
+(namely, Gaussian Splatting underwater):
+X
+
+M
+Cuw =
+ci αi Ti e−Bd z + B∞ (1 − e−Bb z ) (5)
+i=1
+Qi−1
+where Ti ≜
+j=0 (1 − αj ). Here, Cuw is the final color
+for the underwater scene, while Bd is the direct attenuation
+parameter and the pair (B∞ , Bb ) are the backscatter attenuation
+parameters. We emphasize that Bd , B∞ , and Bb are learnable
+parameters and are not assumed to be known beforehand. The
+other variables in Eq. 5 are as in Eq. 1.
+B. Estimating Dense Depth Maps
+When using 3DGS for land scenes, there is usually no need
+to estimate dense depth maps. However, in the underwater
+case, color distortions strongly depend on scene depth (among
+other factors). Drawing inspiration from methodologies in [38]
+and [39], we propose a technique for extracting the depth z
+from (based on a current estimate of Θ) while leveraging the
+rasterization pipeline (further details in § IV-C). Concretely,
+upon the rendering of an image, at each pixel we extract the
+depth, denoted by z, as
+X
+ X
+
+M
+M
+(6)
+z=
+di αi Ti /
+αi Ti
+i=1
+IV. T HE P ROPOSED M ETHOD : G AUSSIAN S PLASHING
+backscatter signal
+}|
+{ z
+}|
+{
+−Bd ·z
+∞
+−Bb ·z
+J
+·
+(e
+)
+B
+·
+(1
+−
+e
+)
++
+|{z} | {z }
+|{z} |
+{z
+}
+i=1
+where di is the depth of Gaussian i. As we will explain
+in § IV-C, during the optimization we use Eq. 6 to extract the
+z values and these help in guiding the learning.
+5
+Fig. 3: Method overview: Initially, we utilize Structure from Motion (SfM) to acquire an initial point cloud and camera poses.
+Subsequently, we commence the optimization process to refine the model based on our underwater rendering equation and
+modified tile rasterization, taking those distortions into account. We evaluate backscatter every 500 steps to ensure convergence
+towards the accurate medium coefficients using our approach. The base figure is adapted from the original 3D Gaussian Splatting
+method in [14].
+d
+c
+C. Optimization
+least squares fitting to estimate parameters B
+∞ and Bb for each
+The original loss function used in [14] is relatively simple, RGB channel while ensuring they remain within the bounds [0,
+1] and [0, 5], respectively. The full algorithm for estimating
+comprising two widely-used losses,
+these parameters appears in the Appendix.
+XK
+d
+c
+(1 − λ1 ) Ikgt − Ikr (Θ) ℓ + λ1 LD-SSIM (Ikgt , Ikr (Θ)) ,
+While those estimates, B
+∞ and Bb , are fairly effective, rather
+1
+k=1
+(7) than using them directly, we opt to learn the parameters as part
+where K is the number of images, λ1 ∈ [0, 1] is user-defined, of the overall optimization, during which we let those estimates
+Ikgt and Ikr are i-th ground truth (i.e., observed) image and merely guide the learning of the B∞ and Bb parameters.
+i-th rendered image, respectively, ∥·∥ is the ℓ norm, and Concretely, our proposed loss function is
+ℓ1
+1
+LD-SSIM [40] measures the structural similarity between the
+two images, providing a perceptually-motivated metric.
+Let Bs = B ∞ (1 − e−Bb ·z ) denote the true-but-unknown
+backscatter (from Eq. 4) at a pixel. One of the advantages of
+3DGS over NeRF-based methods is the ability to quickly render
+entire images during the optimization process. This is in sharp
+contrast to NeRFs which, due to computational reasons, must
+render only a small number (e.g., 500) of randomly-chosen
+pixels during the optimization [16] [19] [41]. The fast rendering
+lets us, during the optimization, obtain rough estimates of
+B∞ and Bb from the rendered images. To better estimate
+the backscattering parameters, we introduce an additional
+loss, denoted by Lbs , inspired by the backscatter-estimation
+method outlined in [1]. Backscatter increases with depth z
+and eventually saturates [1], [3]. Thus, shadowed areas across
+the entire image provide a good estimate of the backscatter
+without the direct signal. Initially, we divide the depth map
+obtained from the current estimate of the scene (see § IV-B)
+into 10 evenly-spaced clusters covering the range from the
+minimal value of z to the maximal. Within each cluster, we
+identify, in the ground-truth image, the pixels whose RGB
+triplets are below the bottom 1st percentile. These triplets serve
+as an overestimate of the backscatter, which we model as
+cb z
+−B
+bs = B
+d
+B
+)
+∞ (1 − e
+(8)
+bs and z are the color value and depth estimate at such
+where B
+bs , z) values, we use nonlinear
+a pixel. Given the pairs of (B
+L(Θ, Bd , B∞ , Bb ) =
+XK
+(1 − λ1 ) Ikgt − Ikr (Θ, Bd , B∞ , Bb ) ℓ +
+k=1
+1
+λ1 LD-SSIM (Ikgt , Ikr (Θ, Bd , B∞ , Bb )) + λ2 Lbs (B∞ , Bb )
+(9)
+where λ2 > 0 is user defined and Lbs (B∞ , Bb ) =
+d
+cb . As the depth maps improve
+B∞ − B
++ Bb − B
+∞
+ℓ1
+ℓ1
+during the optimization process, every 500 iterations we recompute (using Eq. 6 and the nonlinear least squares procedure
+d
+c
+mentioned earlier) the B
+∞ and Bb quantities that appear in
+Lbs . This approach represents an alternate learning strategy,
+where the iterative improvement of depth maps leads to
+d
+c
+the refinement of B
+∞ and Bb , which we then utilize for
+improving the optimization over the 3D scene (which, in turn,
+impacts the depth, z; see Eq. 6). Therefore, the additional loss
+term facilitates better reconstruction and depth estimation in
+underwater scenes.
+It is important to note that the difference between Eq. 7 and
+Eq. 9 is not just (the periodic inclusion of) Lbs but also the
+fact that in Eq. 9, the rendered images (which appear in the
+∥·∥ℓ1 and LD-SSIM loss terms in both equations) are functions
+of Θ, Bd , B∞ , and Bb (not just Θ).
+To minimize Eq. 9 over Θ, Bd , B∞ , and Bb we employ
+the Adam optimizer [42], utilizing the same learning rate as
+in [14]. Our additional parameters (i.e., Bd , B∞ , and Bb ) are
+trained using the same learning rate as each Gaussian color
+6
+TABLE I: Quantitative Comparison.
+Dataset
+Method
+3DGS [14]
+Splatfacto [15]
+STNeRF [5]
+STNeRfacto [23]
+WS [12]
+SeaSplat [13]
+Gaussian Splashing (Ours)
+Red Sea
+PSNR↑
+22.94
+21.65
+21.83
+23.17
+24.49
+22.23
+24.73
+SSIM↑
+0.87
+0.85
+0.77
+0.86
+0.90
+0.86
+0.92
+Curaçao
+LPIPS↓
+0.17
+0.20
+0.25
+0.14
+0.18
+0.17
+0.11
+PSNR↑
+28.23
+25.30
+30.48
+28.42
+31.43
+30.58
+31.26
+SSIM↑
+0.88
+0.88
+0.87
+0.89
+0.96
+0.93
+0.92
+parameter ci . The details of the partial derivatives for all our
+additional parameters appear in the Appendix.
+To recap, our approach is grounded in an established
+formulation of underwater image formation that we use to
+adapt the 3DGS rendering to aquatic environments. Together
+with our proposed additional loss term and gradual depth
+estimation, this lets us propose a fast and effective method for
+underwater 3D reconstruction and novel view synthesis.
+D. Implementation
+We incorporate the extraction of the depth map z from
+the 3DGS representation using our own customized CUDA
+implementation. Empirically, the best result was achieved by
+mapping our depth to [0, 1.0) by the (shifted and scaled) logistic
+function, z = 2/(1 + e−0.1·bz ) − 1 where zb is the initial output
+of 3DGS manipulation based on [39]. This logistic function
+transforms the original depth values to ensure they fall within
+the desired range for underwater visualization.
+Leveraging the insights from [14], we have developed
+a CUDA-based package that harnesses the power of the
+differential rasterization pipeline. This approach ensures both
+speed and efficiency in integrating our extra parameters tailored
+to underwater scenes.
+Finally, in [43], one of the steps in 3DGS, the so-called
+densification process (addition and removal of Gaussians), was
+recently improved by using an MCMC approach to sample
+Gaussians for subsequent iterations. We adopt this improvement,
+as we found it beneficial for capturing high-frequency details
+in the scene.
+V. E XPERIMENTS AND R ESULTS
+A. New Dataset
+Noting that existing public underwater datasets are limited
+in terms of the variation in camera-to-scene distances, we
+captured a new underwater dataset (TableDB). It consists of
+172 images with a resolution of 1384 × 918 pixels (see our
+Appendix for example images), and, unlike existing public
+datasets, it is unbounded in terms camera-to-scene distances.
+Panama
+LPIPS↓
+0.23
+0.19
+0.20
+0.12
+0.13
+0.15
+0.17
+PSNR↑
+29.88
+30.61
+27.89
+30.53
+31.24
+29.82
+31.35
+SSIM↑
+0.91
+0.93
+0.83
+0.92
+0.93
+0.93
+0.94
+TableDB
+LPIPS↓
+0.15
+0.07
+0.22
+0.07
+0.09
+0.12
+0.11
+PSNR↑
+31.17
+32.51
+29.76
+18.7
+21.29
+20.30
+32.61
+SSIM↑
+0.91
+0.92
+0.86
+0.63
+0.73
+0.78
+0.96
+LPIPS↓
+0.12
+0.06
+0.15
+0.42
+0.31
+0.22
+0.07
+of underwater scenes in natural environments is Sea-Thru NeRF
+(STNeRF) [5], which serves as our primary quality benchmark.
+Two implementations of STNeRF exist: one built upon the
+NeRF backbone from [46], and another implemented within
+the Nerfstudio framework [47], where the more advanced
+Nerfacto variant is used as the backbone. We refer to the
+latter as STNeRFacto and compare our method against both
+versions. Our approach extends the original 3D Gaussian
+Splatting (3DGS) [14] by adapting it to aquatic environments
+through the integration of ocean optics models. Accordingly,
+we also include comparisons with the original 3DGS and
+with Splatfacto [48], which currently achieves state-of-the-art
+results on in-the-wild scenes. Additionally, we report qualitative
+and runtime comparisons with WaterSplatting (WS) [12] and
+SeaSplat [13]. We measure performance using three widelyused metrics: PSNR, LPIPS, and SSIM. Peak Signal-to-Noise
+Ratio (PSNR) quantifies image quality by measuring the ratio
+between the maximal possible power of a signal and the
+power of the corrupting noise. Learned Perceptual Image Patch
+Similarity (LPIPS) assesses perceptual similarity by comparing
+deep features extracted from neural networks, as in [49],
+providing a human-aligned evaluation of visual similarity.
+Structural Similarity Index (SSIM) evaluates image similarity
+based on luminance, contrast, and structure, thereby capturing
+perceptual differences that align closely with human visual
+perception.
+Hyper-parameters, memory and computational resources.
+In our experiments, we set λ2 = 0.1 and λ1 = 0.3. All of the
+other hyper-parameters values are as in [14]; see our appendix
+for details. Training was conducted on a single NVIDIA
+GeForce RTX 4090 GPU. The average memory consumption
+per scene over 30,000 training steps was approximately 500
+MB, which is slightly less than STNeRF’s average of around
+600 MB.
+C. Results
+Figure 4 presents a visual comparison between the different
+methods, while Figure 5 shows results from other underwater splatting approaches, which are slower than ours, as
+B. Experiments
+demonstrated in Figure 2. While all methods achieve highDatasets and Camera Pose Extraction. In addition to our quality performance at close ranges, a significant difference in
+TableDB we also experimented on several publicly available reconstruction quality becomes apparent at larger distances.
+A quantitative analysis, summarized in Table I, shows the
+underwater datasets from [5]. We used COLMAP [44], [45]
+to extract camera poses and utilized its sparse 3D point effectiveness of the proposed method. Being based on 3DGS,
+initialization to determine the initial positions of the Gaussians. our method is very fast, much faster than the NeRF-based
+Competing methods and evaluation metrics. The most methods. For example, its training takes only several minutes
+relevant prior work addressing 3D reconstruction and rendering and, during inference, it renders images at 140 frames per
+7
+(a) Ground Truth
+(b) 3DGS [14]
+(c) STNeRFacto [23]
+(d) Ours
+Fig. 4: Visual Comparison of novel views. Row 1: an example from the Red-Sea scene. Row 3/5/7: examples from the TableDB
+dataset. Rows 2/4/6: zoom in on the red rectangles in Rows 1/3/5. Note that Row 7 highlights STNeRFacto’s failure on
+unbounded scenes.
+second (FPS) on average (across multiple datasets). Please
+see the appendix for a comprehensive comparison between
+the different methods in terms of running times during both
+training and inference. Table I also shows that vanilla 3DGS
+(while being fast) struggles to effectively handle underwater
+scenes (see also Figure 4). This is in sharp contrast with our
+method which offers both speed and quality.
+Although traditional metrics like PSNR might be misleading
+in underwater scenarios due to the predominant bluish color
+palette, our method’s superiority becomes evident upon closer
+inspection, particularly when examining distant objects within
+the scene. This advantage is particularly pronounced with
+datasets like TableDB, which unlike publicly-available datasets,
+is unbounded in viewpoints and scene depth. Of note, our
+method stands out in preserving the original resolution of
+rendered scenes and the geometry (see figure Figure 6) due to
+its efficient rendering speed, as shown in Figure 2. In contrast,
+STNeRF, STNeRFacto and WS which must downsize the
+images during training. Futhermore, our work can use for
+color reconstruction applications using our depth maps, see
+Figure 7. For additional visual results, see the appendix. Also,
+for best impression, we strongly encourage the reader to
+see our videos on our webpage.
+D. Time Comparison
+Measuring the rendering time of our method reveals that
+it is significantly faster than competitors in both training and
+inference. The high frame rate achieved during rendering
+enables its use in real-time applications while maintaining
+accuracy at such speeds. Detailed results are summarized in
+Table II.
+VI. A BLATION S TUDY
+Our ablation study, summarized in Table III, considered
+several conditions: 1) Removing our additional loss term Lbs ;
+8
+(a) WS [12]
+(b) SeaSplat [13]
+(c) Ours
+Fig. 5: Visual comparison of novel views generated by different underwater splatting methods. Evidently, our results are better
+than SeaSplat’s, and are comparable to those of WS. That said, our method is much faster. Also, in regions far from the
+cameras, our method typically yields sharper results than WS.
+2) Forcing Bd to be zero, to test if Bs alone can capture
+enough of the underwater scene distortions. 3) Using original
+densification process from [14] instead of MCMC densification
+process approach [43]. 4) Replacing our depth estimation
+with a standard monocular depth model ( [50], [51]). For
+completeness, Table III also includes, as a baseline, the original
+3DGS [14], as well as our complete model. As Table III shows,
+all of the components turn out to be important.
+9
+(a) Rendered (train)
+(b) Depth (train)
+(c) Rendered (test)
+(d) Depth (test)
+Fig. 6: Rendered views and novel views, along with the depth maps generated by our method, shown for scenes from the Red
+Sea, Panama, and Curaçao.
+Fig. 7: Color reconstruction application utilizing depth maps generated by our method, with raw (white-balanced, WB) images
+as inputs to the original Sea-thru algorithm [1]. Results are presented across all datasets.
+10
+Dataset
+Red Sea
+Curaçao
+TableDB
+Method
+FPS↑
+Training Time (min)↓
+FPS↑
+Training Time (min)↓
+FPS↑
+Training Time (min)↓
+3DGS [14]
+Splatfacto [15]
+STNeRF [5]
+STNeRfacto [23]
+WS [12]
+SeaSplat [13]
+Gaussian Splashing (Ours)
+174
+129
+0.05
+0.72
+53
+41
+187
+10
+28
+582
+168
+23
+85
+11
+154
+111
+0.05
+0.76
+82
+110
+135
+13
+25
+547
+151
+32
+98
+12
+162
+119
+0.06
+0.53
+61
+112
+161
+16
+37
+612
+213
+37
+124
+15
+TABLE II: Comprehensive comparison table across scenes, highlighting the frames per second (FPS) performance during
+rendering and the training time (minutes) required to create the model.
+TABLE III: Ablation Study
+Dataset
+Red Sea
+Method
+3DGS [14] (the baseline)
+Ours w/o Lbs
+Ours w/o Bd
+Ours w/o MCMC densification
+Ours w/o depth
+Our complete method
+PSNR↑
+22.94
+22.93
+22.12
+23.04
+21.16
+24.73
+SSIM↑
+0.87
+0.88
+0.88
+0.88
+0.84
+0.92
+Curaçao
+LPIPS↓
+0.17
+0.14
+0.15
+0.15
+0.23
+0.11
+PSNR↑
+28.23
+20.65
+30.12
+28.40
+23.86
+31.26
+SSIM↑
+0.88
+0.79
+0.89
+0.89
+0.80
+0.92
+VII. C ONCLUSION
+Panama
+LPIPS↓
+0.23
+0.27
+0.20
+0.23
+0.24
+0.17
+PSNR↑
+29.88
+27.67
+29.47
+29.99
+27.69
+31.35
+SSIM↑
+0.91
+0.87
+0.91
+0.91
+0.88
+0.94
+Avg.
+LPIPS↓
+0.15
+0.21
+0.13
+0.14
+0.21
+0.11
+PSNR↑
+27.02
+23.75
+27.24
+27.14
+24.23
+29.11
+SSIM↑
+0.89
+0.85
+0.89
+0.89
+0.84
+0.92
+LPIPS↓
+0.18
+0.20
+0.16
+0.31
+0.23
+0.13
+While our formulation’s strength lies in its ability to learn the
+medium’s characteristics, the success of that learning depends
+on having enough variation in scene range. However, while [5],
+[23] struggle if the inter-image range variability is too large
+(see Figure 4), our method handles such cases gracefully.
+We presented Gaussian Splashing, a variant of 3D-Gaussian
+Splatting specialized for underwater imagery. Our method
+accurately estimates geometry for underwater scenes, from
+as few as five images, which is a necessary step to maximize
+the amount of useful information that can be extracted from
+the original images containing attenuated colors. Perhaps more B. Discussion
+importantly, our method performs geometry estimation from a
+Having accurate scene geometry is a necessary component
+handful of scenes within a few minutes (compared to several for consistent color reconstruction, following which underwater
+hours for NeRF-based methods). We are unaware of any imagery can be processed using powerful computer-vision and
+potential negative societal impact of this work. Having accurate machine-learning methods developed for in-air images. Thus,
+scene geometry is a necessary component for consistent getting close to near real-time training opens the possibility
+color reconstruction, following which underwater imagery can for real-time color reconstruction of underwater scenes, which
+be processed using powerful computer-vision and machine- would improve capabilities of autonomous or remotely operated
+learning methods developed for in-air images. Thus, getting underwater vehicles for better navigation, SLAM, and obstacle
+close to near real-time training opens the possibility for real- avoidance. Lastly, leveraging well-estimated scene geometry,
+time color reconstruction of underwater scenes, which would we are able to render novel-views of underwater scenes in
+improve capabilities of autonomous or remotely operated real time. This capability can have a broad and positive
+underwater vehicles for better navigation, SLAM, and obstacle societal impact as it immediately enables applications for
+avoidance. Lastly, leveraging well-estimated scene geometry, subsea training (e.g., divers or submarine pilots, search and
+we are able to render novel-views of underwater scenes in rescue teams, commercial divers, etc.), computer games, marine
+real time. This capability can have a broad and positive science education, and cultural heritage documentation.
+societal impact as it immediately enables applications for
+subsea training (e.g., divers or submarine pilots, search and
+ACKNOWLEDGMENTS
+rescue teams, commercial divers, etc.), computer games, marine
+This
+project
+was
+partially funded by the U.S. Office of
+science education, and cultural heritage documentation.
+Naval Research (US ONR), whose support is gratefully
+acknowledged.
+A. Limitations
+Our method shares three limitations with [5], [23]: 1) While,
+like [5], [23], we rely on a SOTA image formation model, that
+model does not address phenomena such as multiple scattering
+or artificial illumination. 2) The method requires the extraction
+of camera poses, which is hard if the visibility is too poor (as in,
+e.g., turbid water). This limitation is shared with not only [5],
+[23] but also other NeRF-based or 3DGS-based methods. 3)
+R EFERENCES
+[1] D. Akkaynak and T. Treibitz, “Sea-thru: A method for removing water
+from underwater images,” in CVPR, 2019. 1, 2, 5, 9
+[2] D. Akkaynak, T. Treibitz, T. Shlesinger, R. Tamir, Y. Loya, and D. Iluz,
+“What is the space of attenuation coefficients in underwater computer
+vision?” in CVPR, 2017. 1, 4
+[3] D. Akkaynak and T. Treibitz, “A revised underwater image formation
+model,” in CVPR, 2018. 1, 2, 4, 5
+11
+[4] M. She, F. Seegräber, D. Nakath, and K. Köser, “Refractive
+colmap: Refractive structure-from-motion revisited,” arXiv preprint
+arXiv:2403.08640, 2024. 2
+[5] D. Levy, A. Peleg, N. Pearl, D. Rosenbaum, D. Akkaynak, S. Korman,
+and T. Treibitz, “Seathru-nerf: Neural radiance fields in scattering media,”
+in CVPR, 2023. 2, 3, 4, 6, 10, 18
+[6] H. Gupta and K. Mitra, “Unsupervised single image underwater depth
+estimation,” in ICIP. IEEE, 2019. 2
+[7] B. Yu, J. Wu, and M. J. Islam, “Udepth: Fast monocular depth estimation
+for visually-guided underwater robots,” in IEEE ICRA, 2023. 2
+[8] F. Zhang, S. You, Y. Li, and Y. Fu, “Atlantis: Enabling underwater
+depth estimation with stable diffusion,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2024, pp.
+11 852–11 861. 2
+[9] S. Amitai, I. Klein, and T. Treibitz, “Self-supervised monocular depth
+underwater,” in IEEE ICRA, 2023. 2
+[10] N. Varghese, A. Kumar, and A. Rajagopalan, “Self-supervised monocular
+underwater depth recovery, image restoration, and a real-sea video dataset,”
+in ICCV, 2023. 2
+[11] L. Yang, B. Kang, Z. Huang, X. Xu, J. Feng, and H. Zhao, “Depth
+anything: Unleashing the power of large-scale unlabeled data,” in CVPR,
+2024. 2
+[12] H. Li, W. Song, T. Xu, A. Elsig, and J. Kulhanek, “WaterSplatting: Fast
+underwater 3D scene reconstruction using gaussian splatting,” arXiv,
+2024. 2, 3, 6, 8, 10
+[13] D. Yang, J. J. Leonard, and Y. Girdhar, “Seasplat: Representing
+underwater scenes with 3d gaussian splatting and a physically grounded
+image formation model,” arxiv, 2024. 2, 3, 6, 8, 10
+[14] B. Kerbl, G. Kopanas, T. Leimkühler, and G. Drettakis, “3d Gaussian
+splatting for real-time radiance field rendering,” ACM Transactions on
+Graphics, 2023. [Online]. Available: https://repo-sam.inria.fr/fungraph/
+3d-gaussian-splatting/ 2, 3, 5, 6, 7, 8, 10, 18
+[15] Z. Liang, Q. Zhang, W. Hu, Y. Feng, L. Zhu, and K. Jia, “Analyticsplatting: Anti-aliased 3d Gaussian splatting via analytic integration,”
+2024. 2, 4, 6, 10
+[16] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi,
+and R. Ng, “Nerf: Representing scenes as neural radiance fields for view
+synthesis,” in ECCV, 2020. 2, 5
+[17] K. Gao, Y. Gao, H. He, D. Lu, L. Xu, and J. Li, “Nerf: Neural
+radiance field in 3d vision, a comprehensive review,” arXiv preprint
+arXiv:2210.00379, 2022. 2
+[18] V. Verma and E. Walia, “3d rendering - techniques and challenges,”
+International Journal of Engineering and Technology, 2010. 2
+[19] T. Müller, A. Evans, C. Schied, and A. Keller, “Instant neural graphics
+primitives with a multiresolution hash encoding,” ACM ToG, 2022.
+[Online]. Available: https://doi.org/10.1145/3528223.3530127 2, 5
+[20] S. Fridovich-Keil, A. Yu, M. Tancik, Q. Chen, B. Recht, and A. Kanazawa,
+“Plenoxels: Radiance fields without neural networks,” in CVPR, 2022. 2
+[21] S. Jabłoński and T. Martyn, “Real-time voxel rendering algorithm based
+on screen space billboard voxel buffer with sparse lookup textures,” 2016.
+[Online]. Available: https://api.semanticscholar.org/CorpusID:30022774
+2
+[22] M. Tancik, E. Weber, E. Ng, R. Li, B. Yi, J. Kerr, T. Wang, A. Kristoffersen, J. Austin, K. Salahi, A. Ahuja, D. McAllister, and A. Kanazawa,
+“Nerfstudio: A modular framework for neural radiance field development,”
+in SIGGRAPH, 2023. 2
+[23] P. Setinek, “Seathru-nerf: Nerf studio,” https://github.com/AkerBP/
+seathru nerf, 2023. [Online]. Available: https://github.com/AkerBP/
+seathru nerf 2, 6, 7, 10
+[24] M. Yao, Y. Huo, Y. Ran, Q. Tian, R. Wang, and H. Wang, “Neural
+radiance field-based visual rendering: A comprehensive review,” arXiv
+preprint arXiv:2404.00714, 2024. 3
+[25] B. Fei, J. Xu, R. Zhang, Q. Zhou, W. Yang, and Y. He, “3d Gaussian as
+a new vision era: A survey,” arXiv preprint arXiv:2402.07181, 2024. 3
+[26] A. V. Sethuraman, M. S. Ramanagopal, and K. A. Skinner, “Waternerf:
+Neural radiance fields for underwater scenes,” in OCEANS 2023MTS/IEEE US Gulf Coast, 2023. 3
+[27] J. Zhou, T. Liang, Z. He, D. Zhang, W. Zhang, X. Fu, and C. Li,
+“Waterhe-nerf: Water-ray tracing neural radiance fields for underwater
+scene reconstruction,” arXiv preprint arXiv:2312.06946, 2023. 3
+[28] H. Lian, X. Li, L. Chen, X. Wen, M. Zhang, J. Zhang, and Y. Qu,
+“Uncertainty quantification of neural reflectance fields for underwater
+scenes,” Journal of Marine Science and Engineering, 2024. 3
+[29] Z. Qu, O. Vengurlekar, M. Qadri, K. Zhang, M. Kaess, C. Metzler,
+S. Jayasuriya, and A. K. Pediredla, “Z-splat: Z-axis Gaussian
+splatting for camera-sonar fusion,” ArXiv, 2024. [Online]. Available:
+https://api.semanticscholar.org/CorpusID:269004701 3
+[30] H. Wang, N. Anantrasirichai, F. Zhang, and D. R. Bull, “Uw-gs:
+Distractor-aware 3d gaussian splatting for enhanced underwater scene
+reconstruction,” 2025 IEEE/CVF Winter Conference on Applications of
+Computer Vision (WACV), pp. 3280–3289, 2024. [Online]. Available:
+https://api.semanticscholar.org/CorpusID:273025943 3
+[31] G. Kopanas, J. Philip, T. Leimkühler, and G. Drettakis, “Point-based
+neural rendering with per-view optimization,” Computer Graphics Forum
+(Proceedings of the Eurographics Symposium on Rendering), 2021.
+[Online]. Available: http://www-sop.inria.fr/reves/Basilic/2021/KPLD21
+3
+[32] O. Wiles, G. Gkioxari, R. Szeliski, and J. Johnson, “Synsin: End-to-end
+view synthesis from a single image,” in CVPR), 2019. 3
+[33] Y. Wang, F. Serena, S. Wu, C. Öztireli, and O. Sorkine-Hornung,
+“Differentiable surface splatting for point-based geometry processing,”
+ACM TOG, 2019. 3
+[34] M. Zwicker, H. Pfister, J. van Baar, and M. H. Gross, “Ewa splatting,”
+IEEE Trans. Vis. Comput. Graph., 2002. 3
+[35] G. Chen and W. Wang, “A survey on 3d Gaussian splatting,” 2024. 3
+[36] Y. Jiang, J. Tu, Y. Liu, X. Gao, X. Long, W. Wang, and Y. Ma,
+“Gaussianshader: 3d Gaussian splatting with shading functions for
+reflective surfaces,” arXiv preprint arXiv:2311.17977, 2023. 4
+[37] Z. Yang, H. Yang, Z. Pan, and L. Zhang, “Real-time photorealistic
+dynamic scene representation and rendering with 4d Gaussian splatting,”
+in ICLR, 2024. 4
+[38] J. Luiten, G. Kopanas, B. Leibe, and D. Ramanan, “Dynamic 3d
+Gaussians: Tracking by persistent dynamic view synthesis,” ArXiv, 2023.
+[Online]. Available: https://api.semanticscholar.org/CorpusID:261030923
+4
+[39] J. Chung, J. Oh, and K. M. Lee, “Depth-regularized optimization for 3d
+Gaussian splatting in few-shot images,” ArXiv, 2023. [Online]. Available:
+https://api.semanticscholar.org/CorpusID:265351489 4, 6
+[40] Z. Wang, E. P. Simoncelli, and A. C. Bovik, “Multiscale structural
+similarity for image quality assessment,” in Asilomar Conference on
+Signals, Systems & Computers, 2003. 5
+[41] Z. Li, T. Müller, A. Evans, R. H. Taylor, M. Unberath, M.-Y. Liu, and
+C.-H. Lin, “Neuralangelo: High-fidelity neural surface reconstruction,”
+in CVPR, 2023. 5
+[42] D. P. Kingma and J. Ba, “Adam: A method for stochastic optimization,”
+CoRR, 2014. [Online]. Available: http://arxiv.org/abs/1412.6980 5
+[43] S. Kheradmand, D. Rebain, G. Sharma, W. Sun, J. Tseng, H. Isack,
+A. Kar, A. Tagliasacchi, and K. M. Yi, “3d gaussian splatting as markov
+chain monte carlo,” arXiv preprint arXiv:2404.09591, 2024. 6, 8
+[44] J. L. Schönberger and J.-M. Frahm, “Structure-from-motion revisited,”
+in CVPR, 2016. 6
+[45] J. L. Schönberger, E. Zheng, M. Pollefeys, and J.-M. Frahm, “Pixelwise
+view selection for unstructured multi-view stereo,” in ECCV, 2016. 6
+[46] B. Mildenhall, D. Verbin, P. P. Srinivasan, P. Hedman, R. MartinBrualla, and J. T. Barron, “MultiNeRF: A Code Release for
+Mip-NeRF 360, Ref-NeRF, and RawNeRF,” 2022. [Online]. Available:
+https://github.com/google-research/multinerf 6
+[47] M. Tancik, E. Weber, E. Ng, R. Li, B. Yi, J. Kerr, T. Wang, A. Kristoffersen, J. Austin, K. Salahi, A. Ahuja, D. McAllister, and A. Kanazawa,
+“Nerfstudio: A modular framework for neural radiance field development,”
+SIGGRAPH, 2023. 6
+[48] V. Ye and A. Kanazawa, “Mathematical supplement for the gsplat
+library,” ArXiv, 2023. [Online]. Available: https://api.semanticscholar.
+org/CorpusID:266176741 6
+[49] A. Krizhevsky, I. Sutskever, and G. E. Hinton, “Imagenet classification
+with deep convolutional neural networks,” Communications of the ACM,
+2012. [Online]. Available: https://api.semanticscholar.org/CorpusID:
+195908774 6
+[50] R. Ranftl, K. Lasinger, D. Hafner, K. Schindler, and V. Koltun, “Towards
+robust monocular depth estimation: Mixing datasets for zero-shot crossdataset transfer,” IEEE TPAMI, 2020. 8
+[51] R. Ranftl, A. Bochkovskiy, and V. Koltun, “Vision transformers for dense
+prediction,” ArXiv preprint, 2021. 8
+12
+Nir Mualem is a computer vision researcher in the
+tech industry. He received his M.Sc. in Computer
+Science (AI track) from Ben-Gurion University and
+his B.Sc. in Computer Science from the Technion
+– Israel Institute of Technology, graduating with
+excellence in both degrees. His master’s research
+focused on 3D reconstruction for underwater scenes
+and CUDA optimization. He works on problems in
+3D reconstruction, computer vision, and machine
+learning.
+Roy Amoyal is a Ph.D. candidate in Computer Science at Ben-Gurion
+University of the Negev, under the supervision of Prof. Oren Freifeld. He
+received his B.Sc. and M.Sc. degrees in Computer Science from Ben-Gurion
+University. His research focuses on 3D Gaussian Splatting and 3D registration.
+He also has industry experience in 3D computer vision for autonomous drone
+navigation and led the Autonomous Vision Division of the BGRacing Formula
+Student team, under whose leadership the team built Israel’s first autonomous
+race car.
+Oren Freifeld received his BSc and MSc degrees in Biomedical Engineering
+from Tel-Aviv University, in 2005 and 2007, respectively. He received the ScM
+and PhD degrees in Applied Mathematics from Brown University, in 2009 and
+2013, respectively. Later, he was a postdoc with the MIT Computer Science
+& Artificial Intelligence Laboratory. Next, he joined Ben-Gurion University
+where he is currently an Associate Professor at the Faculty of Computer and
+Information Science. His fields of research are computer vision and machine
+learning.
+Derya Akkaynak is an assistant professor in the
+Department of Marine Technologies at the University
+of Haifa, where she directs the COLOR Lab located
+at the Interuniversity Institute of Marine Sciences
+in Eilat. She received her PhD in Mechanical &
+Oceanographic Engineering from MIT and Woods
+Hole Oceanographic Institution, MSc in Aeronautics
+and Astronautics from MIT, and BSc in Aerospace
+Engineering from METU (Turkey). She studies light
+and vision in the ocean, at the intersection of which
+lies color.
+13
+(a) Ground Truth (train)
+(b) Rendered (train)
+(c) Ground Truth (test)
+(d) Rendered (test)
+Fig. 8: Supplementary rendering results exemplifying the effectiveness and visual quality of our method across three different
+scenes and conditions. Train refers to the data used during the reconstruction. Test refers to novel views.
+VIII. A PPENDIX
+A PPENDIX
+A. Additional Visual Results
+Qualitative videos showcasing comparisons, depth estimation,
+and backscattering estimation, including videos for frames from
+our new TableDB dataset, are available on our webpage, and
+we strongly encourage viewing them to get a better impression
+and deeper understanding. Additional rendering results for
+training images and novel views are presented in Figure 8,
+where Figure 9 includes several images from our new TableDB
+dataset (more examples from TableDB are available in our
+webpage).
+14
+(a) Ground Truth (train)
+(b) Rendered (train)
+(c) Ground Truth (test)
+(d) Rendered (test)
+Fig. 9: Supplementary rendering results demonstrating the effectiveness and visual quality of our method on the TableDB dataset.
+TableDB is a distinctive underwater dataset featuring a wide range of depths. “Train” refers to data used for reconstruction,
+while “Test” represents novel views.
+15
+B. Partial Derivatives of the New Parameters
+CUW =
+"N
+X
+#
+ci αi · Ti e−Bd z + B∞ (1 − e−Bb z )
+i=1
+
+N
+i−1
+X
+Y
+=
+ci αi ·
+(1 − αj ) e−Bd z + B∞ (1 − e−Bb z )
+i=1
+∂CUW −Bd z
+∂L
+∂L
+=
+·e
+·
+∂ci
+∂ci
+∂CUW
+∂L
+= αi Ti · e−Bd z ·
+∂CUW
+i−1
+Y
+∂L
+= αi (1 − αj ) · e−Bd z ·
+∂CUW
+j=0
+∂CUW −Bd z
+∂L
+∂L
+=
+·e
+·
+∂αi
+∂α
+∂C
+i
+UW
+
+= ci · Ti −
+N
+−1
+X
+cj αj
+j=i+1
+
+= ci
+i−1
+Y
+(1 − αj ) −
+j=0
+(10)
+j=0
+(11)
+
+∂L
+Tj  −Bd z
+·e
+·
+(1 − αi )
+∂CUW
+N
+−1
+X
+cj α j
+j=i+1
+i−1
+Y
+(1 − αk )
+k=0
+j−1
+Y
+k=i+1
+!
+∂L
+(1 − αk )  · e−Bd z ·
+∂CUW
+N
+X
+∂L
+∂L
+=−
+(ci αi Ti ) · e−Bd z ·
+∂Bd
+∂C
+UW
+i=1
+
+
+N
+i−1
+X
+Y
+∂L
+ci αi
+=−
+(1 − αj ) · e−Bd z ·
+∂C
+UW
+i=1
+j=0
+∂L
+=
+∂Bb
+
+∂L
+=
+∂B∞
+
+∂L
+∂CUW
+∂L
+∂CUW
+
+
+(12)
+(13)
+B∞ e−Bb z + λ2
+(14)
+(1 − e−Bb z ) + λ2
+(15)
+C. Backscatter Estimation
+The backscatter estimation algorithm is outlined in algorithm 1, which calls algorithm 2 as a subroutine. A visual explanation
+of underwater attenuation is provided in Figure 10.
+16
+backscatter
+attenuation
+Fig. 10: Illustration of the scattering and absorption of light by waterborne particles, which then reflect back to the camera.
+This phenomenon leads to image degradation by reducing contrast, altering colors, and obscuring fine details, posing significant
+challenges for underwater imaging and rendering.
+Algorithm 1: Estimate Backscatter
+Input: Ism , zsm , pdark = 0.01, intervals num = 25, resized height = 300
+1) Resize Ism to resized height
+2) Set negative values in Ism to 0
+3) Resize zsm to resized height
+4) Set negative values in zsm to 0
+5) darkZ, Bc ← getBackscatterByCurveFittingMultipleImages(Ism , zsm , pdark ) (i.e., algorithm 2)
+6) intervals ← linspace(min(darkZ), max(darkZ), intervals num)
+7) Initialize min values depth and minvals as empty lists for each color channel
+8) for each color channel k do
+a) for each interval i in intervals do
+i) Find indices ind within the current interval
+ii) if valid data exists then
+A) Append min(Bc [ind, k]) to minvals[k]
+B) Append corresponding darkZ value to min values depth[k]
+9) Initialize out as a zero matrix
+10) for each color channel k do
+a) Fit model to min values depth[k] and minvals[k]
+b) Extract parameters b∞ and bcb into out
+11) B∞ ← out[0, :]
+12) Bb ← out[1, :]
+13) return {B∞ , Bb }
+17
+Algorithm 2: Get Backscatter By Curve Fitting Multiple Images
+Input: I, zsm , pdark = 0.01, rhof lag = 0, edges num = 10
+1) Initialize edges with edges num evenly spaced values between min(zsm ) and max(zsm )
+2) Compute zcluster = clusterRange(zsm , edges)
+3) Initialize maskRho as a zero matrix with the same shape as zsm
+4) for i in range(len(edges) − 1) do
+a) SetPthisM ask = (zcluster == i)
+b) if (thisM ask) > 0 then
+i) Extract thisRho using thisM ask
+ii) Find darkest pixels in thisRho with threshold pdark
+iii) Update maskRho by adding thisM askRho
+5) Convert maskRho to boolean
+6) Extract darkest pixels and their corresponding depths using maskRho and dm, resulting in darkZ and Bc
+7) return darkZ, Bc
+18
+D. Experimental Setup
+We adopted hyperparameters consistent with those used in
+[14], as they have shown to yield optimal results empirically.
+For underwater-specific parameters, we maintained the same
+learning rates as those used for color. Our data splits involved
+testing every 8 images, and we utilized the Adam optimizer.
+• Iterations: 30,000
+• Position Learning Rate Initial: 0.00016
+• Position Learning Rate Final: 0.0000016
+• Position Learning Rate Delay Multiplier: 0.01
+• Position Learning Rate Maximum Steps: 30,000
+• Feature Learning Rate: 0.0025
+• Direct Volume Absorption Learning Rate: 0.0025
+• Backscatter Learning Rate: 0.0025
+• Opacity Learning Rate: 0.05
+• Scaling Learning Rate: 0.005
+• Rotation Learning Rate: 0.001
+• Lambda SSIM: 0.3
+• Lambda Backscatter: 0.1
+• Densification Interval: 100
+• Opacity Reset Interval: 3000
+• Densify From Iteration: 1500
+• Densify Until Iteration: 15,000
+• Densify Gradient Threshold: 0.0002
+• Minimum Opacity Threshold: 0.1
+E. License Restrictions
+Utilizing the [14] code package entails adhering to the
+following license restrictions:
+• Redistribution: You may reproduce or distribute the Work
+only if (a) you do so under this License, (b) include a
+complete copy of this License with your distribution, and
+(c) retain all copyright, patent, trademark, or attribution
+notices present in the Work.
+• Derivative Works: You may specify additional or different
+terms for your derivative works of the Work (”Your
+Terms”) only if (a) Your Terms include the use limitation
+in Section 2, and (b) you identify the specific derivative
+works subject to Your Terms. The original License still
+applies to the Work itself.
+• Other Uses: Any other use without prior consent of the
+Licensors is prohibited. Research users must ensure they
+have all necessary information to use the Software safely.
+• Publications: If using the Software for a publication,
+users are encouraged to cite the relevant publications as
+detailed in the Software documentation.
+Additionally, the dataset distribution restrictions from [5]
+are also enforced.

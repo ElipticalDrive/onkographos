@@ -1,0 +1,244 @@
+--- v002.md
++++ v003.md
+@@ -1,6 +1,7 @@
+ # Projective Spatial Transformer (ProST)
+ 
++
+ ## Overview
+-ProST is a differentiable volume rendering module that generalizes spatial transformers to projective geometry, enabling volumetric rendering of transmission images (such as radiographs) that are differentiable with respect to both the input volume and the pose parameters [S1]. It solves the problem of performing end-to-end differentiable projection of voxelized data (e.g., CT scans) onto 2D planes, which is essential for tasks like 2D/3D registration where gradients must flow from a 2D similarity metric back through the projection to the 3D pose [S1]. Unlike mesh-based differentiable renderers, ProST operates directly on voxel grids using a cone-beam ray casting approach, making it suitable for medical imaging applications [S1].
++ProST is a differentiable volume rendering module that generalizes spatial transformers to projective geometry, enabling volumetric rendering of transmission images that are differentiable with respect to both the input volume and the pose parameters [S1]. It solves the problem of performing end-to-end differentiable projection of voxelized data onto 2D planes, which is essential for tasks like 2D/3D registration where gradients must flow from a 2D similarity metric back through the projection to the 3D pose [S1]. Unlike mesh-based differentiable renderers, ProST operates directly on voxel grids using a cone-beam ray casting approach, making it suitable for medical imaging applications [S1].
+ 
+ ## How it works
+@@ -15,5 +16,5 @@
+ 
+ **Data Structures:**
+-*   **Spatial Grid $G$**: A matrix of shape $\mathbb{R}^{4 \times (M \cdot N \cdot K)}$. Each column represents a control point in homogeneous coordinates [S1].
++*   **Spatial Grid $G$**: A matrix of shape $\mathbb{R}^{4 \times (M \cdot N \cdot K)}$ where each column represents a control point in homogeneous coordinates [S1].
+ *   **Transformed Grid $G_T$**: The grid $G$ transformed by the pose $\theta$ [S1].
+ *   **Sampled Values $G_S$**: A tensor of shape $\mathbb{R}^{M \times N \times K}$ containing interpolated volume values at the transformed control points [S1].
+@@ -21,31 +22,9 @@
+ **Steps:**
+ 
+-1.  **Coordinate Normalization**: Map the input volume $V$ to normalized coordinates $(d, w, h) \in [-1, 1]^3$ using the dimensions and voxel sizes:
+-    $$ d = \frac{x}{D v_D}, \quad w = \frac{y}{W v_W}, \quad h = \frac{z}{H v_H} $$
+-    The reference frame $F_r$ origin is at the center of $V$ [S1].
+-
+-2.  **Grid Construction**:
+-    *   Define the source point in $F_r$ as $(0, 0, src)$ [S1].
+-    *   Construct $M \times N$ rays originating from the source point.
+-    *   Cut the grid point cloud to a cone-shape structure that covers the exact volume space $V$. This ensures that control points in empty regions (where no CT voxels exist) do not contribute to the line integral [S1].
+-    *   Place $K$ control points uniformly spaced within the volume $V$ on each ray.
+-    *   Store these points in the spatial grid $G \in \mathbb{R}^{4 \times (M \cdot N \cdot K)}$ in homogeneous coordinates [S1].
+-
+-3.  **Pose Transformation**:
+-    *   Compute the affine transformation matrix $T(\theta)$ from the pose parameters $\theta$ [S1].
+-    *   Transform the control points:
+-        $$ G_T = T(\theta) \cdot G $$
+-    *   Transform the source point to $T(\theta) \cdot (0, 0, src, 1)$ and the detection plane center to $T(\theta) \cdot (0, 0, det, 1)$ [S1].
+-
+-4.  **Grid Sampling (Interpolation)**:
+-    *   Interpolate the volume values $V$ at the transformed control points $G_T$.
+-    *   The interpolation function $\text{interp}(V, G_T)$ yields $G_S \in \mathbb{R}^{M \times N \times K}$:
+-        $$ G_S = \text{interp}(V, G_T) $$
+-    *   Since control points lie between voxels, standard trilinear or nearest-neighbor interpolation is used [S1].
+-
+-5.  **Projection (Integration)**:
+-    *   Collapse the $k$ dimension of $G_S$ by summing along the rays to produce the 2D image $I$:
+-        $$ I^{(m,n)} = \sum_{k=1}^{K} G_S^{(m,n,k)} $$
+-    *   The detection plane is centered on $(0, 0, det)$ and perpendicular to the z-axis. Its upper-right corner is at $(p_{MM} v_W W, p_{NN} v_H H, det)$ [S1].
++1.  **Coordinate Normalization**: Map the input volume $V$ to normalized coordinates $(d, w, h) \in [-1, 1]^3$ using the dimensions and voxel sizes [S1]. The reference frame $F_r$ origin is placed at the center of $V$ [S1].
++2.  **Grid Construction**: Define the source point in $F_r$ as $(0, 0, src)$ [S1]. Construct $M \times N$ rays originating from the source point [S1]. Cut the grid point cloud to a cone-shape structure that covers the exact volume space $V$ [S1]. Place $K$ control points uniformly spaced within the volume $V$ on each ray [S1]. Store these points in the spatial grid $G \in \mathbb{R}^{4 \times (M \cdot N \cdot K)}$ in homogeneous coordinates [S1].
++3.  **Pose Transformation**: Compute the affine transformation matrix $T(\theta)$ from the pose parameters $\theta$ [S1]. Transform the control points using $G_T = T(\theta) \cdot G$ [S1]. Transform the source point to $T(\theta) \cdot (0, 0, src, 1)$ and the detection plane center to $T(\theta) \cdot (0, 0, det, 1)$ [S1].
++4.  **Grid Sampling (Interpolation)**: Interpolate the volume values $V$ at the transformed control points $G_T$ [S1]. The interpolation function yields $G_S \in \mathbb{R}^{M \times N \times K}$ via $G_S = \text{interp}(V, G_T)$ [S1]. Since control points lie between voxels, standard trilinear or nearest-neighbor interpolation is applied [S1].
++5.  **Projection (Integration)**: Collapse the $k$ dimension of $G_S$ by summing along the rays to produce the 2D image $I$ [S1]. The projection is computed as $I^{(m,n)} = \sum_{k=1}^K G_S^{(m,n,k)}$ [S1]. The detection plane is centered on $(0, 0, det)$ and perpendicular to the z-axis, with its upper-right corner at $(p_{MM} v_W W, p_{NN} v_H H, det)$ [S1].
+ 
+ **Pseudocode:**
+@@ -54,94 +33,88 @@
+ import torch
+ import torch.nn.functional as F
++import math
+ 
+-def projective_spatial_transformer(V, K_mat, theta, M, N, K_pts):
++def projective_spatial_transformer(V, K_mat, theta, M, N, K_pts, src, det):
+     """
+-    V: Volume tensor of shape (D, W, H) or (1, D, W, H)
+-    K_mat: Camera intrinsic matrix (3, 3)
+-    theta: Pose parameters (6,) representing SE(3) transformation
+-    M, N: Grid dimensions for the output image
+-    K_pts: Number of control points per ray
++    V: Volume tensor of shape (D, W, H) in normalized coordinates [-1, 1]^3 [S1]
++    K_mat: Camera intrinsic matrix (3, 3) [S1]
++    theta: Pose parameters (6,) representing SE(3) transformation [S1]
++    M, N: Grid dimensions for the output image [S1]
++    K_pts: Number of control points per ray [S1]
++    src, det: Distances along the z-axis [S1]
+     """
+-    # 1. Get volume dimensions and voxel sizes
+-    # Note: Voxel sizes vD, vW, vH are assumed to be known or normalized to 1
+-    # If V is in physical units, normalization is required.
+-    # Here we assume V is already in normalized coordinates [-1, 1]^3 or
+-    # the interpolation handles the scaling. The source maps to [-1, 1].
+-    
+-    # 2. Construct the base grid G in the reference frame
+-    # Source point is (0, 0, src)
+-    # We need to generate M*N rays.
+-    # For each ray, generate K_pts points uniformly spaced within the volume cone.
+-    # This requires calculating the intersection of rays with the volume bounds.
+-    # The source generates a cone. The grid G is 4 x (M*N*K_pts)
+-    
+-    # Implementation detail: The grid generation is typically done in CUDA/C++
+-    # as per the source. Here we simulate the logical steps.
+-    
+-    # Generate ray directions based on K_mat and image grid (M, N)
+-    # The detection plane is at z = det.
+-    # Points on detection plane: (x_det, y_det, det)
+-    # Ray direction = (x_det, y_det, det) - (0, 0, src)
+-    
+-    # Create meshgrid for M x N
++    # 1. Generate detection plane grid points
+     u = torch.linspace(-1, 1, M)
+     v = torch.linspace(-1, 1, N)
+-    u_grid, v_grid = torch.meshgrid(u, v)
++    u_grid, v_grid = torch.meshgrid(u, v, indexing='ij')
++    uv = torch.stack([u_grid.flatten(), v_grid.flatten()], dim=-1) # (M*N, 2)
+     
+-    # Map to detection plane coordinates using K_mat
+-    # This step depends on the specific definition of K_mat and detection plane size.
+-    # The source states the upper-right corner is at (p_MM * v_W * W, p_NN * v_H * H, det).
+-    # We assume a standard pinhole model mapping.
+-    
+-    # For simplicity, assume we have ray origins (source) and directions.
+-    # Source is fixed at (0,0,src) in Fr.
+-    source = torch.tensor([0.0, 0.0, src, 1.0])
+-    
+-    # Generate K_pts points along each ray within the volume bounds.
+-    # This creates the base grid G.
+-    # G shape: (4, M*N*K_pts)
+-    G = construct_cone_grid(source, ray_directions, volume_bounds, K_pts)
+-    
+-    # 3. Transform Grid by Pose theta
+-    # T(theta) is the 4x4 transformation matrix for SE(3)
+-    T_theta = se3_to_matrix(theta)
+-    
+-    # Transform G
+-    # G_T = T_theta @ G
+-    G_T = T_theta @ G
+-    
+-    # 4. Interpolate Volume V at G_T
+-    # G_T contains homogeneous coordinates. Convert to Cartesian for sampling.
+-    # G_T_cart = G_T[:3, :] / G_T[3, :]
+-    # Reshape to (M, N, K_pts, 3)
+-    G_T_cart = G_T[:3, :] / G_T[3, :]
++    # Map to detection plane at z = det using normalized coordinates [S1]
++    det_x = uv[:, 0] * det
++    det_y = uv[:, 1] * det
++    det_z = torch.full_like(det_x, det)
++    det_points = torch.stack([det_x, det_y, det_z], dim=-1) # (M*N, 3)
++
++    # 2. Construct cone grid G
++    source = torch.tensor([0.0, 0.0, src]) # (3,) [S1]
++    directions = det_points - source # (M*N, 3)
++    directions = directions / torch.norm(directions, dim=1, keepdim=True)
++
++    # Volume bounds in normalized space: [-1, 1]^3 [S1]
++    bounds_min = torch.tensor([-1.0, -1.0, -1.0])
++    bounds_max = torch.tensor([1.0, 1.0, 1.0])
++
++    # Find t range where ray intersects volume bounds
++    t_min = torch.max(torch.max((bounds_min - source) / directions, dim=1).values)
++    t_max = torch.min(torch.min((bounds_max - source) / directions, dim=1).values)
++    t_min = torch.clamp(t_min, min=0.0)
++    t_max = torch.clamp(t_max, max=1e6)
++    t_min = torch.where(t_min < t_max, t_min, t_max)
++
++    # Sample K_pts uniformly along valid t range
++    t_vals = torch.linspace(0, 1, K_pts).to(directions.device)
++    t_samples = t_min.unsqueeze(1) + t_vals.unsqueeze(0) * (t_max.unsqueeze(1) - t_min.unsqueeze(1)) # (M*N, K_pts)
++
++    # Compute control points: P = source + t * direction
++    G_cart = source.unsqueeze(0) + t_samples.unsqueeze(2) * directions.unsqueeze(1) # (M*N, K_pts, 3)
++    # Convert to homogeneous coordinates and reshape to (4, M*N*K_pts) [S1]
++    ones = torch.ones(M * N * K_pts, 1, device=G_cart.device)
++    G_cart_flat = G_cart.view(-1, 3)
++    G_hom = torch.cat([G_cart_flat, ones], dim=1).T # (4, M*N*K_pts)
++
++    # 3. Pose transformation
++    T_theta = se3_to_matrix(theta) # [G]
++    G_T = T_theta @ G_hom # (4, M*N*K_pts) [S1]
++
++    # 4. Interpolation
++    # Convert homogeneous to Cartesian
++    G_T_cart = G_T[:3, :] / G_T[3, :] # (3, M*N*K_pts)
+     G_T_cart = G_T_cart.view(3, M, N, K_pts).permute(1, 2, 3, 0) # (M, N, K_pts, 3)
+-    
+-    # Normalize coordinates to [-1, 1] for PyTorch grid_sample if V is in that space
+-    # If V is in physical space, adjust accordingly.
+-    # Assuming V is in normalized space [-1, 1]^3
+-    G_T_norm = G_T_cart # Already in normalized space if constructed that way
+-    
+-    # Sample V
+-    # grid_sample expects (N, H, W, 2) or (N, D, H, W, 3) for 3D
+-    # V shape: (1, D, W, H) -> (1, H, W, D) for grid_sample?
+-    # PyTorch grid_sample for 3D: input (N, C, D, H, W), grid (N, out_D, out_H, out_W, 3)
+-    
+-    # Reshape V for grid_sample
+-    V_4d = V.unsqueeze(0) # (1, 1, D, W, H)
+-    
+-    # grid_sample requires coordinates in [-1, 1]
+-    # G_T_norm is already in [-1, 1]
+-    
+-    # Sample
+-    # G_S shape: (1, 1, M, N, K_pts)
+-    G_S = F.grid_sample(V_4d, G_T_norm, mode='trilinear', padding_mode='zeros', align_corners=True)
+-    
+-    # 5. Integrate along rays
+-    # G_S shape: (1, 1, M, N, K_pts)
+-    # Sum over K_pts dimension
+-    I = G_S.sum(dim=-1).squeeze() # (M, N)
+-    
++
++    # Ensure V has batch/channel dim for grid_sample: (1, 1, D, W, H)
++    if V.dim() == 3:
++        V = V.unsqueeze(0).unsqueeze(0)
++    # grid_sample expects grid in [-1, 1]
++    G_S = F.grid_sample(V, G_T_cart.unsqueeze(0), mode='trilinear', padding_mode='zeros', align_corners=True) # (1, 1, M, N, K_pts)
++
++    # 5. Integration
++    I = G_S.squeeze().sum(dim=-1) # (M, N) [S1]
+     return I
++
++def se3_to_matrix(theta):
++    """Converts 6D SE(3) parameters to a 4x4 transformation matrix [G]."""
++    rx, ry, rz, tx, ty, tz = theta
++    cx, sx = math.cos(rx), math.sin(rx)
++    cy, sy = math.cos(ry), math.sin(ry)
++    cz, sz = math.cos(rz), math.sin(rz)
++    R = torch.tensor([
++        [cz*cy, cz*sy*sx - sz*cx, cz*sy*cx + sz*sx],
++        [sz*cy, sz*sy*sx + cz*cx, sz*sy*cx - cz*sx],
++        [-sy, cy*sx, cy*cx]
++    ])
++    T = torch.eye(4)
++    T[:3, :3] = R
++    T[:3, 3] = torch.tensor([tx, ty, tz])
++    return T
+ ```
+ 
+@@ -154,6 +127,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Empty Regions**: Control points in regions where no CT voxels exist do not contribute to the line integral. The grid is explicitly cut to a cone-shape to cover only the volume space to avoid sampling empty space unnecessarily [S1].
+-*   **Precision**: The implementation uses C++ and CUDA extensions for grid generation to ensure efficiency and precision, embedding the projection as a PyTorch layer for autograd [S1].
++*   **Empty Regions**: Control points in regions where no CT voxels exist do not contribute to the line integral [S1]. The grid is explicitly cut to a cone-shape to cover only the volume space to avoid sampling empty space unnecessarily [S1].
++*   **Precision**: The implementation uses C++ and CUDA extensions for grid generation to ensure efficiency and precision, embedding the projection as a PyTorch layer for analytical gradient flow [S1].
+ 
+ ## Subtopics
+@@ -163,6 +136,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The projection operation is embedded as a PyTorch layer with tensor variables, taking advantage of the spatial transformer grid to reduce the projection to a series of linear transformations. The intermediate variables are reasonably sized for modern computational graphics cards [S1].
+-*   **Memory Complexity**: The spatial grid $G$ has size $4 \times M \times N \times K$. The sampled tensor $G_S$ has size $M \times N \times K$. These are loaded as tensor variables in memory [S1].
++*   **Time Complexity**: The projection operation is embedded as a PyTorch layer with tensor variables, taking advantage of the spatial transformer grid to reduce the projection to a series of linear transformations [S1]. The intermediate variables are reasonably sized for modern computational graphics cards [S1].
++*   **Memory Complexity**: The spatial grid $G$ has size $4 \times M \times N \times K$ and the sampled tensor $G_S$ has size $M \times N \times K$, both loaded as tensor variables in memory [S1].
+ *   **Strengths**: Enables end-to-end learning of an image processing and projection model that approximates an image similarity function convex with respect to pose parameters, allowing effective optimization using conventional gradient descent [S1]. No learning parameters are required for the projection itself, allowing registration with PyTorch's built-in optimizers on large-scale volume representations [S1].
+ *   **Limitations**: The method is specific to volumetric data (voxelized models) and may not be directly applicable to mesh-based representations without modification [S1].

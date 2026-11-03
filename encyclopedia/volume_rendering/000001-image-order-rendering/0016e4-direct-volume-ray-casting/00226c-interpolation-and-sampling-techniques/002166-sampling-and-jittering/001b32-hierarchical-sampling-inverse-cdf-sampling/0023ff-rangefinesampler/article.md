@@ -26,19 +26,19 @@ The implementation uses batched tensor indexing and sorting operations [S1, unof
 **Steps:**
 
 1.  **Determine Effective Sample Count:**
-    Calculate the number of fine samples to generate around the peak. This is bounded by `max_samples` and `N_samples`.
+    Calculate the number of fine samples to generate around the peak [S1, unofficial]. This is bounded by `max_samples` and `N_samples` [S1, unofficial].
     $$ N_{fine} = \min(\text{max\_samples}, N_{samples}) $$ [S1, unofficial]
 
 2.  **Find Peak Weight Index:**
-    Identify the index of the coarse sample with the maximum weight for each ray.
+    Identify the index of the coarse sample with the maximum weight for each ray [S1, unofficial].
     $$ \text{max\_indices} = \text{argmax}_{dim=-1}(\text{coarse\_weights}) $$ [S1, unofficial]
 
 3.  **Retrieve Peak Z-Value:**
-    Get the depth value corresponding to the peak weight for each ray.
+    Get the depth value corresponding to the peak weight for each ray [S1, unofficial].
     $$ \text{max\_z\_vals} = \text{coarse\_z\_vals}[\text{arange}(\text{num\_rays}), \text{max\_indices}] $$ [S1, unofficial]
 
 4.  **Generate Uniform Samples Around Peak:**
-    Create a uniform grid of $N_{fine}$ samples centered around `max_z_vals`. The grid spans an interval of width `range`. The formula distributes points evenly across this interval.
+    Create a uniform grid of $N_{fine}$ samples centered around `max_z_vals` [S1, unofficial]. The source defines `range` as the total width, but the code formula uses `2 * range`, effectively making `range` a half-width in implementation [S1, unofficial]. The formula distributes points evenly across this interval [S1, unofficial].
     $$ z_{fine} = \text{max\_z\_vals}[:, \text{None}] - \text{range} + \frac{2 \cdot \text{range}}{N_{fine} - 1} \cdot \text{arange}(N_{fine}) $$ [S1, unofficial]
 
 5.  **Apply Stratified Sampling (Optional):**
@@ -108,7 +108,7 @@ def range_fine_sampler(coarse_z_vals, coarse_weights, near, far, max_samples, N_
     max_z_vals = coarse_z_vals[arange_rays, max_indices]
     
     # Step 4: Generate uniform samples around peak
-    # Handle N_fine = 1 case to avoid division by zero
+    # Handle N_fine = 1 case to avoid division by zero [G]
     if N_fine == 1:
         z_fine = max_z_vals.unsqueeze(1)
     else:
@@ -144,9 +144,9 @@ def range_fine_sampler(coarse_z_vals, coarse_weights, near, far, max_samples, N_
 - `max_samples`: Integer. Global cap on total samples [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Division by Zero:** If `N_fine` is 1, the uniform spacing formula divides by zero. The implementation must handle this by returning the single peak value [S1, unofficial].
-- **Boundary Conditions:** The random samples `z_add` are strictly within `[near, far]`. The uniform samples `z_fine` are centered on `max_z_vals` with width `range`. If `max_z_vals` is close to `near` or `far`, `z_fine` may extend outside the valid ray bounds. The source does not explicitly clamp `z_fine`, which is a potential pitfall [S1, unofficial].
-- **Index 0 Peak:** When `max_indices == 0`, the fine samples are not injected. This may lead to lower resolution near the start of the ray if the peak is at the beginning [S1, unofficial].
+- **Division by Zero:** If `N_fine` is 1, the uniform spacing formula divides by zero. The implementation must handle this by returning the single peak value [G].
+- **Boundary Conditions:** The random samples `z_add` are strictly within `[near, far]` [S1, unofficial]. The uniform samples `z_fine` are centered on `max_z_vals` with width `range` [S1, unofficial]. If `max_z_vals` is close to `near` or `far`, `z_fine` may extend outside the valid ray bounds [G].
+- **Index 0 Peak:** When `max_indices == 0`, the fine samples are not injected [S1, unofficial]. This may lead to lower resolution near the start of the ray if the peak is at the beginning [S1, unofficial].
 
 ## Operating characteristics
 - **Time Complexity:** $O(N \log N)$ per ray due to sorting, where $N$ is the total number of samples (coarse + fine + random) [G].

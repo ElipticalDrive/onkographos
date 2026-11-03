@@ -1,0 +1,212 @@
+--- v002.md
++++ v003.md
+@@ -4,113 +4,83 @@
+ 
+ ## Overview
+-This method accelerates ambient occlusion (AO) computation by terminating shadow ray traversal when a scene node subtends a solid angle below a specified threshold [S1]. It builds on [Ambient Occlusion via Shadow Rays](878-ambient-occlusion-via-shadow-rays.md) by treating the scene hierarchy as a variable-resolution representation: distant nodes are effectively treated as lower level-of-detail (LOD) primitives [S1]. Unlike [Evans Ambient Occlusion](1083-evans-ambient-occlusion.md) which uses hemisphere sampling, or [Zhukov Ambient Occlusion](2245-zhukov-ambient-occlusion.md) which uses precomputed spherical harmonics, this method operates directly on the spatial hierarchy during ray casting [S1].
++Solid Angle Early Termination for Ambient Occlusion accelerates shadow ray traversal in sparse voxel structures by stopping traversal when a node subtends a solid angle below a specified threshold, effectively using a lower level-of-detail representation for distant points [S1]. It differs from [Evans Ambient Occlusion](1083-evans-ambient-occlusion.md) and [Zhukov Ambient Occlusion](2245-zhukov-ambient-occlusion.md) by relying on geometric projection thresholds rather than hemisphere sampling or precomputed angular distributions, and from [Incremental Local Ambient Occlusion](1089-incremental-local-ambient-occlusion.md) by using a static threshold rather than an adaptive accumulation scheme [S1].
+ 
+ ## How it works
+-**Inputs:**
+-- A hierarchical scene representation (e.g., Sparse Voxel DAG or Octree) [S1].
+-- A shading point $P$ and its surface normal $n$ [S1].
+-- A cone angle threshold $\theta_{thresh}$ [S1].
+-
+-**Outputs:**
+-- Ambient occlusion factor $A$ for point $P$ [S1].
++**Inputs:** A sparse voxel structure (e.g., Sparse Voxel Octree or DAG) [S1]; a shading point $P$; a cone angle threshold $\theta_{thresh}$ [S1].
++**Outputs:** A traversal decision indicating whether to continue or terminate traversal for the current branch [S1].
+ 
+ **Data Structures:**
+-- The scene is represented as a tree where each node $N$ has a bounding volume (typically an axis-aligned bounding box or sphere) and potentially child nodes [S1].
+-- No additional per-ray data structures are required beyond the traversal stack [S1].
++The method operates on nodes of the sparse voxel hierarchy [S1].
+ 
+ **Steps:**
+-1. Initialize the occlusion accumulator $A = 1.0$ and the ray direction distribution (e.g., 64 shadow rays uniformly distributed over the hemisphere defined by $n$) [S1].
+-2. For each shadow ray direction $d$:
+-   a. Traverse the hierarchy starting from the root.
+-   b. For each node $N$ intersected by the ray:
+-      i. Calculate the solid angle $\Omega_N$ subtended by node $N$ at point $P$.
+-      ii. If $\Omega_N < \Omega_{thresh}$ (where $\Omega_{thresh}$ corresponds to $\theta_{thresh}$):
+-          - Terminate traversal for this ray.
+-          - Do not add the contribution of this node or its descendants to $A$ [S1].
+-      iii. If the node is a leaf and is occluded (intersects geometry):
+-          - Update $A$ based on the occlusion contribution (typically reducing $A$ by the solid angle fraction or binary occlusion depending on the specific AO formulation, though the source implies binary termination) [S1].
+-3. Return the final $A$ [S1].
++1.  **Project Node:** Project the node onto the unit hemisphere centered at $P$ [S1].
++2.  **Calculate Solid Angle:** Compute the solid angle $\Omega$ subtended by the node [S1].
++3.  **Compare Threshold:** If $\Omega < \Omega_{thresh}$, terminate traversal for this branch [S1].
++4.  **Continue:** If $\Omega \ge \Omega_{thresh}$, continue traversal to children or process the node [S1].
+ 
+ **Formulas:**
+-The solid angle $\Omega_N$ of a node $N$ with bounding radius $r$ at distance $d$ from $P$ (approximated as a cone) is:
+-$$ \Omega_N = 2\pi (1 - \cos \theta_N) $$
+-where $\theta_N = \arcsin(r/d)$ [S1].
+-
+-The threshold is defined by a cone angle $\theta_{thresh}$:
+-$$ \Omega_{thresh} = 2\pi (1 - \cos \theta_{thresh}) $$
++The threshold is defined by a cone angle $\theta_{thresh}$, where $\Omega_{thresh} = 2\pi(1 - \cos(\theta_{thresh}))$ [S1].
+ 
+ **Parameters:**
+-- Cone angle threshold $\theta_{thresh}$: 9 degrees [S1].
+-- Corresponding solid angle threshold $\Omega_{thresh}$: 0.07 sr [S1].
+-- Number of shadow rays per pixel: 64 (used in evaluation) [S1].
++*   Cone angle threshold: $9^\circ$ (corresponding to $0.07$ sr) [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Darkening:** The method results in images that are darker than ground-truth because occluded distant geometry is ignored [S1].
+-- **Near-contact quality:** Despite the darkening, it maintains high quality for near-contact occlusion [S1].
+-- **Precision:** The solid angle calculation must handle cases where $P$ is inside the node's bounding volume (division by zero or negative distance), though the source does not specify the guard [G].
++*   **Darkening:** The method results in images that are darker than ground-truth because distant contributions are ignored [S1].
++*   **Quality:** Despite the darkening, it maintains high quality for near-contact occlusion [S1].
++*   **Precision:** Not given in the sources.
+ 
+ **Pseudocode:**
+ ```python
+-def compute_ao_with_solid_angle_termination(shading_point, normal, scene_root, theta_thresh_deg):
+-    # Convert threshold to radians and solid angle
+-    theta_thresh_rad = math.radians(theta_thresh_deg)
+-    omega_thresh = 2 * math.pi * (1 - math.cos(theta_thresh_rad))
++def should_traverse(node_C, point_P, theta_thresh_rad):
++    # Vector from shading point to node center
++    u = node_C.center - point_P
++    dist_sq = dot(u, u)
++    if dist_sq == 0:
++        return True  # Point inside node, always traverse
++    dist = sqrt(dist_sq)
+     
+-    # Initialize 64 shadow rays over the hemisphere
+-    rays = generate_hemisphere_samples(normal, count=64)
+-    occlusion_factor = 1.0
++    # Project node onto unit hemisphere and calculate solid angle [S1]
++    solid_angle = compute_solid_angle_aabb(node_C, point_P)
+     
+-    for ray_dir in rays:
+-        current_node = scene_root
+-        occluded = False
++    # Threshold in steradians [S1]
++    omega_thresh = 0.07
++    
++    if solid_angle < omega_thresh:
++        return False
++    return True
++
++def compute_solid_angle_aabb(box, point):
++    # Standard geometric calculation for solid angle of an AABB from a point [G]
++    # Implementation projects the 8 corners to the unit sphere and computes 
++    # the area of the resulting spherical polygon using the spherical excess formula.
++    corners = []
++    hx, hy, hz = box.dimensions.x / 2, box.dimensions.y / 2, box.dimensions.z / 2
++    for dx in [-hx, hx]:
++        for dy in [-hy, hy]:
++            for dz in [-hz, hz]:
++                corners.append(vec3(box.center.x + dx, box.center.y + dy, box.center.z + dz))
++    
++    # Project to unit sphere
++    unit_corners = [normalize(c - point) for c in corners]
++    
++    # Compute spherical polygon area (solid angle) by decomposing faces into triangles [G]
++    solid_angle = 0.0
++    faces = [
++        (0, 1, 3, 2), (4, 5, 7, 6), (0, 1, 5, 4),
++        (2, 3, 7, 6), (0, 2, 6, 4), (1, 3, 7, 5)
++    ]
++    for f in faces:
++        v1, v2, v3, v4 = unit_corners[f[0]], unit_corners[f[1]], unit_corners[f[2]], unit_corners[f[3]]
++        solid_angle += solid_angle_triangle(v1, v2, v3)
++        solid_angle += solid_angle_triangle(v1, v3, v4)
+         
+-        while current_node is not None:
+-            # Calculate bounding sphere radius and distance for solid angle
+-            # Note: Source assumes node can be projected to unit hemisphere
+-            # and solid angle calculated. We approximate node as sphere for calculation.
+-            center = current_node.bounding_volume.center
+-            radius = current_node.bounding_volume.radius
+-            dist = distance(shading_point, center)
+-            
+-            # Guard against point inside bounding volume
+-            if dist <= radius:
+-                # Point is inside; treat as fully occluded or handle specifically
+-                # Source does not specify, assuming standard traversal where
+-                # intersection check happens before solid angle or inside nodes are leaves.
+-                occluded = True
+-                break
+-            
+-            # Calculate subtended cone angle
+-            sin_theta = radius / dist
+-            if sin_theta > 1.0: sin_theta = 1.0 # Clamp for precision
+-            theta_node = math.asin(sin_theta)
+-            
+-            # Calculate solid angle
+-            omega_node = 2 * math.pi * (1 - math.cos(theta_node))
+-            
+-            # Early termination check
+-            if omega_node < omega_thresh:
+-                # Stop traversal; node and children are ignored
+-                break
+-            
+-            # Check intersection with node geometry (if leaf) or children
+-            if current_node.is_leaf:
+-                if ray_intersects_node(ray_dir, shading_point, current_node):
+-                    occluded = True
+-                    break
+-            else:
+-                # Traverse to children
+-                next_node = get_next_child(current_node, ray_dir, shading_point)
+-                if next_node is None:
+-                    break
+-                current_node = next_node
+-        
+-        if occluded:
+-            # In standard AO, occlusion reduces the factor.
+-            # The source implies binary termination affects the final image brightness.
+-            # Assuming standard AO accumulation where each ray contributes 1/N if occluded.
+-            occlusion_factor -= 1.0 / len(rays)
+-            
+-    return occlusion_factor
++    return abs(solid_angle)
++
++def solid_angle_triangle(v1, v2, v3):
++    # Oosterom and Strackee formula for solid angle of a triangle from origin [G]
++    u1, u2, u3 = normalize(v1), normalize(v2), normalize(v3)
++    numerator = dot(u1, cross(u2, u3))
++    denominator = 1.0 + dot(u1, u2) + dot(u2, u3) + dot(u3, u1)
++    return 2.0 * atan2(numerator, denominator)
+ ```
+ 
+@@ -118,17 +88,25 @@
+ 
+ ### [Octree Subdivision for Multiple Scattering](3356-octree-subdivision-for-multiple-scattering.md)
+-This method computes multiple scattering contributions in participating media by traversing an octree of volume samples to identify a "tree cut" of nodes that significantly influence a camera sample point. It addresses the computational cost of evaluating light transport from distant or less relevant volume samples by combining solid angle thresholds with phase function checks. It builds on [Solid Angle Early Termination for Ambient Occlusion](1146-solid-angle-early-termination-for-ambient-occlusion.md) by extending the early termination logic to higher-order scattering events, specifically double and multiple scattering, rather than just direct illumination or ambient occlusion.
++Not given in the sources.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Reduces traversal time by skipping nodes with small solid angles [S1]. The speedup depends on scene density and distance from the shading point.
+-- **Memory Complexity:** No additional memory overhead beyond the scene hierarchy [S1].
+-- **Measured Performance:** The method was found to be faster while providing similar quality in evaluations using sparse voxel DAGs [S1].
+-- **Strengths:** Efficiently handles large scenes (e.g., 28M triangles in Lucy) by reducing node visits [S1].
+-- **Limitations:** Produces darker images than ground-truth due to ignored distant occlusion [S1].
+-- **When to use:** When performance is critical and slight darkening in distant areas is acceptable.
+-- **When not to use:** When physically accurate global illumination brightness is required.
++**Time and Memory Complexity:**
++The method reduces traversal time by skipping distant nodes [S1]. The memory consumption is determined by the sparse voxel structure (e.g., DAG) [S1].
++
++**Measured Performance:**
++In the SANMIGUEL scene, the method provides faster traversal speed for AO rays compared to full traversal [S1].
++
++**Scaling:**
++The method scales with the density of the scene and the chosen threshold [S1].
++
++**Strengths and Limitations:**
++*   **Strengths:** Faster than standard traversal; maintains high quality for near-contact occlusion [S1].
++*   **Limitations:** Results in images that are darker than ground-truth [S1].
++
++**When to Use:**
++Use when performance is critical and slight darkening in distant areas is acceptable [S1].
+ 
+ ## Background
+-This technique was presented in the context of high-resolution sparse voxel DAGs [S1]. It leverages the hierarchical nature of sparse voxel structures to optimize shadow ray casting for ambient occlusion [S1]. The approach was evaluated on scenes such as CRYSPONZA, HAIRBALL, LUCY, and SANMIGUEL [S1].
++The method was introduced in the context of high-resolution sparse voxel DAGs [S1]. It leverages the properties of the SVO and DAG scene representations to optimize shadow ray casting [S1].
+ 
+ ## Sources

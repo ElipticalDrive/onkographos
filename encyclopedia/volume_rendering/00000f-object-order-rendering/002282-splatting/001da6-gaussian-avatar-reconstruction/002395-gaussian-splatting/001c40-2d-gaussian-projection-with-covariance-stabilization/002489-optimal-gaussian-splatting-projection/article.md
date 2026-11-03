@@ -19,7 +19,7 @@ The method operates on the standard 3D Gaussian representation [G]. No new compl
 2.  **Define Tangent Plane:** Construct a projection plane that is perpendicular to $\mathbf{d}$ and passes through $\boldsymbol{\mu}$ [S1]. This plane is tangent to the line connecting $\boldsymbol{\mu}$ and $\mathbf{C}$ [S1].
 3.  **Project to Tangent Plane:** Project the 3D Gaussian's covariance $\boldsymbol{\Sigma}$ onto this tangent plane [S1]. This involves transforming $\boldsymbol{\Sigma}$ into the local coordinate system of the tangent plane [S1]. The exact transformation from the 3D covariance to the 2D tangent plane covariance follows the standard linearization of the projection function, but applied to this specific tangent plane geometry rather than the standard z=1 plane [S1].
 4.  **Transform to Image/Camera Space:** Transform the projected Gaussian from the tangent plane back to the standard image or camera coordinate system for rasterization [S1].
-5.  **Stabilize Covariance:** Apply covariance stabilization (e.g., adding a small epsilon $\epsilon$ to the diagonal) to ensure positive definiteness, as described in the parent method [1198-2d-gaussian-projection-with-covariance-stabilization.md].
+5.  **Stabilize Covariance:** Apply covariance stabilization (e.g., adding a small epsilon $\epsilon$ to the diagonal) to ensure positive definiteness, as described in the parent method [1198-2d-gaussian-projection-with-covariance-stabilization.md] [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -30,9 +30,9 @@ def optimal_gaussian_projection(gaussian_means, gaussian_covariances, camera_cen
     Projects 3D Gaussians onto tangent planes to minimize projection error.
     
     Args:
-        gaussian_means: Array of shape (N, 3), positions of N Gaussians.
+        gaussian_means: Array of shape (N, 3), positions of N Gaussians in camera space.
         gaussian_covariances: Array of shape (N, 3, 3), covariances of N Gaussians.
-        camera_center: Array of shape (3,), camera center position C.
+        camera_center: Array of shape (3,), camera center position C (typically [0,0,0] in camera space).
         camera_matrix: Array of shape (3, 3), intrinsic camera matrix K.
         
     Returns:
@@ -48,9 +48,6 @@ def optimal_gaussian_projection(gaussian_means, gaussian_covariances, camera_cen
     
     # Step 2 & 3: Project onto tangent plane
     # The tangent plane is perpendicular to 'directions' and passes through 'gaussian_means'.
-    # We construct a local basis for this tangent plane for each Gaussian.
-    # Let the normal to the tangent plane be n = directions / ||directions||.
-    
     norms = norm(directions, axis=1, keepdims=True)
     normals = directions / norms  # Shape (N, 3)
     
@@ -164,7 +161,7 @@ def optimal_gaussian_projection(gaussian_means, gaussian_covariances, camera_cen
     z = mu_cam[:, 2]
     
     # Avoid division by zero
-    z_safe = clamp(z, min=1e-5)
+    z_safe = maximum(z, 1e-5)
     
     # Get focal length and principal point from K
     f_x = camera_matrix[0, 0]
@@ -230,7 +227,7 @@ def optimal_gaussian_projection(gaussian_means, gaussian_covariances, camera_cen
 
 **Parameters:**
 *   **Focal Length:** The method is tested with focal lengths scaled to 0.2 and 0.3 times the original focal length to simulate wide-field-of-view scenarios [S1].
-*   **Epsilon:** A small value added to the diagonal of the 2D covariance for numerical stability (value not specified in sources) [1198-2d-gaussian-projection-with-covariance-stabilization.md].
+*   **Epsilon:** A small value added to the diagonal of the 2D covariance for numerical stability (value not specified in sources) [G].
 
 **Edge Cases and Pitfalls:**
 *   **Training Time:** The method incurs a slight increase in training time due to the additional transformation step from the tangent plane to the image plane [S1].
@@ -239,7 +236,7 @@ def optimal_gaussian_projection(gaussian_means, gaussian_covariances, camera_cen
 
 ## Operating characteristics
 *   **Time Complexity:** The algorithm's time complexity remains unchanged compared to 3D-GS because it avoids dense point sampling [S1].
-*   **Memory Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources [S1].
 *   **Performance:** The method significantly reduces blurriness and artifacts compared to the original projection method, particularly in settings with short focal lengths [S1]. It outperforms original 3D-GS across various scenes in terms of PSNR, SSIM, and LPIPS metrics when tested with focal length reduction ratios of $\times 0.2$ and $\times 0.3$ [S1].
 *   **Strengths:** Reduces projection error, minimizes artifacts like needle-like structures and cloud-like large Gaussians at image edges, and is adaptable to various camera models (pinhole, fisheye, panorama) [S1].
 *   **Limitations:** Slight increase in training time due to the additional transformation step [S1].

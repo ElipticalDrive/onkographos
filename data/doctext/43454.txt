@@ -1,0 +1,3409 @@
+# qvrc #
+# another GLSL volume raycaster #
+## *and not a particularly good one* ##
+
+Nothing fancy, just basic ray casting with 1D transfer functions and
+Blinn-Phong shading. University assignment on scientific/medical
+visualization.
+
+## what it does ##
+
+* two-pass bounding box rasterization
+* opacity correction
+* early ray termination
+* blinn-phong shading
+* edge enhancement + toon shading
+
+## what's missing ##
+
+* pre-integrated transfer functions
+* higher order interpolation
+* higher order gradient estimation (sobel?)
+* optimizations (octree, adaptive sampling)
+* properly designed tf widget
+* **basically everything**
+
+## building ##
+
+```
+qmake -f Makefile qvrc.pro
+make
+```
+
+## usage ##
+
+```
+./qvrc --help
+Usage: ./qvrc [options]
+GLSL Volume Raycasting
+
+Options:
+  -h, --help                             Displays this help.
+  -v, --version                          Displays version information.
+  -f, --filename <path/to/filename.raw>  Raw volumetric data filename
+  -s, --size <width,height,depth>        Voxel data size
+  -x, --scale <xscale,yscale,zscale>     Voxel scale / aspect ratio
+  -d, --bitdepth <8,10,12,16>            Voxel bit depth
+
+
+./qvrc -f datasets/dataset-stagbeetle-416x416x247.dat -s 416,416,247 -d 12 -x 1.0,1.0,0.68
+```
+
+## screenshot
+![stag beetle dataset rendering](misc/screenshot_small.png "stag beetle dataset rendering")
+
+## about Qt, and C++ ##
+
+Picked Qt because I needed multiplatform GL and some minimal
+GUI. Never did anything with it before (I'm a gtk+ guy), or C++ FWIW,
+and it was *way out of my comfort zone*. Still trying to understand
+what gets copied and what not. Still trying to accept all those stack
+allocations and class global variables.  So... forgive the shitty
+code.
+
+### shaders/firstpass.frag
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#version 330
+
+in vec3 color;
+layout (location = 0) out vec4 outcolor;
+
+void main()
+{
+    outcolor = vec4(color, 1.0);
+}
+```
+
+### shaders/firstpass.vert
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#version 330
+
+layout (location = 0) in vec3 vertex_position;
+
+uniform mat4 projection;
+uniform mat4 view;
+uniform mat4 model;
+
+uniform vec3 origin;
+
+out vec3 color;
+
+void main()
+{
+    /* transform coordinates */
+    gl_Position = projection * view * model * vec4(vertex_position, 1.0);
+    /* pass position as color down the line */
+    color = vertex_position;
+}
+```
+
+### shaders/raycast.frag
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#version 330
+
+/* parameters */
+in vec3 ray_in;
+in mat3 normalmatrix;
+out vec4 outcolor;
+
+/* uniforms */
+uniform sampler2D backtex;
+uniform sampler3D voltex;
+uniform sampler1D tftex;
+
+uniform mat4 projection;
+uniform mat4 view;
+uniform mat4 model;
+
+uniform float screen_width;
+uniform float screen_height;
+
+uniform vec3 scale;
+
+uniform vec3 light_color;
+uniform float ka;
+uniform float kd;
+uniform float ks;
+
+uniform float nsamples;
+uniform int compositing_mode;
+uniform int shading_mode;
+
+/* consts */
+const float DELTA = 0.005;
+const float SHADING_THRES = 0.10;
+
+/* globals */
+float stepsize;
+
+
+
+/* TODO: check randomness, explore noise texture alternative */
+float rand() {
+    /* the internet **really** likes this one, still no source to be
+     * found, probably Rey 1998, cited by TestU01 but nothing
+     * downloadable */
+    return fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+/* calculate voxel gradient using central differences approximation */
+/*  f' = ( f(x+h)-f(x-h) ) / 2*h */
+vec3 gradient_central_diff(sampler3D sampler, vec3 pos, float delta)
+{
+    vec3 fl, fh;
+
+    fl.x = texture(sampler, pos - vec3(delta*scale.x, 0.0, 0.0)).r;
+    fl.y = texture(sampler, pos - vec3(0.0, delta*scale.y, 0.0)).r;
+    fl.z = texture(sampler, pos - vec3(0.0, 0.0, delta*scale.z)).r;
+
+    fh.x = texture(sampler, pos + vec3(delta*scale.x, 0.0, 0.0)).r;
+    fh.y = texture(sampler, pos + vec3(0.0, delta*scale.y, 0.0)).r;
+    fh.z = texture(sampler, pos + vec3(0.0, 0.0, delta*scale.z)).r;
+
+    /* well we should really divide it by 2h here, but we'll use it
+     * for the normals anyway, it's ok to just normalize it here */
+    return normalize(fh - fl);
+}
+
+/* Standard compositing, alpha blend next pixel with the previous */
+vec4 composite_front_to_back(vec4 incolor, vec4 outcolor)
+{
+    /* opacity correction for varying stepsize */
+    /* Engel et. al.: "Real-Time Volume Graphics" - § 1.4.3 and 9.1.3 */
+    incolor.a = 1.0 - pow(1.0 - incolor.a, stepsize*200.0);
+
+    /* associate color and opacity (Blinn 1994) */
+    incolor.rgb *= incolor.a;
+
+    outcolor += (1.0 - outcolor.a) * incolor;
+
+    return outcolor;
+}
+
+/* Maximum Intensity Projection, save only the brightest/most opaque
+ * voxel in the current direction */
+vec4 composite_mip(vec4 incolor, vec4 outcolor)
+{
+    if (incolor.a > outcolor.a)
+        return incolor;
+    else
+        return outcolor;
+}
+
+
+/* not really sure this works as expected */
+/* Bruckner 2009, Instant Volume Visualization using Maximum Intensity
+ * Difference Accumulation */
+/* the code seems right, but I'm not so sure about f_max_i, he talks
+ * about the "current maximum along the direction" */
+vec4 composite_mida(vec4 incolor, vec4 outcolor, float f_P_i, inout float f_max_i)
+{
+    /* opacity correction for varying stepsize */
+    /* Engel et. al.: "Real-Time Volume Graphics" - § 1.4.3 and 9.1.3 */
+    incolor.a = 1.0 - pow(1.0 - incolor.a, stepsize*200.0);
+
+    /* associate color and opacity (Blinn 1994) */
+    incolor.rgb *= incolor.a;
+
+    float delta_i = 0.0;
+
+    if (f_P_i > f_max_i) {
+        delta_i = f_P_i - f_max_i;
+        f_max_i = f_P_i;
+    }
+
+    float beta_i = 1.0 - delta_i;
+
+    outcolor = beta_i * outcolor + (1.0 - beta_i * outcolor.a) * incolor;
+
+    return outcolor;
+}
+
+vec3 blinn_phong_shading(vec3 N, vec3 V, vec3 L)
+{
+    vec3 ambient_light_color = vec3(0.3, 0.3, 0.3);
+    float shininess = 100.0;
+
+    vec3 H = normalize(L + V);
+
+    float diffuse_factor = max(0, dot(L, N));
+    float specular_factor = pow(max(dot(H, N), 0), shininess);
+
+    vec3 ambient = ka * ambient_light_color;
+    vec3 diffuse = kd * light_color * diffuse_factor;
+    vec3 specular = ks * light_color * specular_factor;
+
+    return ambient + diffuse + specular;
+}
+
+vec3 blinn_phong_toon_shading(vec3 N, vec3 V, vec3 L)
+{
+    vec3 ambient_light_color = vec3(0.3, 0.3, 0.3);
+    float shininess = 100.0;
+
+    vec3 H = normalize(L + V);
+
+    const float A = 0.1;
+    const float B = 0.3;
+    const float C = 0.6;
+    const float D = 1.0;
+
+    float diffuse_factor = max(0, dot(L, N));
+    float specular_factor = pow(max(dot(H, N), 0), shininess);
+
+    /* posterize diffusion */
+    if (diffuse_factor < A) diffuse_factor = 0.0;
+    else if (diffuse_factor < B) diffuse_factor = B;
+    else if (diffuse_factor < C) diffuse_factor = C;
+    else diffuse_factor = D;
+
+    /* harsh cut reflections */
+    specular_factor = step(0.2, specular_factor);
+
+    vec3 ambient = ka * ambient_light_color;
+    vec3 diffuse = kd * light_color * diffuse_factor;
+    vec3 specular = ks * light_color * specular_factor;
+
+    return ambient + diffuse + specular;
+}
+
+void main()
+{
+    /* screen to normalized viewport coordinates */
+    vec2 norm_coord = gl_FragCoord.st / vec2(screen_width, screen_height);
+    /* start position is saved into the cube colors */
+    vec3 start = ray_in;
+    /* retrieve end position from first pass results */
+    vec3 end = texture(backtex, norm_coord).xyz;
+
+    vec3 direction = end - start;
+    float len = length(direction);
+    stepsize = len / nsamples;
+    direction = normalize(direction);
+    vec3 delta = direction * stepsize;
+
+    vec3 pos = start;
+
+    /* dithering of the starting position */
+    /* hides the woodgrain/staircase aliasing cause by undersampling
+     * the volume while marching the ray */
+    /* does nothing (little?) to prevent transfer function and shading
+     * aliasing */
+    pos  = pos + delta * rand();
+
+    vec3 eyePosition = view[3].xyz;
+    vec3 lightPosition = eyePosition - vec3(0, 0, 4);
+
+    float intensity;
+    float f_max_i = 0; /* for mida */
+
+    outcolor = vec4(0.0);
+    vec4 color = vec4(0.0);
+
+    /* debugging modes */
+    if (compositing_mode == 3) {
+        outcolor = vec4(start, 1.0);
+        return;
+    } else if (compositing_mode == 4) {
+        outcolor = vec4(end, 1.0);
+        return;
+    } else if (compositing_mode == 5) {
+        outcolor = vec4(abs(end - start), length(end - start));
+        return;
+    }
+
+
+    /* marching loop */
+    for(int i = 0; i < nsamples && len > 0; i++, pos+=delta, len-=stepsize) {
+        /* sample intensity from the 3D texture */
+        intensity = texture(voltex, pos).r;
+        /* map intensity to transfer function LUT */
+        color = texture(tftex, intensity);
+
+
+        /* shading_mode
+         *   0: Blinn Phong shading
+         *   1: Blinn Phong with edge enhancement
+         *   2: Blinn Phong with toon shading
+         *   3: No shading
+         */
+        if ((color.a > SHADING_THRES) &&
+            (shading_mode != 3) &&
+            (nsamples > 500)) {
+            /* everything in world space */
+            vec3 N = gradient_central_diff(voltex, pos, DELTA);
+
+            vec3 pos_world = vec3(model * vec4(pos, 1.0));
+
+            N = normalize(vec3(normalmatrix * N));
+
+            vec3 L = normalize(lightPosition - pos_world);
+            vec3 V = normalize(eyePosition - pos_world);
+
+            if (shading_mode == 0) {
+                color.rgb += blinn_phong_shading(N, V, L);
+            } else {
+                if (shading_mode == 1)
+                    color.rgb += blinn_phong_shading(N, V, L);
+                else if (shading_mode == 2)
+                    color.rgb += blinn_phong_toon_shading(N, V, L);
+
+                /* enhance edges when the gradient is almost
+                 * perpendicular to the viewing direction */
+                float dv = dot(V, N);
+                float ev = pow(1.0 - abs(dv), 0.3);
+
+                float et = 0.1;
+
+                if (ev >= et)
+                    // color.rgb = vec3(0);
+                    color.rgb = mix(color.rgb, vec3(0), pow((ev-et)/(1. - et), 6));
+            }
+        }
+
+        /* does this affect performance? */
+        /* in the old days there was no real branching, but it
+         * seems we're past that nowawadays */
+        if (compositing_mode == 0)
+            outcolor = composite_front_to_back(color, outcolor);
+        else if (compositing_mode == 1)
+            outcolor = composite_mip(color, outcolor);
+        else
+            outcolor = composite_mida(color, outcolor, intensity, f_max_i);
+
+        /* early ray termination */
+        if (outcolor.a > 0.95) {
+            break;
+        }
+    }
+}
+```
+
+### shaders/raycast.vert
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#version 330
+
+layout (location = 0) in vec3 vertex_position;
+
+uniform mat4 projection;
+uniform mat4 view;
+uniform mat4 model;
+
+uniform vec3 origin;
+
+out vec3 ray_in;
+out mat3 normalmatrix;
+
+void main()
+{
+    gl_Position = projection * view * model * vec4(vertex_position, 1.0);
+    ray_in = vertex_position;
+
+    /* transform local normals to world space */
+    normalmatrix = mat3(transpose(inverse(model)));
+    /* in eye space it would be */
+    /* normalmatrix = mat3(transpose(inverse(view * model))); */
+}
+```
+
+### src/colorbutton.h
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#ifndef COLOR_BUTTON_H
+#define COLOR_BUTTON_H
+
+#include <QPixmap>
+#include <QIcon>
+#include <QSize>
+#include <QToolButton>
+
+class ColorButton : public QToolButton
+{
+    Q_OBJECT
+
+public:
+    ColorButton(QWidget *parent = 0): QToolButton(parent)  {}
+    ColorButton(const QColor &color);
+
+    void setColor(const QColor &color);
+
+private:
+    QPixmap pixmap;
+};
+
+#endif /* COLOR_BUTTON_H */
+```
+
+### src/glwidget.cpp
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#include "glwidget.h"
+
+#include <math.h>
+#include <stdint.h>
+
+#define NSAMPLES_HIGH 4000
+#define NSAMPLES_LOW  100
+
+
+/* construct and init defaults */
+GLWidget::GLWidget(InitOptions &opt)
+{
+    this->opt = opt;
+
+    fast_rendering = false;
+    nsamples = NSAMPLES_HIGH;
+
+    /* default eye depth */
+    depth = 1.1f;
+    mouse_wheel_delta = 0;
+
+    /* front to back dvr and blinn phong shading */
+    compositing_mode = 0;
+    shading_mode = 0;
+
+    /* black background */
+    background_color[0] = 0.0;
+    background_color[1] = 0.0;
+    background_color[2] = 0.0;
+    background_color[3] = 1.0;
+
+    /* white spotlight */
+    light_color[0] = 1.0;
+    light_color[1] = 1.0;
+    light_color[2] = 1.0;
+
+    /* material */
+    ambient_reflectance = 0.05;
+    diffuse_reflectance = 0.3;
+    specular_reflectance = 0.45;
+
+    update_timer = new QTimer(this);
+    update_timer->setSingleShot(true);
+    connect(update_timer, SIGNAL(timeout()), this, SLOT(update_timer_timeout()));
+}
+
+/* clean up resources */
+GLWidget::~GLWidget()
+{
+    delete distance_shader;
+    delete raycast_shader;
+    delete update_timer;
+
+    glDeleteTextures(1, &volume_texture);
+    glDeleteTextures(1, &transfer_function);
+    glDeleteTextures(1, &target_texture);
+    glDeleteRenderbuffers(1, &db);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteVertexArrays(1, &vao);
+}
+
+QSize GLWidget::minimumSizeHint() const { return QSize(50, 50); }
+QSize GLWidget::sizeHint() const { return QSize(600, 600); }
+
+/* reduce sampling rate when the UI asks for fast rendering, usually
+ * because either the model is rotating or something like that and we
+ * need interactive framerates */
+void GLWidget::set_fast_rendering(bool s)
+{
+    if (s != fast_rendering) {
+        fast_rendering = s;
+        nsamples = s ? NSAMPLES_LOW : NSAMPLES_HIGH;
+        update();
+    }
+}
+
+void GLWidget::set_compositing_mode(int mode)
+{
+    compositing_mode = mode;
+    update();
+}
+
+void GLWidget::set_shading_mode(int mode)
+{
+    shading_mode = mode;
+    update();
+}
+
+void GLWidget::set_background_color(const QColor &color)
+{
+    background_color[0] = color.redF();
+    background_color[1] = color.greenF();
+    background_color[2] = color.blueF();
+    background_color[3] = color.alphaF();
+
+    makeCurrent();
+    glClearColor(background_color[0], background_color[1],
+                 background_color[2], background_color[3]);
+
+    doneCurrent();
+
+    update();
+}
+
+const QColor & GLWidget::get_background_color()
+{
+    static QColor bgqcolor =  QColor(background_color[0] * 255,
+                                     background_color[1] * 255,
+                                     background_color[2] * 255,
+                                     background_color[3] * 255);
+
+    return bgqcolor;
+}
+
+void GLWidget::set_light_color(const QColor &color)
+{
+    light_color[0] = color.redF();
+    light_color[1] = color.greenF();
+    light_color[2] = color.blueF();
+
+    update();
+}
+
+const QColor & GLWidget::get_light_color()
+{
+    static QColor bgqcolor =  QColor(light_color[0] * 255,
+                                     light_color[1] * 255,
+                                     light_color[2] * 255);
+
+    return bgqcolor;
+}
+
+void GLWidget::set_ambient_reflectance(double ka)
+{
+    ambient_reflectance = ka;
+    update();
+}
+double GLWidget::get_ambient_reflectance()
+{
+    return ambient_reflectance;
+}
+
+void GLWidget::set_diffuse_reflectance(double ka)
+{
+    diffuse_reflectance = ka;
+    update();
+}
+double GLWidget::get_diffuse_reflectance()
+{
+    return diffuse_reflectance;
+}
+
+void GLWidget::set_specular_reflectance(double ka)
+{
+    specular_reflectance = ka;
+    update();
+}
+double GLWidget::get_specular_reflectance()
+{
+    return specular_reflectance;
+}
+
+void GLWidget::new_transfer_function(float *data, int len)
+{
+    glDeleteTextures(1, &transfer_function);
+    transfer_function = load_transfer_function_from_data(data, len);
+
+    update();
+}
+
+// -----------------------------------------------------------------------
+//    TEXTURE LOADERS
+// -----------------------------------------------------------------------
+
+/* Load 8bit raw luminance data into a 3D texture */
+GLuint load_volume_texture_8bit(const char *path, GLuint w, GLuint h, GLuint d)
+{
+    /* FIXME: duplicated code */
+    FILE *f;
+    GLuint tex;
+
+    f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "couldn't open: %s\n", path);
+        exit(1);
+    }
+
+    size_t chunk = sizeof(uint8_t);
+    size_t len = w*h*d*chunk;
+
+    uint8_t *volume_data;
+    volume_data = (uint8_t *) malloc(len);
+
+    /* read the whole file at once, maybe I should read it chunk by
+     * chunk or byte by byte */
+    if (fread(volume_data, 1, len, f) != len) {
+        fprintf(stderr, "premature eof or reading error: %s\n", path);
+        exit(1);
+    }
+
+    /* standard texture initialization, nothing fancy */
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_3D, tex);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    /* align to single byte */
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    /* uint8_t -> GL_RED, late OpenGL deprecated luminance texture,
+     * you have to use a single channel now */
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RED,
+                 w, h, d, 0, GL_RED, GL_UNSIGNED_BYTE, volume_data);
+
+    free(volume_data);
+
+    return tex;
+}
+
+/* Load 16bit raw luminance data into a 3D texture
+
+   @shift: amount of padding bits to remove, most medical data comes
+   in 16bit textures but only the first 10 or 12 bit actually contain
+   any data
+*/
+GLuint load_volume_texture_16bit(const char *path, GLuint w, GLuint h, GLuint d, uint8_t shift)
+{
+    /* FIXME: duplicated code */
+    FILE *f;
+    GLuint tex;
+
+    f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "couldn't open: %s\n", path);
+        exit(1);
+    }
+
+    size_t chunk = sizeof(uint16_t);
+    size_t len = w*h*d*chunk;
+    int array_len = w*h*d;
+
+    uint16_t *volume_data;
+    volume_data = (uint16_t *) malloc(len);
+
+    if (fread(volume_data, 1, len, f) != len) {
+        fprintf(stderr, "premature eof or reading error: %s\n", path);
+        exit(1);
+    }
+
+    /* assume data is already saturated in the [0, 2^(bit_depth)]
+     * range and rescale it to fill 16bit */
+    /* maybe we should just rescale [min,max] to [0, 2^16] */
+    for (int i=0; i<array_len; i++) {
+        volume_data[i] <<= shift;
+    }
+
+    /* standard init, nothing fancy */
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_3D, tex);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    /* single byte row alignment */
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    /* uint16_t -> GL_R16, not really sure we need to enforce the
+     * 16bit internal format */
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_R16,
+                 w, h, d, 0, GL_RED, GL_UNSIGNED_SHORT, volume_data);
+
+    free(volume_data);
+
+    return tex;
+}
+
+/* 3D texture loader wrapper */
+GLuint GLWidget::load_volume_texture(const char *path, GLuint w, GLuint h, GLuint d,
+                                     unsigned int bit_depth)
+{
+    switch (bit_depth) {
+    case 8:
+        return load_volume_texture_8bit(path, w, h, d);
+    case 10: /* not tested */
+    case 12:
+    case 16:
+        return load_volume_texture_16bit(path, w, h, d, 16 - bit_depth);
+    default:
+        fprintf(stderr, "unsupported bit depth: %d\n", bit_depth);
+        exit(1);
+    }
+}
+
+/* 1D texture loader for transfer function */
+GLuint GLWidget::load_transfer_function_from_data(float *data, size_t sz)
+{
+    /* if no data is given init a default linear ramp across rgb
+     * channels and a threshold alpha */
+    float *default_tf = NULL;
+
+    if (data == NULL) {
+        default_tf = (float *) malloc(4 * sz * sizeof(float));
+        for (size_t i = 0; i < sz; i++) {
+            for (int j=0; j<3; j++)
+                default_tf[i*4 + j] = 0.0;
+        }
+    }
+
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_1D, tex);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    /* TODO: explore different transfer function precisions */
+    glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA16F, sz, 0, GL_RGBA, GL_FLOAT,
+                 data != NULL ? data : default_tf);
+
+    if (default_tf != NULL)
+        free(default_tf);
+
+    return tex;
+}
+
+// -----------------------------------------------------------------------
+//    BUFFER, TARGETS, ETC
+// -----------------------------------------------------------------------
+
+/* target texture for the first rendering pass */
+void GLWidget::init_target_texture(int w, int h)
+{
+    /* check this shit */
+    glDeleteTextures(1, &target_texture);
+    glGenTextures(1, &target_texture);
+    glBindTexture(GL_TEXTURE_2D, target_texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    /* try to keep a good precision in the intermediate rendering steps */
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, NULL);
+}
+
+/* framebuffer object for two pass rendering */
+void GLWidget::init_fbo(int w, int h)
+{
+    glDeleteRenderbuffers(1, &db);
+    glDeleteFramebuffers(1, &fbo);
+
+    /* render buffer for face culling */
+    glGenRenderbuffers(1, &db);
+    glBindRenderbuffer(GL_RENDERBUFFER, db);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, w, h);
+
+    /* frame buffer for rendering */
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER,
+                           GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D,
+                           target_texture,
+                           0);
+
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER,
+                              GL_DEPTH_ATTACHMENT,
+                              GL_RENDERBUFFER,
+                              db);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr, "Something wrong with the framebuffer... \n");
+        exit(1);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+/* (too) big do it all GL init function */
+void GLWidget::initializeGL()
+{
+    /* QT way of enabling OGL API */
+    initializeOpenGLFunctions();
+
+    printf("Renderer: %s\n", glGetString(GL_RENDERER));
+    printf("OpenGL version: %s\n", glGetString(GL_VERSION));
+
+    set_fast_rendering(false);
+
+    /* load textures */
+    volume_texture = load_volume_texture(opt.filename.toUtf8().data(),
+                                         opt.width, opt.height, opt.depth, opt.bit_depth);
+    transfer_function = load_transfer_function_from_data(NULL, 256);
+
+    /* init transformation matrices */
+    proj.setToIdentity(); // see resizeGL as it's viewport dependent
+
+    /* local to world */
+    model.setToIdentity();
+    /* I should probably get initial rotation from DICOM orientation data */
+    rotation = QQuaternion::fromEulerAngles(0, 0, 0);
+    // rotation = QQuaternion();
+    model.rotate(rotation);
+    /* draw in [0,1] because we want local coordinates easily mapped
+     * to colors, translate in [-0.5,0.5] to make camera transforms
+     * easier */
+    model.translate(-0.5, -0.5, -0.5);
+
+    /* simple view, just look at the center object */
+    view.setToIdentity();
+    view.lookAt({0,0,depth},{0,0,0},{0,1,0});
+
+    /* Geometry initialization, just a cube in [0,1] */
+    GLfloat vertices[24] = {
+        0.0, 0.0, 0.0,
+        0.0, 0.0, 1.0,
+        0.0, 1.0, 0.0,
+        0.0, 1.0, 1.0,
+        1.0, 0.0, 0.0,
+        1.0, 0.0, 1.0,
+        1.0, 1.0, 0.0,
+        1.0, 1.0, 1.0
+    };
+
+    /* triangle ordering, arbitrary? */
+    GLuint indices[36] = {
+        1,5,7, 7,3,1, 0,2,6,
+        6,4,0, 0,1,3, 3,2,0,
+        7,5,4, 4,6,7, 2,3,7,
+        7,6,2, 1,0,4, 4,5,1
+    };
+
+    /* load vertices and indices to gpu */
+    /* vertex buffer for vertices */
+    GLuint points_vbo = 0;
+    glGenBuffers(1, &points_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, points_vbo);
+    glBufferData(GL_ARRAY_BUFFER, 24 * sizeof(GLfloat), vertices, GL_STATIC_DRAW);
+
+    /* element buffer for indices */
+    GLuint points_ebo = 0;
+    glGenBuffers(1, &points_ebo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, points_ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, 36*sizeof(GLuint), indices, GL_STATIC_DRAW);
+
+    /* bind vertices to a vertex array */
+    vao = 0;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, points_vbo);
+    /* map vertex position to the first attrib, this will allow to
+     * retrieve the local coordinates in the vertex shader */
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, NULL);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, points_ebo);
+    glEnableVertexAttribArray(0);
+
+    /* enable alpha blending */
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    /* draw background */
+    glClearColor(background_color[0], background_color[1],
+                 background_color[2], background_color[3]);
+
+    /* initialize first pass shader */
+    /* see shaders source code for details */
+    /* this just shades our cube with color mapped to local position */
+    distance_shader = new QOpenGLShaderProgram;
+    distance_shader->addShaderFromSourceFile(QOpenGLShader::Vertex,
+                                             "shaders/firstpass.vert");
+    distance_shader->addShaderFromSourceFile(QOpenGLShader::Fragment,
+                                             "shaders/firstpass.frag");
+    distance_shader->link();
+
+    /* and this is where the volume rendering really happens */
+    raycast_shader = new QOpenGLShaderProgram;
+    raycast_shader->addShaderFromSourceFile(QOpenGLShader::Vertex,
+                                            "shaders/raycast.vert");
+    raycast_shader->addShaderFromSourceFile(QOpenGLShader::Fragment,
+                                            "shaders/raycast.frag");
+    raycast_shader->link();
+}
+
+/* draw our geometry with the proper culling */
+void GLWidget::render_cube(QOpenGLShaderProgram *shader, GLuint cull_face)
+{
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    /* scene transform happens in the shaders with modern GL */
+    GLint proj_loc = shader->uniformLocation("projection");
+    glUniformMatrix4fv(proj_loc, 1, GL_FALSE, (GLfloat *) proj.data());
+    GLint model_loc = shader->uniformLocation("model");
+    glUniformMatrix4fv(model_loc, 1, GL_FALSE, (GLfloat *) model.data());
+    GLint view_loc = shader->uniformLocation("view");
+    glUniformMatrix4fv(view_loc, 1, GL_FALSE, (GLfloat *) view.data());
+
+    glCullFace(cull_face);
+    glBindVertexArray(vao);
+    glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
+}
+
+void GLWidget::paintGL()
+{
+    /* backup current fbo as Qt might be doing something there */
+    GLint savedfbo;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &savedfbo);
+
+    /* init model matrix */
+    model.setToIdentity();
+    model.rotate(rotation);
+    model.scale(opt.xscale, opt.yscale, opt.zscale);
+    model.translate(-0.5, -0.5, -0.5);
+
+    /* map framebuffer object for offscreen rendering */
+    glEnable(GL_DEPTH_TEST);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    /* first pass: draw a colored cube with front face culling */
+    /* the colors will be the coordinates of the back face we can use
+     * as the end points for our raycasting integral */
+    distance_shader->bind();
+    render_cube(distance_shader, GL_FRONT);
+    distance_shader->release();
+
+
+    /* restore previous framebuffer, we'll render to screen now */
+    glBindFramebuffer(GL_FRAMEBUFFER, savedfbo > 0 ? savedfbo : 0);
+    raycast_shader->bind();
+
+    glEnable(GL_DEPTH_TEST);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    /* load for the raycasting fragment shader */
+    /* first pass target, now full with position data */
+    GLint tex_loc = raycast_shader->uniformLocation("backtex");
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, target_texture);
+    glUniform1i(tex_loc, 0);
+    /* volume data */
+    tex_loc = raycast_shader->uniformLocation("voltex");
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_3D, volume_texture);
+    glUniform1i(tex_loc, 1);
+    /* transfer function */
+    tex_loc = raycast_shader->uniformLocation("tftex");
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_1D, transfer_function);
+    glUniform1i(tex_loc, 2);
+
+    /* viewport size, needed to get normalized texture coordinates */
+    GLint screen_width_loc = raycast_shader->uniformLocation("screen_width");
+    GLint screen_height_loc = raycast_shader->uniformLocation("screen_height");
+    glUniform1f(screen_width_loc, (GLfloat) cur_width);
+    glUniform1f(screen_height_loc, (GLfloat) cur_height);
+
+    /* viewport size, needed to get normalized texture coordinates */
+    GLint scale_loc = raycast_shader->uniformLocation("scale");
+
+    GLfloat scale[3];
+    scale[0] = opt.xscale;
+    scale[1] = opt.yscale;
+    scale[2] = opt.zscale;
+    glUniform3fv(scale_loc, 1, scale);
+
+
+    /* how many samples we want in our ray integral */
+    GLint nsamples_loc = raycast_shader->uniformLocation("nsamples");
+    glUniform1f(nsamples_loc, (GLfloat) nsamples);
+
+    /* compositing mode (front to back, mip, mida), mida doesn't really work */
+    GLuint compositing_mode_loc = raycast_shader->uniformLocation("compositing_mode");
+    glUniform1i(compositing_mode_loc, (GLint) compositing_mode);
+
+    /* shading mode (blinn phong, toon, none) */
+    GLuint shading_mode_loc = raycast_shader->uniformLocation("shading_mode");
+    glUniform1i(shading_mode_loc, (GLint) shading_mode);
+
+    /* shading parameters */
+    GLint light_color_loc = raycast_shader->uniformLocation("light_color");
+    glUniform3fv(light_color_loc, 1, (GLfloat *) light_color);
+    GLint ka_loc = raycast_shader->uniformLocation("ka");
+    glUniform1f(ka_loc, ambient_reflectance);
+    GLint kd_loc = raycast_shader->uniformLocation("kd");
+    glUniform1f(kd_loc, diffuse_reflectance);
+    GLint ks_loc = raycast_shader->uniformLocation("ks");
+    glUniform1f(ks_loc, specular_reflectance);
+
+
+    /* second pass: render the cube again with backface culling, now
+     * the color data stores the starting position for our raycasting
+     * computation */
+    render_cube(raycast_shader, GL_BACK);
+    raycast_shader->release();
+}
+
+/* resize callback */
+void GLWidget::resizeGL(int w, int h)
+{
+    /* update viewport dependent stuff */
+    cur_width = w;
+    cur_height = h;
+    /* target texture and fbo */
+    init_target_texture(w, h);
+    init_fbo(w, h);
+    /* projection mapping */
+    proj.setToIdentity();
+    proj.perspective(67.0f, GLfloat(w) / h, 0.001f, 5.0f);
+    // proj.ortho(-0.1, 0.1, -0.1, 0.1, 0.001f, 5.0f);
+}
+
+void GLWidget::mousePressEvent(QMouseEvent *event)
+{
+    last_mouse_position = QVector2D(event->localPos());
+    set_fast_rendering(true);
+}
+
+void GLWidget::mouseReleaseEvent(QMouseEvent *event)
+{
+    Q_UNUSED(event);
+    set_fast_rendering(false);
+}
+
+/* convert viewport to ball coordinates */
+QVector3D GLWidget::arc_ball_vector(QVector2D v)
+{
+    /* normalize in [-1, 1] (view space) */
+    QVector2D norm_v = 2.0f * v / QVector2D(cur_width, cur_height) - QVector2D(1.0, 1.0);
+
+    /* viewport y axis is top to bottom, view is cartesian */
+    QVector3D P = { norm_v.x(), -norm_v.y(), 0 };
+
+    /* return a point on a sphere centered at 0 with radius 1 equal to
+     * the viewport radius */
+    float Psq = P.lengthSquared();
+    if (Psq <= 1)
+        P.setZ(sqrt(1.0 - Psq));
+    else
+        P.normalize();
+
+    return P;
+}
+
+void GLWidget::mouseMoveEvent(QMouseEvent *event)
+{
+    if (!(event->buttons() & Qt::LeftButton))
+        return;
+
+    QVector2D cur_mouse_position = QVector2D(event->localPos());
+
+    /* simplified arcball, or something like that, only works for view
+     * centered objects... enough for our simple mouse navigation */
+    QVector3D axis;
+    QVector3D va = arc_ball_vector(cur_mouse_position);
+    QVector3D vb = arc_ball_vector(last_mouse_position);
+
+    /* angle is dot product between the two vectors on the sphere,
+     * axis is the normal vector */
+    float angle = acos(QVector3D::dotProduct(va,vb));
+    angle *= 180. / M_PI;
+
+    axis = QVector3D::crossProduct(vb, va);
+
+    /* update rotation matrix */
+    rotation = QQuaternion::fromAxisAndAngle(axis, angle) * rotation;
+
+    last_mouse_position = cur_mouse_position;
+    update();
+}
+
+/* zoom in, zoom out with mouse wheel */
+void GLWidget::wheelEvent(QWheelEvent *event)
+{
+    if (event->orientation() != Qt::Vertical)
+        return;
+
+    if ((event->delta() * mouse_wheel_delta) < 0)
+        mouse_wheel_delta = 0;
+
+    mouse_wheel_delta += event->delta();
+
+    if (mouse_wheel_delta >= 120) {
+        depth -= 0.05;
+        mouse_wheel_delta = 0;
+    } else if (mouse_wheel_delta <= -120) {
+        depth += 0.05;
+        mouse_wheel_delta = 0;
+    }
+
+
+    /* set fast rendering and launch a timer to get back to normal
+     * after a while, this way you can zoom in and out with fast
+     * rendering and get back to quality rendering when the
+     * interaction ends, I could probably use this trick elsewhere */
+    update_timer->start(250);
+    view.setToIdentity();
+    view.lookAt({0,0,depth},{0,0,0},{0,1,0});
+
+    set_fast_rendering(true);
+    update(); /* extra update here... */
+}
+
+void GLWidget::update_timer_timeout()
+{
+    set_fast_rendering(false);
+}
+```
+
+### src/glwidget.h
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#ifndef GLWIDGET_H
+#define GLWIDGET_H
+
+#include <QOpenGLWidget>
+#include <QOpenGLFunctions>
+#include <QOpenGLVertexArrayObject>
+#include <QOpenGLFunctions_3_2_Core>
+#include <QOpenGLBuffer>
+#include <QOpenGLShaderProgram>
+#include <QMouseEvent>
+#include <QMatrix4x4>
+#include <QVector2D>
+#include <QQuaternion>
+#include <QColor>
+#include <QTimer>
+
+#include "util.h"
+
+QT_FORWARD_DECLARE_CLASS(QOpenGLShaderProgram)
+
+class GLWidget : public QOpenGLWidget, protected QOpenGLFunctions_3_2_Core
+{
+    Q_OBJECT
+
+public:
+    GLWidget(QWidget *parent = 0) : QOpenGLWidget(parent) {}
+    GLWidget(InitOptions &opt);
+    ~GLWidget();
+
+    QSize minimumSizeHint() const Q_DECL_OVERRIDE;
+    QSize sizeHint() const Q_DECL_OVERRIDE;
+
+    const QColor &get_background_color();
+
+    const QColor &get_light_color();
+    double get_diffuse_reflectance();
+    double get_ambient_reflectance();
+    double get_specular_reflectance();
+
+public slots:
+    void set_background_color(const QColor &color);
+
+    void set_shading_mode(int mode);
+    void set_compositing_mode(int mode);
+
+    void set_light_color (const QColor &color);
+    void set_diffuse_reflectance (double kd);
+    void set_ambient_reflectance (double ka);
+    void set_specular_reflectance (double ks);
+
+    void set_fast_rendering(bool fr);
+    void new_transfer_function(float *data, int len);
+    void update_timer_timeout();
+
+protected:
+    void initializeGL() Q_DECL_OVERRIDE;
+    void paintGL() Q_DECL_OVERRIDE;
+    void resizeGL(int width, int height) Q_DECL_OVERRIDE;
+    void mousePressEvent(QMouseEvent *event) Q_DECL_OVERRIDE;
+    void mouseReleaseEvent(QMouseEvent *event) Q_DECL_OVERRIDE;
+    void mouseMoveEvent(QMouseEvent *event) Q_DECL_OVERRIDE;
+    void wheelEvent(QWheelEvent *event) Q_DECL_OVERRIDE;
+
+private:
+    GLuint load_volume_texture(const char *path, GLuint w, GLuint h, GLuint d, unsigned int bit_depth);
+    GLuint load_transfer_function(const char *path);
+    GLuint load_transfer_function_from_data(float *data, size_t sz);
+    void init_target_texture(int w, int h);
+    void init_fbo(int w, int h);
+    void render_cube(QOpenGLShaderProgram *shader, GLuint cull_face);
+    QVector3D arc_ball_vector(QVector2D v);
+
+    InitOptions opt;
+
+    QOpenGLShaderProgram *distance_shader;
+    QOpenGLShaderProgram *raycast_shader;
+
+    QMatrix4x4 proj;
+    QMatrix4x4 model;
+    QMatrix4x4 view;
+
+    GLuint vao;
+    GLuint db;
+    GLuint fbo;
+    GLuint target_texture;
+
+    GLuint volume_texture;
+    GLuint transfer_function;
+
+    int cur_width;
+    int cur_height;
+
+    int x_angle;
+    int y_angle;
+    int z_angle;
+
+    bool fast_rendering;
+    int nsamples;
+
+    QPoint click_position;
+
+    QQuaternion rotation;
+    QVector2D last_mouse_position;
+    int mouse_wheel_delta;
+
+    float depth;
+
+    int shading_mode;
+    int compositing_mode;
+    float background_color[4];
+    float light_color[3]; /* no alpha here */
+    double ambient_reflectance;
+    double diffuse_reflectance;
+    double specular_reflectance;
+
+    QTimer *update_timer;
+};
+
+#endif
+```
+
+### src/main.cpp
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#include <QApplication>
+#include <QSurfaceFormat>
+#include <QCommandLineParser>
+#include <QCommandLineOption>
+
+#include "window.h"
+
+int main(int argc, char *argv[])
+{
+    QApplication app(argc, argv);
+    QCoreApplication::setApplicationName("qvrc");
+    QCoreApplication::setApplicationVersion("0.1");
+
+    QCommandLineParser parser;
+    parser.setApplicationDescription("GLSL Volume Raycasting");
+    parser.addHelpOption();
+    parser.addVersionOption();
+
+    QCommandLineOption fname_opt(QStringList() << "f" << "filename",
+                                 "Raw volumetric data filename",
+                                 "path/to/filename.raw",
+                                 "datasets/head256.raw");
+    parser.addOption(fname_opt);
+
+    QCommandLineOption size_opt(QStringList() << "s" << "size",
+                                 "Voxel data size",
+                                 "width,height,depth",
+                                 "256,256,225");
+    parser.addOption(size_opt);
+
+    QCommandLineOption scale_opt(QStringList() << "x" << "scale",
+                                "Voxel scale / aspect ratio",
+                                "xscale,yscale,zscale",
+                                "1.0,1.0,1.0");
+    parser.addOption(scale_opt);
+
+
+    QCommandLineOption bit_depth_opt(QStringList() << "d" << "bitdepth",
+                                     "Voxel bit depth",
+                                     "8,10,12,16",
+                                     "12");
+    parser.addOption(bit_depth_opt);
+
+
+    parser.process(app);
+
+    InitOptions opt;
+
+    opt.filename = parser.value(fname_opt);
+
+    QString size = parser.value(size_opt);
+    QStringList l = size.split(",");
+    opt.width = l[0].toInt();
+    opt.height = l[1].toInt();
+    opt.depth = l[2].toInt();
+
+    QString scale = parser.value(scale_opt);
+    l = scale.split(",");
+    opt.xscale = l[0].toFloat();
+    opt.yscale = l[1].toFloat();
+    opt.zscale = l[2].toFloat();
+
+    QString bit_depth = parser.value(bit_depth_opt);
+    opt.bit_depth = bit_depth.toInt();
+
+    QSurfaceFormat fmt;
+    fmt.setDepthBufferSize(24);
+    // fmt.setSamples(4); // complicates everything with offscreen rendering
+    fmt.setVersion(3, 2);
+    fmt.setProfile(QSurfaceFormat::CoreProfile);
+
+    QSurfaceFormat::setDefaultFormat(fmt);
+
+    Window window(opt);
+    window.resize(window.sizeHint());
+
+    window.show();
+
+    return app.exec();
+}
+```
+
+### src/presetmanager.cpp
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QColor>
+#include <QDebug>
+#include <QDir>
+
+#include "presetmanager.h"
+
+Preset::Preset()
+{
+    filename = QString("default.json");
+    name = QString("default");
+
+    bgcolor = QColor(0, 0, 0);
+    lut_points << new TransFuncPoint(QPointF(0.0, 0.5), QColor(0, 0, 0));
+    lut_points << new TransFuncPoint(QPointF(1.0, 0.5), QColor(255, 255, 255));
+    alpha_points << new TransFuncPoint(QPointF(0.0, 1.0));
+    alpha_points << new TransFuncPoint(QPointF(0.4, 1.0));
+    alpha_points << new TransFuncPoint(QPointF(0.401, 0.0));
+    alpha_points << new TransFuncPoint(QPointF(1.0, 0.0));
+}
+
+Preset::Preset(const QString &path)
+{
+    loadJson(path);
+}
+
+Preset::~Preset() {}
+
+const QVector<TransFuncPoint*> & Preset::getLutPoints()
+{
+    return lut_points;
+}
+
+void Preset::saveJson(const QString &path)
+{
+    QJsonObject preset;
+
+    QJsonArray alpha_array;
+    for (int i=0; i<alpha_points.size(); i++) {
+        QJsonObject o;
+        o = QJsonObject({
+                    { "pos", QJsonValue::fromVariant(alpha_points[i]->p.x()) },
+                    { "alpha", QJsonValue::fromVariant(alpha_points[i]->p.y()) }
+                });
+        alpha_array.push_back(o);
+        // qInfo() << "alpha: " << alpha_points[i]->p;
+    }
+
+    preset.insert("alpha_points", alpha_array);
+
+    QJsonArray lut_array;
+    for (int i=0; i<lut_points.size(); i++) {
+        QJsonObject o;
+        o = QJsonObject({
+                { "pos", QJsonValue::fromVariant(lut_points[i]->p.x()) },
+                { "color", QJsonValue::fromVariant(lut_points[i]->c) }});
+        lut_array.push_back(o);
+        // qInfo() << "lut: " << lut_points[i]->p << lut_points[i]->c;
+    }
+
+    preset.insert("lut_points", lut_array);
+
+    preset.insert("name", QJsonValue::fromVariant(name));
+
+    doc = QJsonDocument(preset);
+
+    QFile outfile(path);
+
+    if (!outfile.open(QIODevice::WriteOnly)) {
+        qWarning("couldn't open file for writing"); // I'm an error, handle me!
+        return;
+    }
+
+    outfile.write(doc.toJson());
+    outfile.close();
+}
+
+void Preset::loadJson(const QString &path)
+{
+    QFile infile(path);
+    if (!infile.open(QIODevice::ReadOnly)) {
+        qWarning("couldn't open file for reading"); // I'm an error, handle me!
+        return;
+    }
+
+    QFileInfo finfo(infile.fileName());
+    filename = finfo.fileName();
+
+    // qInfo() << "LOAD JSON: " << filename;
+
+    QByteArray data = infile.readAll();
+    infile.close();
+
+    doc = QJsonDocument::fromJson(data);
+
+    // qInfo() << doc.toJson().data();
+
+    QJsonObject obj = doc.object();
+    name = obj["name"].toString();
+
+    QJsonArray lut_array = obj["lut_points"].toArray();
+    for(int i=0; i<lut_array.size(); i++) {
+        QJsonObject point = lut_array[i].toObject();
+        double pos = point["pos"].toDouble();
+        QVariant v = point["color"].toVariant();
+        QColor color = v.value<QColor>();
+
+        lut_points << new TransFuncPoint(QPointF(pos, 0.5), color);
+        // qInfo() << "lut: " << lut_points[i]->p << lut_points[i]->c;
+    }
+    qSort(lut_points.begin(), lut_points.end(), trans_func_point_compare_x);
+
+    QJsonArray alpha_array = obj["alpha_points"].toArray();
+    for(int i=0; i<alpha_array.size(); i++) {
+        QJsonObject point = alpha_array[i].toObject();
+        double pos = point["pos"].toDouble();
+        double alpha = point["alpha"].toDouble();
+
+        alpha_points << new TransFuncPoint(QPointF(pos, alpha));
+        // qInfo() << "alpha: " << alpha_points[i]->p;
+    }
+    qSort(alpha_points.begin(), alpha_points.end(), trans_func_point_compare_x);
+}
+
+PresetManager::PresetManager(const QString &presets_dir)
+{
+    dir = QDir(presets_dir);
+    QStringList globs;
+    globs << "*.json";
+    dir.setNameFilters(globs);
+    QStringList filenames = dir.entryList(QDir::Files);
+
+    if (filenames.size() < 1)
+        presets << new Preset();
+
+    foreach (QString file, filenames) {
+        // qInfo() << file;
+
+        presets << new Preset(QString("presets") + "/" + file);
+    }
+
+    selected = 0;
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+/* color + point utility class */
+TransFuncPoint::TransFuncPoint(QPointF point) {
+    this->p = point;
+    selected = false;
+}
+
+TransFuncPoint::TransFuncPoint(QPointF point, QColor color) {
+    this->p = point;
+    this->c = color;
+    selected = false;
+}
+
+bool TransFuncPoint::is_selected() {
+    return selected;
+}
+
+void TransFuncPoint::set_selected(bool status) {
+    selected = status;
+}
+
+void TransFuncPoint::set_point(QPointF point) {
+    this->p = point;
+}
+
+void TransFuncPoint::set_color(QColor color) {
+    this->c = color;
+}
+```
+
+### src/presetmanager.h
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#ifndef PRESET_MANAGER_H
+#define PRESET_MANAGER_H
+
+#include <QObject>
+#include <QDir>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QVector>
+#include <QPointF>
+#include <QColor>
+
+class TransFuncPoint : public QObject
+{
+    Q_OBJECT
+
+public:
+    TransFuncPoint(QObject *parent = 0) : QObject(parent) {}
+    TransFuncPoint(QPointF p, QColor c);
+    TransFuncPoint(QPointF p);
+
+    QPointF p;
+    QColor c;
+
+    void set_point(QPointF point);
+    void set_color(QColor color);
+
+    bool is_selected();
+    void set_selected(bool status);
+
+private:
+    TransFuncPoint(const TransFuncPoint&);
+    TransFuncPoint& operator=(const TransFuncPoint&);
+    bool selected;
+};
+
+inline bool trans_func_point_compare_x(TransFuncPoint *p1, TransFuncPoint *p2)
+{
+    return p1->p.x() <= p2->p.x();
+}
+
+/* yeah i know it's nothing more than a struct */
+/* who cares */
+class Preset: public QObject
+{
+    Q_OBJECT
+
+public:
+    Preset(QObject *parent): QObject(parent) { printf("new preset\n"); };
+    Preset();
+    Preset(const QString &path);
+    ~Preset();
+
+    QString filename;
+    QString name;
+
+    QColor bgcolor;
+    const QVector<TransFuncPoint*> &getLutPoints();
+    QVector<TransFuncPoint *> lut_points;
+    QVector<TransFuncPoint *> alpha_points;
+
+    void saveJson(const QString &path);
+    void loadJson(const QString &path);
+
+    /*
+      float offset;
+      struct light stuff
+    */
+private:
+    QJsonDocument doc;
+};
+
+class PresetManager: public QObject
+{
+    Q_OBJECT
+
+public:
+    PresetManager(QObject *parent = 0): QObject(parent) {}
+    PresetManager(const QString &presets_dir);
+    QVector<Preset *> presets;
+
+    int selected;
+
+private:
+    QDir dir;
+};
+
+
+#endif // PRESET_MANAGER_H
+```
+
+### src/transfuncalphaarea.cpp
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#include "transfuncwidget.h"
+#include "transfuncalphaarea.h"
+#include "util.h"
+#include <QVBoxLayout>
+#include <QLabel>
+#include <QPaintEvent>
+#include <QPainter>
+#include <QLinearGradient>
+#include <QPen>
+#include <QColorDialog>
+
+/* color gradient widget */
+TransFuncAlphaArea::TransFuncAlphaArea(PresetManager *pm)
+{
+    this->prman = pm;
+
+    Preset *p = prman->presets[prman->selected];
+    points = p->alpha_points;
+
+    active_point = -1;
+
+    tf_len = TF_CHANNEL_SIZE;
+    tf_data = (float *) malloc(tf_len * sizeof(float));
+
+    setFocusPolicy(Qt::ClickFocus);
+}
+
+void TransFuncAlphaArea::update_preset(int i)
+{
+    Preset *p = prman->presets[i];
+    points = p->alpha_points;
+
+    active_point = -1;
+    update_transfer_function();
+    update();
+}
+
+TransFuncAlphaArea::~TransFuncAlphaArea() {
+    free(tf_data);
+}
+
+void TransFuncAlphaArea::update_transfer_function()
+{
+    for (int i=0; i<points.size()-1; i++) {
+        int x1 = points.at(i)->p.x() * (tf_len-1);
+        int x2 = points.at(i+1)->p.x() * (tf_len-1);
+
+        float y1 = (1.0-points.at(i)->p.y());
+        float y2 = (1.0-points.at(i+1)->p.y());
+
+        // printf("x1: %d x2: %d\n", x1, x2);
+        // printf("y1: %f y2: %f\n", y1, y2);
+
+        for (int j=x1; j<=x2; j++) {
+            float x = (float)(j - x1)/(float)(x2-x1);
+            // x = smoothstep(0.0, 1.0, x);
+            tf_data[j] = lerp(y1, y2, x);
+        }
+    }
+
+    prman->presets[prman->selected]->alpha_points = points;
+
+    emit transfer_function_ready(tf_data, tf_len);
+}
+
+void TransFuncAlphaArea::paintEvent(QPaintEvent *)
+{
+    drawing_area.setX(rect().x());
+    drawing_area.setY(rect().y());
+    drawing_area.setWidth(rect().width());
+    drawing_area.setHeight(rect().height());
+
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+
+    QLinearGradient gradient(drawing_area.topLeft(), drawing_area.topRight());
+
+    QBrush checker = QBrush(QColor(0, 0, 0, 120));
+    checker.setStyle(Qt::CrossPattern);
+    painter.fillRect(drawing_area, checker);
+
+    QPainterPath path;
+    path.moveTo(norm_to_rect(points[0]->p, drawing_area));
+    for (int i=1; i<points.size(); i++) {
+        path.lineTo(norm_to_rect(points[i]->p, drawing_area));
+    }
+
+    QPainterPathStroker stroker;
+    stroker.setWidth(2);
+    QPainterPath stroke = stroker.createStroke(path);
+    painter.fillPath(stroke, QColor(200, 50, 0, 150));
+
+    for (int i=0; i<points.size(); i++) {
+        TransFuncPoint *p = points.at(i);
+
+        if (i == active_point) {
+            QPen pen = QPen(QColor(20, 20, 50));
+            pen.setWidth(2);
+            painter.setPen(pen);
+            painter.setBrush(QColor(255, 255, 255));
+        } else {
+            QPen pen = QPen(QColor(20, 20, 50));
+            painter.setPen(pen);
+            painter.setBrush(QColor(200, 200, 220, 255));
+        }
+
+        QPointF rectp = norm_to_rect(p->p, drawing_area);
+        painter.drawEllipse(rectp.x() - point_radius,
+                            rectp.y() - point_radius,
+                            2*point_radius, 2*point_radius);
+    }
+}
+
+void TransFuncAlphaArea::mouseDoubleClickEvent(QMouseEvent *e)
+{
+    if (active_point < 0) {
+        points << new TransFuncPoint(rect_to_norm(e->pos(), drawing_area));
+        qSort(points.begin(), points.end(), trans_func_point_compare_x);
+    } else {
+        active_point = -1;
+    }
+
+    update_transfer_function();
+    update();
+}
+
+void TransFuncAlphaArea::mouseMoveEvent(QMouseEvent *e)
+{
+    if (active_point < 0)
+        return;
+
+    qSort(points.begin(), points.end(), trans_func_point_compare_x);
+    active_point = get_selected_idx();
+
+
+    QPointF newpos = rect_to_norm(e->pos(), drawing_area);
+
+    /* don't touch side points */
+    if ((active_point == 0) || (active_point == points.size()-1))
+        newpos.setX(points[active_point]->p.x());
+
+    points[active_point]->set_point(newpos);
+
+    emit fast_rendering_hint(true);
+
+    update_transfer_function();
+    update();
+}
+
+void TransFuncAlphaArea::keyReleaseEvent(QKeyEvent *e)
+{
+    if ((e->key() == Qt::Key_Delete) &&
+        (active_point > 0) && (active_point < (points.size()-1))) {
+        if (points.size() > 1)
+            points.remove(active_point);
+        active_point = -1;
+
+        update_transfer_function();
+        update();
+    }
+    else
+        QWidget::keyReleaseEvent(e);
+}
+
+QSize TransFuncAlphaArea::sizeHint() const
+{
+    return QSize(250, 80);
+}
+```
+
+### src/transfuncalphaarea.h
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#ifndef TRANS_FUNC_ALPHAAREA_H
+#define TRANS_FUNC_ALPHAAREA_H
+
+#include <QWidget>
+#include <QColor>
+#include <QPointF>
+#include <QPaintEvent>
+
+#include "presetmanager.h"
+#include "transfuncwidget.h"
+#include "transfuncarea.h"
+
+/* Drawing area for the color gradient */
+class TransFuncAlphaArea : public TransFuncArea
+{
+    Q_OBJECT
+
+public:
+    TransFuncAlphaArea(PresetManager *pr);
+    ~TransFuncAlphaArea();
+
+    void update_transfer_function();
+
+public slots:
+    void update_preset(int i);
+
+signals:
+    void transfer_function_ready(float *tf_data, int sz);
+
+protected:
+    void paintEvent(QPaintEvent *);
+    void mouseMoveEvent(QMouseEvent *e) Q_DECL_OVERRIDE;
+    void mouseDoubleClickEvent(QMouseEvent *e) Q_DECL_OVERRIDE;
+    void keyReleaseEvent(QKeyEvent *e) Q_DECL_OVERRIDE;
+    QSize sizeHint() const Q_DECL_OVERRIDE;
+
+private:
+    float *tf_data;
+    int tf_len;
+};
+
+#endif // TRANS_FUNC_ALPHAAREA_H
+```
+
+### src/transfuncarea.cpp
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#include "transfuncwidget.h"
+#include "transfuncarea.h"
+#include <QVBoxLayout>
+#include <QLabel>
+#include <QPaintEvent>
+#include <QPainter>
+#include <QLinearGradient>
+#include <QPen>
+#include <QColorDialog>
+
+/* utils */
+QPointF norm_to_rect(QPointF p, QRect r)
+{
+    return QPointF(p.x() * r.width(), p.y() * r.height());
+}
+QPointF rect_to_norm(QPointF p, QRect r,
+                     bool fixed_y)
+{
+    qreal newx = qBound(0.0, p.x() / r.width(), 1.0);
+    qreal newy;
+
+    if (fixed_y)
+        newy = 0.5;
+    else
+        newy = qBound(0.0, p.y() / r.height(), 1.0);
+
+    return QPointF(newx, newy);
+}
+
+/* transfuncarea base class */
+TransFuncArea::TransFuncArea(QWidget *parent) :
+    QWidget(parent)
+{
+    point_radius = 6.0;
+    fast_rendering = false;
+}
+
+QSize TransFuncArea::minimumSizeHint() const
+{
+    return QSize(100, 20);
+}
+QSize TransFuncArea::sizeHint() const
+{
+    return QSize(250, 80);
+}
+
+int TransFuncArea::click_to_point(QPointF click)
+{
+    qreal prevd = 100.; /* something big */
+    int found = -1;
+    for (int i=0; i<points.size(); i++) {
+        qreal d = QLineF(norm_to_rect(points.at(i)->p, drawing_area),
+                         click).length();
+
+        if ((d < prevd) && (d <= point_radius * 2))
+            found = i;
+        prevd = d;
+    }
+
+    return found;
+}
+
+int TransFuncArea::get_selected_idx()
+{
+    int selected = -1;
+    for (int i=0; i<points.size(); i++) {
+        if (points[i]->is_selected()) selected = i;
+    }
+
+    return selected;
+}
+
+int TransFuncArea::set_selected_idx(int idx)
+{
+    for (int i=0; i<points.size(); i++) {
+        if (idx == i)
+            points[i]->set_selected(true);
+        else
+            points[i]->set_selected(false);
+    }
+
+    return idx;
+}
+
+void TransFuncArea::mousePressEvent(QMouseEvent *e)
+{
+    active_point = set_selected_idx(click_to_point(e->pos()));
+
+    // if (active_point < 0)
+    //     printf("no point near\n");
+    // else
+    //     printf("found: %d\n", active_point);
+
+    update();
+}
+
+void TransFuncArea::mouseReleaseEvent(QMouseEvent *e)
+{
+    Q_UNUSED(e);
+
+    fast_rendering = false;
+    emit fast_rendering_hint(false);
+
+    update();
+}
+```
+
+### src/transfuncarea.h
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#ifndef TRANS_FUNC_AREA_H
+#define TRANS_FUNC_AREA_H
+
+#include <QWidget>
+#include <QColor>
+#include <QPointF>
+#include <QPaintEvent>
+
+#include "transfuncwidget.h"
+#include "presetmanager.h"
+
+
+QPointF norm_to_rect(QPointF p, QRect r);
+QPointF rect_to_norm(QPointF p, QRect r, bool fixed_y = false);
+
+
+/* Drawing area for the color gradient */
+class TransFuncArea : public QWidget
+{
+    Q_OBJECT
+
+public:
+    TransFuncArea(QWidget *parent = 0);
+
+    QSize minimumSizeHint() const Q_DECL_OVERRIDE;
+    QSize sizeHint() const Q_DECL_OVERRIDE;
+
+signals:
+    void fast_rendering_hint(bool hint);
+
+protected:
+    void mousePressEvent(QMouseEvent *e) Q_DECL_OVERRIDE;
+    void mouseReleaseEvent(QMouseEvent *e) Q_DECL_OVERRIDE;
+
+    int click_to_point(QPointF click);
+    int get_selected_idx();
+    int set_selected_idx(int i);
+
+
+    PresetManager *prman;
+    TransFuncWidget *tfw;
+
+    QVector<TransFuncPoint *> points;
+    int active_point;
+    QRect drawing_area;
+
+    qreal point_radius;
+    qreal offset;
+
+    bool fast_rendering = false;
+};
+
+#endif // TRANS_FUNC_AREA_H
+```
+
+### src/transfunclutarea.cpp
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#include "transfuncwidget.h"
+#include "transfunclutarea.h"
+#include "util.h"
+#include <QVBoxLayout>
+#include <QLabel>
+#include <QPaintEvent>
+#include <QPainter>
+#include <QLinearGradient>
+#include <QPen>
+#include <QColorDialog>
+
+/* color gradient widget */
+TransFuncLutArea::TransFuncLutArea(PresetManager *pm)
+{
+    this->prman = pm;
+
+    Preset *p = prman->presets[prman->selected];
+    points = p->lut_points;
+
+    active_point = -1;
+
+    tf_len = TF_CHANNEL_SIZE;
+    tf_data = (float *) malloc(3*tf_len * sizeof(float));
+    memset(tf_data, 0.0, 3*tf_len * sizeof(float));
+
+    setFocusPolicy(Qt::ClickFocus);
+}
+
+void TransFuncLutArea::update_preset(int i)
+{
+    Preset *p = prman->presets[i];
+    points = p->lut_points;
+
+    active_point = -1;
+    update_transfer_function();
+    update();
+}
+
+TransFuncLutArea::~TransFuncLutArea() {
+    free(tf_data);
+}
+
+void TransFuncLutArea::update_transfer_function()
+{
+    for (int i=0; i<points.size()-1; i++) {
+        int x1 = points.at(i)->p.x() * (tf_len-1);
+        int x2 = points.at(i+1)->p.x() * (tf_len-1);
+
+        float r1 = points.at(i)->c.redF();
+        float r2 = points.at(i+1)->c.redF();
+        float g1 = points.at(i)->c.greenF();
+        float g2 = points.at(i+1)->c.greenF();
+        float b1 = points.at(i)->c.blueF();
+        float b2 = points.at(i+1)->c.blueF();
+
+        for (int j=x1; j<=x2; j++) {
+            float x = (float)(j - x1)/(float)(x2-x1);
+            // x = smoothstep(0.0, 1.0, x);
+            tf_data[3*j] = lerp(r1, r2, x);
+            tf_data[3*j+1] = lerp(g1, g2, x);
+            tf_data[3*j+2] = lerp(b1, b2, x);
+        }
+    }
+
+    prman->presets[prman->selected]->lut_points = points;
+
+    emit transfer_function_ready(tf_data, tf_len);
+}
+
+void TransFuncLutArea::paintEvent(QPaintEvent *)
+{
+    drawing_area.setX(rect().x());
+    drawing_area.setY(rect().y());
+    drawing_area.setWidth(rect().width());
+    drawing_area.setHeight(rect().height());
+
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+
+    QLinearGradient gradient(drawing_area.topLeft(), drawing_area.topRight());
+
+    for (int i=0; i<points.size(); i++) {
+        gradient.setColorAt(points[i]->p.x(), points[i]->c);
+    }
+
+    painter.fillRect(drawing_area, QBrush(gradient));
+
+    for (int i=0; i<points.size(); i++) {
+        TransFuncPoint *p = points.at(i);
+
+        if (i == active_point) {
+            QPen pen = QPen(QColor(20, 20, 50));
+            pen.setWidth(2);
+            painter.setPen(pen);
+            painter.setBrush(QColor(255, 255, 255));
+        } else {
+            QPen pen = QPen(QColor(20, 20, 50));
+            painter.setPen(pen);
+            painter.setBrush(QColor(200, 200, 220, 255));
+        }
+
+        QPointF rectp = norm_to_rect(p->p, drawing_area);
+        painter.drawEllipse(rectp.x() - point_radius,
+                            rectp.y() - point_radius,
+                            2*point_radius, 2*point_radius);
+    }
+}
+
+void TransFuncLutArea::mouseDoubleClickEvent(QMouseEvent *e)
+{
+    if (active_point < 0) {
+        QColor color = QColorDialog::getColor(Qt::white, this,
+                                                    "Select Color",
+                                                    QColorDialog::DontUseNativeDialog);
+        if (color.isValid()) {
+            points << new TransFuncPoint(rect_to_norm(e->pos(), drawing_area, true), QColor(color));
+            qSort(points.begin(), points.end(), trans_func_point_compare_x);
+        }
+    }
+    else {
+        const QColor color = QColorDialog::getColor(points.at(active_point)->c, this,
+                                                    "Select Color",
+                                                    QColorDialog::DontUseNativeDialog);
+        if (color.isValid()) {
+            points[active_point]->c = color;
+
+            active_point = -1;
+        }
+    }
+
+    update_transfer_function();
+    update();
+}
+
+
+void TransFuncLutArea::mouseMoveEvent(QMouseEvent *e)
+{
+    if (active_point < 0)
+        return;
+
+    qSort(points.begin(), points.end(), trans_func_point_compare_x);
+    active_point = get_selected_idx();
+
+    QPointF newpos = rect_to_norm(e->pos(), drawing_area, true);
+
+    /* don't touch side points */
+    if ((active_point == 0) || (active_point == points.size()-1))
+        newpos.setX(points[active_point]->p.x());
+
+    points[active_point]->set_point(newpos);
+
+    emit fast_rendering_hint(true);
+
+    update_transfer_function();
+    update();
+}
+
+
+void TransFuncLutArea::keyReleaseEvent(QKeyEvent *e)
+{
+    if ((e->key() == Qt::Key_Delete) &&
+        (active_point > 0) && (active_point < (points.size()-1))) {
+        if (points.size() > 1)
+            points.remove(active_point);
+        active_point = -1;
+
+        update_transfer_function();
+        update();
+    }
+    else
+        QWidget::keyReleaseEvent(e);
+}
+
+QSize TransFuncLutArea::sizeHint() const
+{
+    return QSize(250, 36);
+}
+```
+
+### src/transfunclutarea.h
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#ifndef TRANS_FUNC_LUTAREA_H
+#define TRANS_FUNC_LUTAREA_H
+
+#include <QWidget>
+#include <QColor>
+#include <QPointF>
+#include <QPaintEvent>
+
+#include "presetmanager.h"
+#include "transfuncwidget.h"
+#include "transfuncarea.h"
+
+/* Drawing area for the color gradient */
+class TransFuncLutArea : public TransFuncArea
+{
+    Q_OBJECT
+
+public:
+    TransFuncLutArea() {};
+    TransFuncLutArea(PresetManager *prman);
+    ~TransFuncLutArea();
+
+    void update_transfer_function();
+
+public slots:
+    void update_preset(int i);
+
+signals:
+    void transfer_function_ready(float *tf_data, int sz);
+
+protected:
+    void paintEvent(QPaintEvent *);
+    void mouseMoveEvent(QMouseEvent *e) Q_DECL_OVERRIDE;
+    void mouseDoubleClickEvent(QMouseEvent *e) Q_DECL_OVERRIDE;
+    void keyReleaseEvent(QKeyEvent *e) Q_DECL_OVERRIDE;
+    QSize sizeHint() const Q_DECL_OVERRIDE;
+
+private:
+    float *tf_data;
+    int tf_len;
+
+    QLinearGradient gradient; // do I need this?
+};
+
+#endif // TRANS_FUNC_LUTAREA_H
+```
+
+### src/transfuncwidget.cpp
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#include "transfuncwidget.h"
+#include "transfunclutarea.h"
+#include "transfuncalphaarea.h"
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QSlider>
+#include <QPushButton>
+#include <QDebug>
+
+
+TransFuncWidget::TransFuncWidget(PresetManager *pm)
+{
+    prman = pm;
+
+    tf_len = TF_CHANNEL_SIZE;
+    tf_data = (float *) malloc(4 * tf_len * sizeof(float));
+    memset(tf_data, 0, tf_len * sizeof(float));
+
+    // this->setFrameStyle(QFrame::StyledPanel);
+
+    QVBoxLayout *vlayout = new QVBoxLayout();
+    QLabel *lutlabel = new QLabel("Color map");
+    QLabel *alphalabel = new QLabel("Opacity");
+    TransFuncLutArea *lut = new TransFuncLutArea(prman);
+    TransFuncAlphaArea *alpha = new TransFuncAlphaArea(prman);
+
+    setSizePolicy(QSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum));
+
+    vlayout->addWidget(lutlabel);
+    vlayout->addWidget(lut);
+    vlayout->addWidget(alphalabel);
+    vlayout->addWidget(alpha);
+
+    connect(lut, &TransFuncLutArea::transfer_function_ready,
+            this, &TransFuncWidget::new_rgb_data, Qt::QueuedConnection);
+    connect(alpha, &TransFuncAlphaArea::transfer_function_ready,
+            this, &TransFuncWidget::new_alpha_data, Qt::QueuedConnection);
+    connect(lut, &TransFuncLutArea::fast_rendering_hint,
+            this, &TransFuncWidget::forward_fast_rendering_hint);
+    connect(lut, &TransFuncLutArea::fast_rendering_hint,
+            this, &TransFuncWidget::forward_fast_rendering_hint);
+    connect(alpha, &TransFuncAlphaArea::fast_rendering_hint,
+            this, &TransFuncWidget::forward_fast_rendering_hint);
+
+    connect(this, &TransFuncWidget::preset_selected,
+            lut, &TransFuncLutArea::update_preset);
+    connect(this, &TransFuncWidget::preset_selected,
+            alpha, &TransFuncAlphaArea::update_preset);
+
+    lut->update_transfer_function();
+    alpha->update_transfer_function();
+
+    setLayout(vlayout);
+}
+
+TransFuncWidget::~TransFuncWidget() {
+    free(tf_data);
+}
+
+void TransFuncWidget::update_preset(int i)
+{
+    prman->selected = i;
+
+    emit preset_selected(i);
+}
+
+void TransFuncWidget::new_rgb_data(float *rgb_data, int len)
+{
+    /* don't trust len, still not sure what to do with it */
+    Q_UNUSED(len);
+
+    for (int i=0; i<tf_len; i++) {
+        memcpy(tf_data+i*4, rgb_data+i*3, 3*sizeof(float));
+    }
+
+    // for (int i=0; i<tf_len; i++)
+    //     printf("%d|", tf_data[i]);
+    // printf("\n\n");
+
+    // printf("new rgb data\n");
+
+    emit transfer_function_ready(tf_data, tf_len);
+}
+
+void TransFuncWidget::new_alpha_data(float *alpha_data, int len)
+{
+    /* don't trust len, still not sure what to do with it */
+    Q_UNUSED(len);
+
+    for (int i=0; i<tf_len; i++) {
+        memcpy(tf_data+i*4+3, alpha_data+i, 1*sizeof(float));
+    }
+
+    // for (int i=0; i<tf_len; i++)
+    //     printf("%d|", tf_data[i]);
+    // printf("\n\n");
+    // printf("new alpha data\n");
+
+    emit transfer_function_ready(tf_data, tf_len);
+}
+
+void TransFuncWidget::forward_fast_rendering_hint(bool hint)
+{
+    emit fast_rendering_hint(hint);
+}
+```
+
+### src/transfuncwidget.h
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#ifndef TRANS_FUNC_WIDGET_H
+#define TRANS_FUNC_WIDGET_H
+
+#include <QWidget>
+#include <QColor>
+#include <QPointF>
+#include <QPaintEvent>
+#include <QFrame>
+#include <QSettings>
+
+#include "presetmanager.h"
+
+#define TF_CHANNEL_SIZE 4096
+
+/* Parent, container widget, point global state, layout and signals */
+class TransFuncWidget : public QFrame
+{
+    Q_OBJECT
+
+public:
+    TransFuncWidget(QWidget *parent) : QFrame(parent) {};
+    TransFuncWidget(PresetManager *prman);
+    ~TransFuncWidget();
+
+    void update_preset(int i);
+
+
+public slots:
+    void new_rgb_data(float *rgb_data, int len);
+    void new_alpha_data(float *alpha_data, int len);
+    void forward_fast_rendering_hint(bool hint);
+
+signals:
+    void preset_selected(int i);
+    void transfer_function_ready(float *tf_data, int len);
+    void fast_rendering_hint(bool hint);
+
+private:
+    PresetManager *prman;
+    QSettings *settings;
+    float *tf_data;
+    int tf_len;
+};
+
+#endif // TRANS_FUNC_WIDGET_H
+```
+
+### src/util.cpp
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#include "util.h"
+
+double smoothstep(double edge0, double edge1, double x)
+{
+    double t = CLAMP ((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+double lerp(double edge0, double edge1, double x)
+{
+    return edge0 + x * (edge1 - edge0);
+}
+```
+
+### src/util.h
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#ifndef UTIL_H
+#define UTIL_H
+
+#include <QString>
+
+#define MIN(X,Y) (((X) < (Y)) ? (X) : (Y))
+#define MAX(X,Y) (((X) > (Y)) ? (X) : (Y))
+#define CLAMP(x, low, high)  (((x) > (high)) ? (high) : (((x) < (low)) ? (low) : (x)))
+
+double smoothstep(double edge0, double edge1, double x);
+double lerp(double edge0, double edge1, double x);
+
+
+typedef struct _InitOptions
+{
+    QString filename;
+
+    unsigned int width;
+    unsigned int height;
+    unsigned int depth;
+
+    unsigned int bit_depth;
+
+    float xscale;
+    float yscale;
+    float zscale;
+} InitOptions;
+
+#endif /* UTIL_H */
+```
+
+### src/window.cpp
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#include "glwidget.h"
+#include "transfuncwidget.h"
+#include "presetmanager.h"
+#include "window.h"
+#include <QVBoxLayout>
+#include <QComboBox>
+#include <QPushButton>
+#include <QFileDialog>
+#include <QDoubleSpinBox>
+#include <QSize>
+#include <QLabel>
+#include <QFormLayout>
+#include <QGroupBox>
+#include <QColorDialog>
+
+#include "colorbutton.h"
+
+
+ColorButton::ColorButton(const QColor &color)
+{
+    setColor(color);
+    //setFixedSize(36, 24);
+    setIconSize(QSize(24, 12));
+}
+
+void ColorButton::setColor(const QColor &color)
+{
+    pixmap = QPixmap(QSize(24, 12));
+    pixmap.fill(color);
+
+    setIcon(QIcon(pixmap));
+}
+
+Window::Window(InitOptions &opt)
+{
+    prman = new PresetManager("presets");
+
+    QWidget *centralwidget = new QWidget();
+    GLWidget *glWidget = new GLWidget(opt);
+
+    QGroupBox *tfgroup = new QGroupBox("Transfer Function");
+    QVBoxLayout *tflayout = new QVBoxLayout();
+    QGroupBox *sgroup = new QGroupBox("Shading and Compositing");
+    QVBoxLayout *vlayout = new QVBoxLayout();
+    QHBoxLayout *hlayout = new QHBoxLayout();
+    hlayout->setMargin(0);
+    hlayout->setSpacing(0);
+    QHBoxLayout *playout = new QHBoxLayout();
+    QFormLayout *flayout = new QFormLayout();
+    flayout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    preset_combo = new QComboBox();
+    for(int i=0; i<prman->presets.size(); i++) {
+        // qInfo() << prman->presets[i]->name;
+        preset_combo->addItem(prman->presets[i]->filename, i);
+        // foreach(TransFuncPoint *pt, prman->presets[i]->alpha_points)
+        //     qInfo() << pt->p;
+    }
+
+    QPushButton *save = new QPushButton("Save");
+
+    playout->addWidget(preset_combo, 1);
+    playout->addWidget(save);
+
+    hlayout->addWidget(glWidget,1);
+    hlayout->addLayout(vlayout);
+
+    tf = new TransFuncWidget(prman);
+    tflayout->addWidget(tf);
+    tfgroup->setLayout(tflayout);
+    tflayout->addLayout(playout);
+    vlayout->addWidget(tfgroup);
+    vlayout->setMargin(2);
+
+    sgroup->setLayout(flayout);
+    vlayout->addWidget(sgroup);
+
+    /* general settings */
+    QLabel *shading_label = new QLabel("Shading");
+    shading_combo = new QComboBox();
+    shading_combo->addItem("Blinn-Phong");
+    shading_combo->addItem("Blinn-Phong + Edges");
+    shading_combo->addItem("Blinn-Phong + Edges + Toon");
+    shading_combo->addItem("None");
+    flayout->addRow(shading_label, shading_combo);
+
+    QLabel *comp_label = new QLabel("Compositing");
+    comp_combo = new QComboBox();
+    comp_combo->addItem("Front to back");
+    comp_combo->addItem("MIP");
+    comp_combo->addItem("M̶I̶D̶A̶ (not working)");
+    comp_combo->addItem("debug: ray start");
+    comp_combo->addItem("debug: ray end");
+    comp_combo->addItem("debug: ray dir");
+    flayout->addRow(comp_label, comp_combo);
+
+    QLabel *background_color_label = new QLabel("Background color");
+    background_color_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    background_color_button = new ColorButton(glWidget->get_background_color());
+    flayout->addRow(background_color_label, background_color_button);
+
+    QLabel *light_color_label = new QLabel("Light color");
+    light_color_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    light_color_button = new ColorButton(glWidget->get_light_color());
+    flayout->addRow(light_color_label, light_color_button);
+
+    QLabel *ambient_label = new QLabel("Ambient reflectance");
+    ambient_spinbox = new QDoubleSpinBox();
+    ambient_spinbox->setRange(0.0, 5.0);
+    ambient_spinbox->setSingleStep(0.05);
+    ambient_spinbox->setValue(glWidget->get_ambient_reflectance());
+    flayout->addRow(ambient_label, ambient_spinbox);
+
+    QLabel *diffuse_label = new QLabel("Diffuse reflectance");
+    diffuse_spinbox = new QDoubleSpinBox();
+    diffuse_spinbox->setRange(0.0, 5.0);
+    diffuse_spinbox->setSingleStep(0.05);
+    diffuse_spinbox->setValue(glWidget->get_diffuse_reflectance());
+    flayout->addRow(diffuse_label, diffuse_spinbox);
+
+    QLabel *specular_label = new QLabel("Specular reflectance");
+    specular_spinbox = new QDoubleSpinBox();
+    specular_spinbox->setRange(0.0, 5.0);
+    specular_spinbox->setSingleStep(0.05);
+    specular_spinbox->setValue(glWidget->get_specular_reflectance());
+    flayout->addRow(specular_label, specular_spinbox);
+
+
+    /* stretch to the bottom */
+    vlayout->addStretch();
+
+    centralwidget->setLayout(hlayout);
+    setCentralWidget(centralwidget);
+
+    /* signals */
+    connect(tf, &TransFuncWidget::transfer_function_ready,
+            glWidget, &GLWidget::new_transfer_function, Qt::QueuedConnection);
+    connect(tf, &TransFuncWidget::fast_rendering_hint,
+            glWidget, &GLWidget::set_fast_rendering, Qt::QueuedConnection);
+
+    /* seriously? this is legal syntax?! I hate C++ */
+    connect(preset_combo, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            this, &Window::preset_selected);
+    connect(save, &QPushButton::clicked,
+            this, &Window::save_preset);
+
+    /* dual signals here, as I want to avoid to spawn a color dialog
+     * from glwidget */
+    connect(background_color_button, &QToolButton::clicked,
+            this, &Window::set_background_color);
+    connect(this, &Window::background_color_ready,
+            glWidget, &GLWidget::set_background_color, Qt::QueuedConnection);
+    /* same here */
+    connect(light_color_button, &QToolButton::clicked,
+            this, &Window::set_light_color);
+    connect(this, &Window::light_color_ready,
+            glWidget, &GLWidget::set_light_color, Qt::QueuedConnection);
+
+
+    connect(shading_combo,
+            static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            glWidget,
+            &GLWidget::set_shading_mode,
+            Qt::QueuedConnection);
+
+    connect(comp_combo,
+            static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+            glWidget,
+            &GLWidget::set_compositing_mode,
+            Qt::QueuedConnection);
+
+    connect(ambient_spinbox, static_cast<void(QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+            glWidget, &GLWidget::set_ambient_reflectance, Qt::QueuedConnection);
+
+    connect(diffuse_spinbox, static_cast<void(QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+            glWidget, &GLWidget::set_diffuse_reflectance, Qt::QueuedConnection);
+
+    connect(specular_spinbox, static_cast<void(QDoubleSpinBox::*)(double)>(&QDoubleSpinBox::valueChanged),
+            glWidget, &GLWidget::set_specular_reflectance, Qt::QueuedConnection);
+
+
+
+}
+
+void Window::save_preset()
+{
+    Preset *p = prman->presets[prman->selected];
+    QString newname = QFileDialog::getSaveFileName(this, "Save File",
+                                                   "presets",
+                                                   "JSon files (*.json)");
+
+    /* buggy convoluted logic here, save the old one which
+     * has changed, to the new filename, reload the new filename as a
+     * new preset, and now the old preset is lost... what do we do
+     * about it? fixme fixme fixme... rebuild the combo? */
+    if (newname != NULL)
+    {
+        p->saveJson(newname);
+        prman->presets << new Preset(newname);
+
+        QFileInfo finfo(newname);
+        if (finfo.fileName() != p->filename)
+        {
+            preset_combo->addItem(prman->presets[prman->presets.size()-1]->filename,
+                           prman->presets.size()-1);
+            preset_combo->setCurrentIndex(preset_combo->count()-1);
+        }
+
+    }
+}
+
+void Window::preset_selected(int i)
+{
+    int selected = preset_combo->itemData(i).toInt();
+
+    tf->update_preset(selected);
+}
+
+
+void Window::set_background_color()
+{
+    const QColor color = QColorDialog::getColor(Qt::white, this,
+                                                "Select Color");
+    if (color.isValid()) {
+        // qInfo() << color;
+        emit background_color_ready(color);
+
+        background_color_button->setColor(color);
+    }
+}
+
+void Window::set_light_color()
+{
+    const QColor color = QColorDialog::getColor(Qt::white, this,
+                                                "Select Color");
+    if (color.isValid()) {
+        // qInfo() << color;
+        emit light_color_ready(color);
+
+        light_color_button->setColor(color);
+    }
+}
+
+void Window::keyReleaseEvent(QKeyEvent *event)
+{
+    switch (event->key()) {
+    case Qt::Key_Q:
+        close();
+        break;
+    default:
+        QWidget::keyReleaseEvent(event);
+    }
+}
+```
+
+### src/window.h
+```
+/*
+ *  qvrc - a GLSL volume rendering engine
+ *  well... engine... let's say prototype/proof of concept... hack?
+ *
+ *  Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+ *
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License as
+ *  published by the Free Software Foundation; either version 2 of the
+ *  License, or (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ *  02110-1301 USA.
+ */
+
+#ifndef WINDOW_H
+#define WINDOW_H
+
+#include <QWidget>
+#include <QMainWindow>
+#include <QComboBox>
+#include <QDoubleSpinBox>
+#include "glwidget.h"
+#include "presetmanager.h"
+#include "transfuncwidget.h"
+#include "colorbutton.h"
+
+#include "util.h"
+
+class Window : public QMainWindow
+{
+    Q_OBJECT
+
+public:
+    Window(InitOptions &opt);
+
+public slots:
+    void preset_selected(int i);
+    void save_preset();
+    void set_background_color();
+    void set_light_color();
+
+protected:
+    void keyReleaseEvent(QKeyEvent *event) Q_DECL_OVERRIDE;
+
+signals:
+    void background_color_ready(const QColor &color);
+    void light_color_ready(const QColor &color);
+
+private:
+    PresetManager *prman;
+    GLWidget *glWidget;
+    QComboBox *preset_combo;
+    TransFuncWidget *tf;
+
+    QComboBox *shading_combo;
+    QComboBox *comp_combo;
+    ColorButton *background_color_button;
+    ColorButton *light_color_button;
+    QDoubleSpinBox *ambient_spinbox;
+    QDoubleSpinBox *diffuse_spinbox;
+    QDoubleSpinBox *specular_spinbox;
+};
+
+#endif
+```
+
+### tools/dicom2raw.py
+```
+#!/usr/bin/python
+#
+# qvrc - a GLSL volume rendering engine
+# well... engine... let's say prototype/proof of concept... hack?
+#
+# Copyright (C) 2017 Filippo Argiolas <filippo.argiolas@gmail.com>
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License as
+# published by the Free Software Foundation; either version 2 of the
+# License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+# 02110-1301 USA.
+
+
+
+import numpy as np
+import dicom
+
+import matplotlib.pyplot as plt
+
+from optparse import OptionParser
+
+import os
+
+def load_scan(path):
+    files = os.listdir(path)
+    print("path: {}".format(path))
+    print("files: {}".format(len(files)))
+
+    slices = [dicom.read_file(path + '/' + s) for s in files]
+    # if (series != None):
+    #     print series
+    #     slices = filter(lambda x: x.SeriesNumber == series, slices)
+    #    slices.sort(key = lambda x: int(x.InstanceNumber))
+    #    slices.sort(key = lambda x: int(x.SliceLocation))
+
+    print("slices: {}".format(len(slices)))
+
+    return slices
+
+parser = OptionParser()
+parser.add_option("-d", "--dir", dest="dir", help="dicom directory")
+parser.add_option("-o", "--output", dest="out", help="output raw file")
+parser.add_option("-r", "--range", dest="range", nargs=2, help="selection range")
+parser.add_option("--dump", action="store_true", dest="dump", help="dump first slice metadata")
+parser.add_option("--saveimg", dest="imgname", help="saves slice preview")
+
+#parser.add_option("-s", "--series", dest="series",help="dicom series")
+
+(options, args) = parser.parse_args()
+
+if options.dir is None:
+    parser.error("No DICOM directory given")
+if options.out is None:
+    parser.error("No output file given")
+
+
+slices = load_scan(options.dir)
+
+
+# Sort slices in anatomical order (don't assume file numbering mean
+# anything, nor InstanceNumber), SliceLocation seems the proper
+# parameter for sorting but it's not always available... so Image
+# Plane Module is the only trustable source for voxel sizes and
+# positions
+
+# ftp://dicom.nema.org/MEDICAL/dicom/2015b/output/chtml/part03/sect_C.7.6.2.html
+# http://nipy.org/nibabel/dicom/dicom_orientation.html
+# http://www.itk.org/pipermail/insight-users/2003-September/004762.html
+
+# IOP cosines define the direction of the first volume row and the
+# first volume column with respect to the patient
+row_dir = np.array(slices[0].ImageOrientationPatient[0:3])
+col_dir = np.array(slices[0].ImageOrientationPatient[3:6])
+# if we take the normal vector we have the orientation of the slices
+# with respect to the patient
+n = np.cross(row_dir, col_dir)
+# now we take the position of each slice along our normal direction
+# so we can sort the slices in anatomical order and compute the slice thickness
+normal_positions = []
+
+for s in slices:
+    ipp = np.array(s.ImagePositionPatient)
+    pos = np.dot(n, ipp)
+    normal_positions.append(pos)
+
+    # print pos, s.SliceLocation
+
+# print normal_positions
+
+# sort both by normal_positions value
+# python trickery to zip, unzip and untuplify
+slices, normal_positions = (list(t) for t in (zip(*sorted(zip(slices, normal_positions), key=lambda t: t[1]))))
+
+# print normal_positions
+
+# print np.diff(np.array(normal_positions))
+
+# exit()
+
+if options.range:
+    selection = slice(int(options.range[0]), int(options.range[1]), 1)
+    print("selection: {}".format(selection))
+    slices = slices[selection]
+
+if options.dump:
+    print("sample slice metadata")
+    print(slices[0])
+
+final_shape = list(slices[0].pixel_array.shape)
+final_shape.append(len(slices))
+final_shape = np.array(final_shape)
+
+try:
+    thickness = slices[0].SliceThicknes
+except:
+    thickness = np.diff(normal_positions[0:2])
+
+voxel_size = np.array([slices[0].PixelSpacing[0], slices[0].PixelSpacing[1], slices[0].SliceThickness])
+volume_scale = voxel_size * final_shape;
+volume_scale /= volume_scale.max()
+
+stack = np.array([s.pixel_array for s in slices])
+
+print("save to: {}".format(options.out))
+stack.tofile(options.out)
+
+print("dataset shape: {}".format(final_shape))
+print("voxel size: {}".format(voxel_size))
+print("volume scale: {}".format(volume_scale))
+print("bits (allocated, stored, high): {}, {}, {}".format(slices[0].BitsAllocated, slices[0].BitsStored, slices[0].HighBit))
+
+
+if options.imgname is None:
+    exit()
+
+n_rows = 6
+n_cols = 6
+
+fig,ax = plt.subplots(n_rows,n_cols,figsize=[12,12])
+
+for i in range(n_rows*n_cols):
+    ind = i*len(slices)/n_rows/n_cols
+    cur_ax = ax[int(i/n_rows),int(i % n_rows)]
+    cur_ax.imshow(slices[ind].pixel_array,cmap="bone")
+    cur_ax.set_aspect('equal')
+    cur_ax.axis('off')
+
+plt.margins(0)
+
+plt.subplots_adjust(wspace=0.05, hspace=0.0)
+
+plt.savefig(options.imgname, bbox_inches='tight', pad=0)
+```

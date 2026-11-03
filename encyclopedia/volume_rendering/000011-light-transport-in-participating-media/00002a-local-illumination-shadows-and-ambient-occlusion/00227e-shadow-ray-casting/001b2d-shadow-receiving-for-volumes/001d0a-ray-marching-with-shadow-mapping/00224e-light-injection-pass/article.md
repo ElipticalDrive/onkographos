@@ -1,0 +1,151 @@
+# Light Injection Pass
+
+Also called: Volumetric Light, Wave D volumetric light
+
+## Overview
+The Light Injection Pass is a post-processing technique that adds volumetric light scattering (such as sun shafts and lamp glow) to a rendered scene by marching rays from the camera through the volume to sample light sources and their occlusion [S1]. It solves the problem of visualizing light interacting with participating media (air/fog) in real-time without full path tracing, relying on pre-existing shadow maps for occlusion [S1]. Unlike [Shadow Volume Rendering](1556-shadow-volume-rendering.md) which uses geometric volumes, or [Volume Shadow Calculation via Light Strength Buffer](1914-volume-shadow-calculation-via-light-strength-buffer.md) which may use different accumulation buffers, this method specifically targets direct illumination scattering using a ray-marching approach over a depth buffer, executed as a distinct post-process step [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** The depth buffer (from MSAA resolve), camera view/projection matrices, light positions and types (Sun, Lamps), shadow maps (cascaded for sun, cubemaps for lamps), and configuration parameters (`r_volumetric*`).
+*   **Outputs:** A 3D texture (or compute buffer) storing in-scattered radiance and extinction coefficients, which is later blurred and composited [S1, S2].
+
+**Data Structures:**
+*   **3D Texture:** Stores per-voxel in-scattered radiance and extinction coefficient. Written to via `glBindImageTexture` (image load/store) [S2].
+*   **Shadow Maps:** Cascaded Shadow Maps (CSM) for directional lights (Sun) and Shadow Cubemaps for point lights (Lamps) [S1, S2].
+
+**Parameters:**
+*   `r_volumetric`: Boolean, default 1, latched. Enables the pass [S1].
+*   `r_volumetricDensity`: Float, default 1, live. If 0, pass is skipped [S1].
+*   `r_volumetricAnisotropy`: Float, default 0.5, live. Henyey-Greenstein $g$ parameter [S1].
+*   `r_volumetricSun`: Boolean, default 1, live. Enables sun lighting [S1].
+*   `r_volumetricLamps`: Boolean, default 1, live. Enables lamp lighting [S1].
+*   `r_volumetricRange`: Float, default 3000 units. Max march distance for sun rays [S1].
+
+**Algorithm Steps:**
+
+1.  **Execution Context:** The pass runs after MSAA resolve and before bloom/tone mapping, at 1/4 view resolution [S1].
+2.  **Voxel Center Reconstruction:** For each voxel in the 3D grid, map its 3D index $(x, y, z)$ to clip space, apply the inverse view-projection matrix, and divide by $w$ to obtain the world-space center of the cell [S2].
+3.  **Sun Ray Marching:**
+    *   For the sun, march 16 steps along the ray from the eye to the depth buffer [S1].
+    *   Terminate the march when the distance exceeds `r_volumetricRange` (3000 units) [S1].
+    *   At each step, sample the shadow from the finest of the four CSM cascades that contains the sun direction [S1].
+4.  **Lamp Ray Selection and Marching:**
+    *   For each active lamp, perform a ray-sphere test to determine the segment of the view ray that lies within the lamp's reach [S1].
+    *   If the lamp's upper-bound contribution $C = \pi / h$ (where $h$ is the distance from the ray to the lamp center) is below the visible threshold, skip the lamp [S1].
+    *   March 4 steps along the selected lamp segment [S1].
+    *   Use equi-angular sampling (Kulla & Fajardo 2012) to distribute steps by angle at the lamp, canceling $1/d^2$ falloff against sampling density [S1].
+    *   Sample the lamp's cube shadow map for occlusion [S1].
+5.  **Lighting Calculation:**
+    *   For all unshadowed steps, evaluate light color, attenuation, and the Henyey-Greenstein phase function $p(\theta)$ with anisotropy $g=0.5$ [S1].
+    *   Apply shade, cone, and fade terms consistent with `RtLightParticle` [S1].
+    *   Store the resulting in-scattered radiance and extinction coefficient in the 3D texture using image load/store [S2].
+6.  **Noise Reduction:** Apply per-pixel interleaved-gradient jitter during sampling, followed by a depth-aware blur pass [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for the Light Injection Pass Compute Shader
+# Assumes access to: depth_buffer, shadow_maps_csm, shadow_maps_cubemap, 
+# light_data (sun, lamps), params (r_volumetric*, etc.)
+
+def light_injection_pass():
+    if not params.r_volumetric or params.r_volumetricDensity == 0:
+        return
+
+    # Resolution is 1/4 of view
+    res_x = view_width / 4
+    res_y = view_height / 4
+    
+    # 3D texture for radiance/extinction
+    volume_texture = init_3d_texture()
+
+    for z in range(voxel_depth):
+        for y in range(voxel_height):
+            for x in range(voxel_width):
+                # Step 2: Reconstruct world position
+                clip_pos = vec4(x, y, z, 1.0) # Simplified grid index mapping
+                # Actual mapping involves grid dimensions and view/projection
+                world_pos = reconstruct_world_pos_from_grid(x, y, z)
+                
+                total_radiance = vec3(0.0)
+                total_extinction = 0.0
+                
+                # Step 3: Sun Ray Marching
+                if params.r_volumetricSun:
+                    sun_march_steps = 16
+                    max_dist = params.r_volumetricRange
+                    step_dist = max_dist / sun_march_steps
+                    
+                    for i in range(sun_march_steps):
+                        current_dist = i * step_dist
+                        ray_pos = camera_eye + ray_direction * current_dist
+                        
+                        # Sample finest cascade containing sun
+                        shadow_val = sample_csm_shadow(ray_pos, sun_direction)
+                        
+                        if shadow_val > 0.0: # Unshadowed
+                            # Evaluate light
+                            radiance = evaluate_sun_light(ray_pos, sun_direction)
+                            total_radiance += radiance * shadow_val
+                
+                # Step 4 & 5: Lamp Ray Marching
+                for lamp in active_lamps:
+                    # Ray-sphere test
+                    hit_dist, hit_normal = ray_sphere_intersect(camera_eye, ray_direction, lamp.position, lamp.radius)
+                    
+                    if hit_dist > 0:
+                        # Upper-bound culling
+                        h = distance(camera_eye, lamp.position) # Or distance from ray to lamp
+                        upper_bound = PI / h
+                        if upper_bound < visible_threshold:
+                            continue
+                            
+                        # March 4 steps with equi-angular sampling
+                        for i in range(4):
+                            # Equi-angular sampling logic
+                            angle = equi_angular_sample(i, 4)
+                            step_pos = lamp_position + direction_from_lamp * distance_from_lamp
+                            
+                            # Shadow sample
+                            shadow_val = sample_cubemap_shadow(step_pos, lamp.position)
+                            
+                            if shadow_val > 0.0:
+                                radiance = evaluate_lamp_light(step_pos, lamp, shadow_val)
+                                total_radiance += radiance
+                
+                # Store result
+                volume_texture[x, y, z].radiance = total_radiance
+                volume_texture[x, y, z].extinction = params.r_volumetricDensity
+
+    # Step 6: Blur
+    blurred_volume = depth_aware_blur(volume_texture)
+    return blurred_volume
+```
+
+## Subtopics
+
+### Inject Direct Lighting Pass
+A variant where light is injected into a voxel structure (octree) by rendering a shadow map from the light's perspective and traversing the octree to calculate reflected radiance [S3]. It uses cascade shadow maps (last cascade) with slope scale depth bias disabled to ensure accurate voxel placement [S3]. It suffers from flickering if the shadow map is unstable and artifacts if shadow map resolution is too low to cover all vertical voxels [S3].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of steps (16 for sun, 4 for lamps) and the number of active lamps. The pass is executed at 1/4 resolution [S1].
+*   **Memory Complexity:** Requires storage for the 3D texture (radiance and extinction) and shadow maps [S1, S2].
+*   **Measured Performance:** On a GTX 1080 at 2560×1440 with MSAA 4×:
+    *   'm3l2 house room' (sun): 0.91 ms total (0.41 ms for sun and blur) [S1].
+    *   'Tech demo lamp hall' (48 lamps): 0.93 ms total (0.44 ms for sun and blur) [S1].
+*   **Optimization History:** Reduced from 4.4 ms (half-res, 8 steps, 4-tap shadows) to 0.9 ms (quarter-res, 4 steps, 1-tap shadows, equi-angular sampling) [S1].
+*   **Strengths:** Real-time performance; effective for sun shafts and localized lamp glow; leverages existing shadow map infrastructure [S1].
+*   **Limitations:** No temporal accumulation or froxels (can lead to noise/steps); no extinction (scene is not dimmed by the haze); dependent on shadow map resolution for quality [S1, S3].
+*   **When to use:** When sun shafts and lamp glow are desired in real-time scenes with existing shadow map support, and full volumetric path tracing is too expensive [S1].
+*   **When not to use:** When accurate extinction (darkening of the scene) or high-quality noise-free scattering is required without post-processing blur [S1].
+
+## Background
+The Light Injection Pass is based on the volumetric lighting approach used by Frostbite and Unreal Engine 4 prior to the introduction of froxels [S1]. The equi-angular sampling technique used for lamps is attributed to Kulla & Fajardo (2012) [S1]. It is implemented in the open-source project `openmohaa` as part of "Wave D" rendering features [S1].
+
+## Sources
+[S1] feat(render): the light in the air: sun shafts and the glow round lamps, in their shadows (r_volumetric), https://github.com/ssshoshi/openmohaa/pull/116, fetched 2026-10-26 (unofficial)
+[S2] Volumetric Fog Using 3D Textures in OpenGL - opengl, https://salivity.github.io/opengl/article/volumetric-fog-using-3-d-textures-in-open-gl, fetched 2026-10-27 (unofficial)
+[S3] Implementing Voxel Cone Tracing, http://simonstechblog.blogspot.com/2013/01/implementing-voxel-cone-tracing.html, fetched 2026-10-27 (unofficial)

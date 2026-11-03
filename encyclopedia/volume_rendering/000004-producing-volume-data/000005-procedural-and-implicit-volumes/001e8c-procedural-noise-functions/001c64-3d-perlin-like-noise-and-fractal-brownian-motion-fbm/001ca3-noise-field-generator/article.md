@@ -7,7 +7,7 @@ Generates a 3D scalar field using layered Simplex noise, offset by a linear vert
 
 ## How it works
 **Inputs:**
-- `Dims`: 3D integer vector defining the voxel grid dimensions $(D_x, D_y, D_z)$.
+- `Dims`: 3D integer vector defining the voxel grid dimensions $(D_x, D_y, D_z)$ [S2].
 - `Scale`: Spatial scaling factor for the noise field [S2].
 - `Time`: A scalar value used to offset the noise gradients, allowing for animation [S2].
 - `id`: The 3D integer coordinate of the current voxel $(x, y, z)$, ranging from $0$ to $Dims - 1$ [S2].
@@ -16,90 +16,48 @@ Generates a 3D scalar field using layered Simplex noise, offset by a linear vert
 - `Voxels`: A flat `RWStructuredBuffer<float>` (or equivalent 1D array) storing the computed scalar value for each voxel [S2]. The index into this buffer is calculated as $id.x + Dims.x \times (id.y + Dims.y \times id.z)$ [S2].
 
 **Data Structures:**
-- The output is a 1D array of floats. The memory layout is row-major (or column-major depending on interpretation, but explicitly defined by the index formula) where the z-axis is the slowest varying dimension, y is intermediate, and x is the fastest [S2].
+- The output is a 1D array of floats. The memory layout is explicitly defined by the index formula where the z-axis is the slowest varying dimension, y is intermediate, and x is the fastest [S2].
 
 **Algorithm Steps:**
-1.  **Compute Centered World Position:**
-    Calculate the position $p$ in world space. The formula centers the grid around the origin:
-    $$ p = \text{Scale} \times (id + 0.5 - \frac{\text{Dims}}{2}) $$
-    Here, $id + 0.5$ centers the sample within the voxel, and $\text{Dims}/2$ shifts the origin to the center of the grid [S2].
-
-2.  **Initialize Value with Vertical Gradient:**
-    Set the base value to a linear vertical gradient:
-    $$ \text{value} = -p.y $$
-    This creates a density or height variation that decreases as $y$ increases [S2].
-
-3.  **Add First Octave of Simplex Noise:**
-    Sample the Simplex noise function at a scaled position with a specific gradient offset:
-    $$ \text{value} \leftarrow \text{value} + \text{SimplexNoise}(p \times 0.83 + \mathbf{g}_1 \times \text{Time}) \times 0.5 $$
-    Where $\mathbf{g}_1 = (-0.37, -0.12, 0)$ [S2].
-
-4.  **Add Second Octave of Simplex Noise:**
-    Sample the Simplex noise function at a different scaled position with a different gradient offset:
-    $$ \text{value} \leftarrow \text{value} + \text{SimplexNoise}(p \times 0.72 + \mathbf{g}_2 \times \text{Time}) \times 0.5 $$
-    Where $\mathbf{g}_2 = (0.21, 0.07, 0)$ [S2].
-
-5.  **Write Result:**
-    Store the final `value` in the output buffer at the index corresponding to `id` [S2].
+1. **Compute Centered World Position:** Calculate the position $p$ in world space using the formula $p = \text{Scale} \times (id + 0.5 - \text{Dims}/2)$ [S2]. The term $id + 0.5$ centers the sample within the voxel, and $\text{Dims}/2$ shifts the origin to the center of the grid [S2].
+2. **Initialize Value with Vertical Gradient:** Set the base value to a linear vertical gradient: $\text{value} = -p.y$ [S2]. This creates a density or height variation that decreases as $y$ increases [S2].
+3. **Add First Octave of Simplex Noise:** Sample the Simplex noise function at a scaled position with a specific gradient offset: $\text{value} \leftarrow \text{value} + \text{SimplexNoise}(p \times 0.83 + (-0.37, -0.12, 0) \times \text{Time}) \times 0.5$ [S2].
+4. **Add Second Octave of Simplex Noise:** Sample the Simplex noise function at a different scaled position with a different gradient offset: $\text{value} \leftarrow \text{value} + \text{SimplexNoise}(p \times 0.72 + (0.21, 0.07, 0) \times \text{Time}) \times 0.5$ [S2].
+5. **Write Result:** Store the final `value` in the output buffer at the index corresponding to `id` [S2].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def compute_noise_field(Dims, Scale, Time, Voxels):
-    """
-    Computes the noise field for a 3D voxel grid.
-    
-    Args:
-        Dims: tuple (Dx, Dy, Dz) of integers
-        Scale: float, spatial scaling factor
-        Time: float, time offset for animation
-        Voxels: list or array of size Dx * Dy * Dz to store results
-    """
-    # Pre-calculate center offset
     center_x = Dims[0] / 2.0
     center_y = Dims[1] / 2.0
     center_z = Dims[2] / 2.0
     
-    # Gradient vectors for the two octaves
     g1 = (-0.37, -0.12, 0.0)
     g2 = (0.21, 0.07, 0.0)
     
-    # Scale factors for the two octaves
     scale1 = 0.83
     scale2 = 0.72
-    
-    # Amplitude for both octaves
     amp = 0.5
     
     for z in range(Dims[2]):
         for y in range(Dims[1]):
             for x in range(Dims[0]):
-                # 1. Compute centered world position
-                # id + 0.5 - Dims / 2
                 px = (x + 0.5 - center_x) * Scale
                 py = (y + 0.5 - center_y) * Scale
                 pz = (z + 0.5 - center_z) * Scale
                 
-                p = (px, py, pz)
-                
-                # 2. Initialize value with vertical gradient
                 value = -py
                 
-                # 3. Add first octave
-                # p * 0.83 + g1 * Time
                 arg1_x = px * scale1 + g1[0] * Time
                 arg1_y = py * scale1 + g1[1] * Time
                 arg1_z = pz * scale1 + g1[2] * Time
                 
-                # SimplexNoise is assumed to be a standard 3D simplex noise function
-                # returning a value typically in [-1, 1] or [0, 1] depending on implementation.
-                # The source uses SimplexNoise(p * 0.83 + ...) * 0.5
+                # Sources do not provide the Simplex noise implementation [G].
                 noise1 = simplex_noise_3d(arg1_x, arg1_y, arg1_z)
                 value += noise1 * amp
                 
-                # 4. Add second octave
-                # p * 0.72 + g2 * Time
                 arg2_x = px * scale2 + g2[0] * Time
                 arg2_y = py * scale2 + g2[1] * Time
                 arg2_z = pz * scale2 + g2[2] * Time
@@ -107,25 +65,13 @@ def compute_noise_field(Dims, Scale, Time, Voxels):
                 noise2 = simplex_noise_3d(arg2_x, arg2_y, arg2_z)
                 value += noise2 * amp
                 
-                # 5. Write result
-                # Index: id.x + Dims.x * (id.y + Dims.y * id.z)
                 idx = x + Dims[0] * (y + Dims[1] * z)
                 Voxels[idx] = value
-
-def simplex_noise_3d(x, y, z):
-    """
-    Placeholder for the actual Simplex Noise implementation.
-    In a real implementation, this would use the gradient hash table 
-    and simplex grid traversal defined in standard Simplex Noise algorithms.
-    [G] Standard Simplex Noise implementation details are omitted as they 
-    are covered in the parent article [1260-3d-perlin-like-noise-and-fractal-brownian-motion-fbm.md].
-    """
-    pass
 ```
 
 **Parameters:**
-- `Scale`: Spatial scaling factor. Not given in the sources as a specific typical value, but used to normalize the coordinate space [S2].
-- `Time`: Animation time variable. Not given in the sources as a specific range, but used to shift the gradient offsets [S2].
+- `Scale`: Spatial scaling factor [S2].
+- `Time`: Animation time variable [S2].
 - Octave 1 Scale: $0.83$ [S2].
 - Octave 2 Scale: $0.72$ [S2].
 - Amplitude: $0.5$ for both octaves [S2].
@@ -133,19 +79,16 @@ def simplex_noise_3d(x, y, z):
 - Gradient 2: $(0.21, 0.07, 0)$ [S2].
 
 **Edge Cases and Pitfalls:**
-- **Precision:** The calculation involves floating-point arithmetic. Ensure that `Scale` and `Time` are handled with sufficient precision to avoid jittering in the noise field [S2].
-- **Boundary Conditions:** The formula $id + 0.5 - \text{Dims}/2$ ensures that the center of the grid is at $(0,0,0)$. If `Dims` is even, the center is between voxels; if odd, it is at the central voxel. This is handled correctly by the formula [S2].
-- **Simplex Noise Implementation:** The `SimplexNoise` function must be a standard 3D Simplex Noise implementation. The source code snippet implies a specific implementation (likely from the `ComputeMarchingCubes` repository) which may have specific normalization or range characteristics [S2].
+- **Simplex Noise Implementation:** The `SimplexNoise` function must be a standard 3D Simplex Noise implementation [G].
+- **Precision:** The calculation involves floating-point arithmetic [S2].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ where $N = D_x \times D_y \times D_z$ is the total number of voxels. Each voxel requires a constant number of operations (two Simplex noise evaluations and some arithmetic) [S2].
-- **Memory Complexity:** $O(N)$ for the output buffer `Voxels` [S2].
-- **Performance:** The method is designed for GPU execution using compute shaders, with a thread group size of $[8, 8, 8]$ [S2]. This allows for efficient parallel processing of the voxel grid.
-- **Strengths:** The use of Simplex noise provides better directional consistency than Perlin noise. The layered approach with two octaves and gradient offsets creates a more complex and natural-looking volumetric texture. The vertical gradient adds a sense of height or density variation [S2].
-- **Limitations:** The method is specific to 3D volumes. The use of `Time` introduces animation, which may not be desired for static textures. The specific coefficients ($0.83, 0.72, -0.37$, etc.) are tuned for a specific aesthetic and may not be suitable for all use cases [S2].
+- **Thread Group Size:** The method is designed for GPU execution using compute shaders with a thread group size of $[8, 8, 8]$ [S2].
+- **Strengths:** The use of Simplex noise provides better directional consistency than Perlin noise [S2]. The layered approach with two octaves and gradient offsets creates a complex volumetric texture [S2]. The vertical gradient adds a sense of height or density variation [S2].
+- **Limitations:** The method is specific to 3D volumes [S2]. The use of `Time` introduces animation, which may not be desired for static textures [S2].
 
 ## Background
-The method is derived from the `ComputeMarchingCubes` repository by Keijiro [S2]. It is used in the context of procedural volume generation, specifically for creating textures that can be visualized using marching cubes or similar surface extraction techniques. The use of Simplex noise and layered octaves is a common technique in procedural generation for creating natural-looking terrain and textures [S2].
+The method is derived from the `ComputeMarchingCubes` repository by Keijiro [S2]. It is used in the context of procedural volume generation, specifically for creating textures that can be visualized using marching cubes or similar surface extraction techniques [S2]. The use of Simplex noise and layered octaves is a common technique in procedural generation for creating natural-looking terrain and textures [S2].
 
 ## Sources
 [S1] Y-o-p/fog, https://github.com/Y-o-p/fog, fetched 2026-10-26 (unofficial)

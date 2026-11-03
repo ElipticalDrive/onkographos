@@ -1,0 +1,1611 @@
+# dualmc-compute
+
+Testbed for evaluating and refining a compute shader version of the Dual Marching Cubes algo
+
+Based on the [implementation from dominikwodniok](https://github.com/dominikwodniok/dualmc) (BSD 3-clause) 
+
+# Features
+- Optimised packing of volume data and LUTs in shorts and bytes
+- 6-bit Morton encoding to improve neighbourhood lookups
+- Per-face normals
+
+Does *not* currently support per-vertex normals (could be generated off GPU) \
+Does *not* currently support vertex indexing (could be generated off GPU with meshoptimizer?)
+
+# Status
+Functional! 🎉
+
+Program will execute for a single 36x36x36 volume, outputting the generated triangles, normals, and faces to a .obj for inspection
+
+Triangle output buffer array is a bit oversized, have yet to investigate realistic upper-bound. Theoretical worst case is 34\*34\*34\*18 (707472) triangles if it were somehow to generate the maximum number of triangles for _every_ cell, which I'm certain is impossible.
+
+Could maybe trim off some bytes from the Volume Data buffer array as well. Morton Codes can lead to some gaps in the array so even though we're generating a 36x36x36 volume, we need to work with the 6-bit encoding in mind. 6-bit means indices [0..64) could pop out. I'll get around to generating the *actual* highest-used index for our volume space next, since I'm certain we don't need 1MiB per volume. 
+
+# Cloning
+Repo contains submodules. Remember to clone recursively!
+
+```
+git clone --recursive https://github.com/Markyparky56/dualmc-compute.git
+```
+or
+```
+git clone https://github.com/Markyparky56/dualmc-compute.git
+cd dualmc-compute
+git submodule update --init --recursive
+```
+
+### dualmc-compute/dualmc-compute.cpp
+```
+#define GLM_FORCE_DEFAULT_ALIGNED_GENTYPES
+#include "dualmc-compute.h"
+#include "glm/geometric.hpp"
+
+DualMCComputeFramework::DualMCComputeFramework()
+  : TriangleCounter(0)
+  , CachedPointCounter(0)
+{
+  PackDualPointsList();
+  PackProblematicConfigs();
+
+  DualPointMap.resize(64 * 64 * 64, ~0ull); // 2^18, space for every possible morton id
+  PrecalculatedDualPoints.resize(34 * 34 * 34); // space for every cell's dual point
+}
+
+glm::uint DualMCComputeFramework::getProblematicConfigByteValue(int byteIndex)
+{
+  // Determine the index of the uint in the array
+  int uintIndex = byteIndex / 4;
+
+  // Calculate the bit offset within the uint
+  int bitOffset = (byteIndex % 4)*8;
+
+  // Shift to the starting bit position within the uint and mask out the byte
+  return (DualPoints.ProblematicConfigs[uintIndex] >> bitOffset) & 0xFFu;
+}
+
+glm::uint DualMCComputeFramework::getDualPointListEntry(int cellCode, int index)
+{
+  // Two shorts to a uint
+  const glm::uint idx = (cellCode * 2) + (index / 2);
+  const glm::uint packedShorts = DualPoints.DualPointsList[idx];
+
+  // Extract the short
+  const glm::uint shiftAmount = (index % 2) * 16;
+  return (packedShorts >> shiftAmount) & 0xFFFFu;
+}
+
+glm::uint DualMCComputeFramework::morton3D(glm::ivec3 v)
+{
+  v &= 63; // Ensure input components don't go above 63
+  // Spread coordinate bits
+  v = (v | (v << 8)) & 0x300F;
+  v = (v | (v << 4)) & 0x30C3;
+  v = (v | (v << 2)) & 0x9249;
+  // Interleave
+  const glm::uint code = (v.x) | ((v.y) << 1) | ((v.z) << 2);
+  assert(code < VolumeDataSize);
+
+  return code;
+}
+
+glm::uint DualMCComputeFramework::getData(glm::uint mortonCode)
+{
+  // 2-shorts to a uint
+  const glm::uint dataIdx = mortonCode / 2;
+  // Select which short we're fetching
+  const glm::uint shortIdx = mortonCode % 2;
+  // If second short, we need to shift
+  const glm::uint offset = 16 * shortIdx;
+
+  // Retrieve data and mask out the short
+  return (VolumeData.Data[dataIdx] >> offset) & 0xFFFFu;
+}
+
+int DualMCComputeFramework::getCellCode(glm::ivec3 cellPos, float iso)
+{
+  int code = 0;
+
+  code |= int(getData(morton3D(cellPos)) >= iso);
+  code |= int(getData(morton3D(cellPos + glm::ivec3(1, 0, 0))) >= iso) << 1;
+  code |= int(getData(morton3D(cellPos + glm::ivec3(0, 1, 0))) >= iso) << 2;
+  code |= int(getData(morton3D(cellPos + glm::ivec3(1, 1, 0))) >= iso) << 3;
+  code |= int(getData(morton3D(cellPos + glm::ivec3(0, 0, 1))) >= iso) << 4;
+  code |= int(getData(morton3D(cellPos + glm::ivec3(1, 0, 1))) >= iso) << 5;
+  code |= int(getData(morton3D(cellPos + glm::ivec3(0, 1, 1))) >= iso) << 6;
+  code |= int(getData(morton3D(cellPos + glm::ivec3(1, 1, 1))) >= iso) << 7;
+
+  return code;
+}
+
+glm::uint DualMCComputeFramework::getDualPointCode(glm::ivec3 cellPos, float iso, int edgeCode)
+{
+  int cellCode = getCellCode(cellPos, iso);
+
+  // Manifold Dual Marching Cubes approach from Rephael Wenger
+  // If a problematic C16 or C19 configuration shares the ambiguous face with
+  // another C16 or C19 configuration we invert the cube code before looking up
+  // dual points. Doing this for these pairs ensures manifold meshes
+  // This remove dualism to marching cubes. A small price to pay for a manifold mesh.
+
+  // Check if we have a potentially problematic configuration
+  const glm::uint direction = getProblematicConfigByteValue(cellCode);
+  // If the direction code is not 255 we have a C16 or C19 configuration
+  if (direction != 255)
+  {
+    // Copy curreny cell coords so we can work out neighbour coords
+    glm::ivec3 neighbourCoords = cellPos;
+
+    // We have to check the neighbouring cell, which shares the ambiguous face
+    // For this we decode the direction. This could be done with another lookup table
+
+    // Get the dimension of the non-zero coordinate axis
+    const glm::uint component = direction >> 1;
+    // Get the sign of the direction
+    const int delta = (direction & 1) != 0 ? 1 : -1;
+
+    // We test if we have left the volume in this direction
+    bool leftVolume = false;
+
+    if (component == 0) // X
+    {
+      neighbourCoords.x += delta;
+      leftVolume = neighbourCoords.x >= 0 && neighbourCoords.x < (REDUCED_X - 1);
+    }
+    else if (component == 1) // Y
+    {
+      neighbourCoords.y += delta;
+      leftVolume = neighbourCoords.y >= 0 && neighbourCoords.y < (REDUCED_Y - 1);
+    }
+    else /* component == 2 */ // Z
+    {
+      neighbourCoords.z += delta;
+      leftVolume = neighbourCoords.z >= 0 && neighbourCoords.z < (REDUCED_Z - 1);
+    }
+
+    // If we have left the volume...
+    if (leftVolume)
+    {
+      // Get the cell code of the neighbour
+      const int neighbourCellCode = getCellCode(neighbourCoords, iso);
+      // Check if they also have a problematic configuration
+      if (getProblematicConfigByteValue(neighbourCellCode) != 255)
+      {
+        // Replace cube configuration with its inverse
+        cellCode ^= 0xFF;
+      }
+    }
+  }
+
+  // Now look up the code for this cell
+  for (int i = 0; i < 4; ++i)
+  {
+    const glm::uint entry = getDualPointListEntry(cellCode, i);
+    if ((entry & edgeCode) != 0)
+    {
+      return entry;
+    }
+  }
+  return 0;
+}
+
+glm::vec3 DualMCComputeFramework::calculateDualPoint(glm::ivec3 cellPos, float iso, glm::uint pointCode)
+{
+  glm::uint cellCode = morton3D(cellPos);
+  glm::vec3 outPos;
+  if (FindDualPoint(cellCode, outPos))
+  {
+    return outPos;
+  }
+
+  // Initialise the point with lower voxel coordinates
+  outPos = glm::vec3(cellPos);
+  
+  // Return here to generate a cubed surface, the rest of this function moves the cell's feature point relative
+  // to the surrounding cells
+  //return outPos;
+
+  // Compute the dual point as the mean of the face vertices belonging to the original marching cubes face
+  glm::vec3 p = glm::vec3(0.0);
+  int points = 0;
+
+  const float dataCellPos = float(getData(morton3D(cellPos)));
+  const float dataCellPosX1 = float(getData(morton3D(cellPos + glm::ivec3(1, 0, 0))));
+  const float dataCellPosY1 = float(getData(morton3D(cellPos + glm::ivec3(0, 1, 0))));
+  const float dataCellPosZ1 = float(getData(morton3D(cellPos + glm::ivec3(0, 0, 1))));
+  const float dataCellPosX1Y1 = float(getData(morton3D(cellPos + glm::ivec3(1, 1, 0))));
+  const float dataCellPosX1Z1 = float(getData(morton3D(cellPos + glm::ivec3(1, 0, 1))));
+  const float dataCellPosY1Z1 = float(getData(morton3D(cellPos + glm::ivec3(0, 1, 1))));
+  const float dataCellPosX1Y1Z1 = float(getData(morton3D(cellPos + glm::ivec3(1, 1, 1))));
+
+  // Sum edge intersection vertices using the point code
+  if ((pointCode & EDGE0) != 0)
+  {
+    p.x += (iso - dataCellPos) / (dataCellPosX1 - dataCellPos);
+    points += 1;
+  }
+  if ((pointCode & EDGE1) != 0)
+  {
+    p.x += 1.0;
+    p.z += (iso - dataCellPosX1) / (dataCellPosX1Z1 - dataCellPosX1);
+    points += 1;
+  }
+  if ((pointCode & EDGE2) != 0)
+  {
+    p.x += (iso - dataCellPosZ1) / (dataCellPosX1Z1 - dataCellPosZ1);
+    p.z += 1.0;
+    points += 1;
+  }
+  if ((pointCode & EDGE3) != 0)
+  {
+    p.z += (iso - dataCellPos) / (dataCellPosZ1 - dataCellPos);
+    points += 1;
+  }
+  if ((pointCode & EDGE4) != 0)
+  {
+    p.x += (iso - dataCellPosY1) / (dataCellPosX1Y1 - dataCellPosY1);
+    p.y += 1.0;
+    points += 1;
+  }
+  if ((pointCode & EDGE5) != 0)
+  {
+    p.x += 1.0;
+    p.y += 1.0;
+    p.z += (iso - dataCellPosX1Y1) / (dataCellPosX1Y1Z1 - dataCellPosX1Y1);
+    points += 1;
+  }
+  if ((pointCode & EDGE6) != 0)
+  {
+    p.x += (iso - dataCellPosY1Z1) / (dataCellPosX1Y1Z1 - dataCellPosY1Z1);
+    p.y += 1.0;
+    p.z += 1.0;
+    points += 1;
+  }
+  if ((pointCode & EDGE7) != 0)
+  {
+    p.y += 1.0;
+    p.z += (iso - dataCellPosY1) / (dataCellPosY1Z1 - dataCellPosY1);
+    points += 1;
+  }
+  if ((pointCode & EDGE8) != 0)
+  {
+    p.y += (iso - dataCellPos) / (dataCellPosY1 - dataCellPos);
+    points += 1;
+  }
+  if ((pointCode & EDGE9) != 0)
+  {
+    p.x += 1.0;
+    p.y += (iso - dataCellPosX1) / (dataCellPosX1Y1 - dataCellPosX1);
+    points += 1;
+  }
+  if ((pointCode & EDGE10) != 0)
+  {
+    p.x += 1.0;
+    p.y += (iso - dataCellPosX1Z1) / (dataCellPosX1Y1Z1 - dataCellPosX1Z1);
+    p.z += 1.0;
+    points += 1;
+  }
+  if ((pointCode & EDGE11) != 0)
+  {
+    p.y += (iso - dataCellPosZ1) / (dataCellPosY1Z1 - dataCellPosZ1);
+    p.z += 1.0;
+    points += 1;
+  }
+
+  // Divide by number of accumulated points
+  p /= glm::vec3((float)points);
+  // Offset point by voxel coordinates
+  outPos += p;
+
+  InsertNewDualPoint(morton3D(cellPos), outPos);
+
+  return outPos;
+}
+
+glm::vec3 DualMCComputeFramework::calculateFaceNormal(glm::vec3 vert0, glm::vec3 vert1, glm::vec3 vert2)
+{
+  const glm::vec3 p01 = vert1 - vert0;
+  const glm::vec3 p02 = vert2 - vert0;
+  return -glm::vec3(glm::normalize(glm::cross(p01, p02)));
+}
+
+void DualMCComputeFramework::execute()
+{
+  for (glm::uint z = 0; z < 36; ++z)
+  {
+    for (glm::uint y = 0; y < 36; ++y)
+    {
+      for (glm::uint x = 0; x < 36; ++x)
+      {
+        exec_single(glm::uvec3(x, y, z));
+      }
+    }
+  }
+}
+
+int DualMCComputeFramework::getNumDualPointCodes() const
+{
+  return CachedPointCounter;
+}
+
+void DualMCComputeFramework::SetData(const std::array<glm::uint, VolumeDataSize>& inData)
+{
+  VolumeData.Data = inData;
+}
+
+void DualMCComputeFramework::exec_single(glm::uvec3 invocationID)
+{
+  const float iso = 0.5*(float)USHRT_MAX;
+  const glm::ivec3 xyz = glm::ivec3(invocationID);
+  // early-out for x,y,z >= REDUCED_X,Y,Z
+  if (xyz.x >= REDUCED_X || xyz.y >= REDUCED_Y || xyz.z >= REDUCED_Z)
+    return;
+
+  const glm::ivec3 xyzX1 = xyz - glm::ivec3(1, 0, 0);
+  const glm::ivec3 xyzY1 = xyz - glm::ivec3(0, 1, 0);
+  const glm::ivec3 xyzZ1 = xyz - glm::ivec3(0, 0, 1);
+  const glm::ivec3 xyzX1Y1 = xyz - glm::ivec3(1, 1, 0);
+  const glm::ivec3 xyzX1Z1 = xyz - glm::ivec3(1, 0, 1);
+  const glm::ivec3 xyzY1Z1 = xyz - glm::ivec3(0, 1, 1);
+
+  const glm::uint dataCellPos = getData(morton3D(xyz));
+
+  // construct quad for x edge
+  if (xyz.z > 0 && xyz.y > 0)
+  {
+    // Is edge intersected?
+    const glm::uint dataCellPosX1 = getData(morton3D(xyz + glm::ivec3(1, 0, 0)));
+    const bool entering = dataCellPos < iso && dataCellPosX1 >= iso;
+    const bool exiting = dataCellPos >= iso && dataCellPosX1 < iso;
+
+    if (entering || exiting)
+    {
+      // Generate quad
+      const glm::vec3 vert0 = calculateDualPoint(xyz, iso, getDualPointCode(xyz, iso, EDGE0));
+      const glm::vec3 vert1 = calculateDualPoint(xyzZ1, iso, getDualPointCode(xyzZ1, iso, EDGE2));
+      const glm::vec3 vert2 = calculateDualPoint(xyzY1Z1, iso, getDualPointCode(xyzY1Z1, iso, EDGE6));
+      const glm::vec3 vert3 = calculateDualPoint(xyzY1, iso, getDualPointCode(xyzY1, iso, EDGE4));
+
+      // Reserve the next 2 triangle indices
+      // atomicAdd returns the value before addition
+      const glm::uint startIdx = TriangleCounter; TriangleCounter += 2u;
+
+      if (entering)
+      {
+        // Tri 1 face normal
+        const glm::vec3 faceNorm1 = calculateFaceNormal(vert0, vert1, vert2);
+        // Tri 2 face normal
+        const glm::vec3 faceNorm2 = calculateFaceNormal(vert2, vert3, vert0);
+
+        // Tri 1, v0, v1, v2
+        TriangleOutput.Triangles[startIdx].Vert0 = vert0;
+        TriangleOutput.Triangles[startIdx].Vert1 = vert1;
+        TriangleOutput.Triangles[startIdx].Vert2 = vert2;
+        TriangleOutput.Triangles[startIdx].Normal = faceNorm1;
+
+        // Tri 2, v2, v3, v0
+        TriangleOutput.Triangles[startIdx + 1].Vert0 = vert2;
+        TriangleOutput.Triangles[startIdx + 1].Vert1 = vert3;
+        TriangleOutput.Triangles[startIdx + 1].Vert2 = vert0;
+        TriangleOutput.Triangles[startIdx + 1].Normal = faceNorm2;
+      }
+      else // exiting
+      {
+        // Tri 1 face normal
+        const glm::vec3 faceNorm1 = calculateFaceNormal(vert2, vert1, vert0);
+        // Tri 2 face normal
+        const glm::vec3 faceNorm2 = calculateFaceNormal(vert0, vert3, vert2);
+
+        // Tri 1, v2, v1, v0
+        TriangleOutput.Triangles[startIdx].Vert0 = vert2;
+        TriangleOutput.Triangles[startIdx].Vert1 = vert1;
+        TriangleOutput.Triangles[startIdx].Vert2 = vert0;
+        TriangleOutput.Triangles[startIdx].Normal = faceNorm1;
+
+        // Tri 2, v0, v3, v2
+        TriangleOutput.Triangles[startIdx + 1].Vert0 = vert0;
+        TriangleOutput.Triangles[startIdx + 1].Vert1 = vert3;
+        TriangleOutput.Triangles[startIdx + 1].Vert2 = vert2;
+        TriangleOutput.Triangles[startIdx + 1].Normal = faceNorm2;
+      }
+    }
+  }
+
+  // Construct quad for y edge
+  if (xyz.z > 0 && xyz.x > 0)
+  {
+    // Is edge intersected?
+    const glm::uint dataCellPosY1 = getData(morton3D(xyz + glm::ivec3(0, 1, 0)));
+    const bool entering = dataCellPos < iso && dataCellPosY1 >= iso;
+    const bool exiting = dataCellPos >= iso && dataCellPosY1 < iso;
+
+    if (entering || exiting)
+    {
+      // Generate quad
+      const glm::vec3 vert0 = calculateDualPoint(xyz, iso, getDualPointCode(xyz, iso, EDGE8));
+      const glm::vec3 vert1 = calculateDualPoint(xyzZ1, iso, getDualPointCode(xyzZ1, iso, EDGE11));
+      const glm::vec3 vert2 = calculateDualPoint(xyzX1Z1, iso, getDualPointCode(xyzX1Z1, iso, EDGE10));
+      const glm::vec3 vert3 = calculateDualPoint(xyzX1, iso, getDualPointCode(xyzX1, iso, EDGE9));
+
+      // Reserve the next 2 triangle indices
+      // atomicAdd returns the value before addition
+      const glm::uint startIdx = TriangleCounter; TriangleCounter += 2u;
+
+      if (exiting)
+      {
+        // Tri 1 face normal
+        const glm::vec3 faceNorm1 = calculateFaceNormal(vert0, vert1, vert2);
+        // Tri 2 face normal
+        const glm::vec3 faceNorm2 = calculateFaceNormal(vert2, vert3, vert0);
+
+        // Tri 1, v0, v1, v2
+        TriangleOutput.Triangles[startIdx].Vert0 = vert0;
+        TriangleOutput.Triangles[startIdx].Vert1 = vert1;
+        TriangleOutput.Triangles[startIdx].Vert2 = vert2;
+        TriangleOutput.Triangles[startIdx].Normal = faceNorm1;
+
+        // Tri 2, v2, v3, v0
+        TriangleOutput.Triangles[startIdx + 1].Vert0 = vert2;
+        TriangleOutput.Triangles[startIdx + 1].Vert1 = vert3;
+        TriangleOutput.Triangles[startIdx + 1].Vert2 = vert0;
+        TriangleOutput.Triangles[startIdx + 1].Normal = faceNorm2;
+      }
+      else // entering
+      {
+        // Tri 1 face normal
+        const glm::vec3 faceNorm1 = calculateFaceNormal(vert2, vert1, vert0);
+        // Tri 2 face normal
+        const glm::vec3 faceNorm2 = calculateFaceNormal(vert0, vert3, vert2);
+
+        // Tri 1, v2, v1, v0
+        TriangleOutput.Triangles[startIdx].Vert0 = vert2;
+        TriangleOutput.Triangles[startIdx].Vert1 = vert1;
+        TriangleOutput.Triangles[startIdx].Vert2 = vert0;
+        TriangleOutput.Triangles[startIdx].Normal = faceNorm1;
+
+        // Tri 2, v0, v3, v2
+        TriangleOutput.Triangles[startIdx + 1].Vert0 = vert0;
+        TriangleOutput.Triangles[startIdx + 1].Vert1 = vert3;
+        TriangleOutput.Triangles[startIdx + 1].Vert2 = vert2;
+        TriangleOutput.Triangles[startIdx + 1].Normal = faceNorm2;
+      }
+    }
+  }
+
+  // Construct quad for z edge
+  if (xyz.x > 0 && xyz.y > 0)
+  {
+    // Is edge intersected?
+    const glm::uint dataCellPosZ1 = getData(morton3D(xyz + glm::ivec3(0, 0, 1)));
+    const bool entering = dataCellPos < iso && dataCellPosZ1 >= iso;
+    const bool exiting = dataCellPos >= iso && dataCellPosZ1 < iso;
+
+    if (entering || exiting)
+    {
+      // Generate quad
+      const glm::vec3 vert0 = calculateDualPoint(xyz, iso, getDualPointCode(xyz, iso, EDGE3));
+      const glm::vec3 vert1 = calculateDualPoint(xyzX1, iso, getDualPointCode(xyzX1, iso, EDGE1));
+      const glm::vec3 vert2 = calculateDualPoint(xyzX1Y1, iso, getDualPointCode(xyzX1Y1, iso, EDGE5));
+      const glm::vec3 vert3 = calculateDualPoint(xyzY1, iso, getDualPointCode(xyzY1, iso, EDGE7));
+
+      // Reserve the next 2 triangle indices
+      // atomicAdd returns the value before addition
+      const glm::uint startIdx = TriangleCounter; TriangleCounter += 2u;
+
+      if (exiting)
+      {
+        // Tri 1 face normal
+        const glm::vec3 faceNorm1 = calculateFaceNormal(vert0, vert1, vert2);
+        // Tri 2 face normal
+        const glm::vec3 faceNorm2 = calculateFaceNormal(vert2, vert3, vert0);
+
+        // Tri 1, v0, v1, v2
+        TriangleOutput.Triangles[startIdx].Vert0 = vert0;
+        TriangleOutput.Triangles[startIdx].Vert1 = vert1;
+        TriangleOutput.Triangles[startIdx].Vert2 = vert2;
+        TriangleOutput.Triangles[startIdx].Normal = faceNorm1;
+
+        // Tri 2, v2, v3, v0
+        TriangleOutput.Triangles[startIdx + 1].Vert0 = vert2;
+        TriangleOutput.Triangles[startIdx + 1].Vert1 = vert3;
+        TriangleOutput.Triangles[startIdx + 1].Vert2 = vert0;
+        TriangleOutput.Triangles[startIdx + 1].Normal = faceNorm2;
+      }
+      else // entering
+      {
+        // Tri 1 face normal
+        const glm::vec3 faceNorm1 = calculateFaceNormal(vert2, vert1, vert0);
+        // Tri 2 face normal
+        const glm::vec3 faceNorm2 = calculateFaceNormal(vert0, vert3, vert2);
+
+        // Tri 1, v2, v1, v0
+        TriangleOutput.Triangles[startIdx].Vert0 = vert2;
+        TriangleOutput.Triangles[startIdx].Vert1 = vert1;
+        TriangleOutput.Triangles[startIdx].Vert2 = vert0;
+        TriangleOutput.Triangles[startIdx].Normal = faceNorm1;
+
+        // Tri 2, v0, v3, v2
+        TriangleOutput.Triangles[startIdx + 1].Vert0 = vert0;
+        TriangleOutput.Triangles[startIdx + 1].Vert1 = vert3;
+        TriangleOutput.Triangles[startIdx + 1].Vert2 = vert2;
+        TriangleOutput.Triangles[startIdx + 1].Normal = faceNorm2;
+      }
+    }
+  }
+}
+
+void DualMCComputeFramework::PackDualPointsList()
+{
+  // 1024 shorts (256*4), 512 uints
+  DualPoints.DualPointsList.fill(0);
+
+  for (int cubeCase = 0; cubeCase < 256; ++cubeCase)
+  {
+    const int startIdx = cubeCase * 2;
+
+    const glm::uint* faces = dualPointsList[cubeCase];
+    for (int i = 0; i < 2; ++i)
+    {
+      const int faceIdx = i * 2;
+      DualPoints.DualPointsList[startIdx + i] |=  (faces[faceIdx  ] & 0xFFFFu);
+      DualPoints.DualPointsList[startIdx + i] |=  (faces[faceIdx+1] & 0xFFFFu) << 16;
+    }
+  }
+}
+
+void DualMCComputeFramework::PackProblematicConfigs()
+{
+  // 256 bytes, 64 uints
+  DualPoints.ProblematicConfigs.fill(0);
+
+  for (int pack = 0; pack < 64; ++pack)
+  {
+    const int config = pack * 4;
+    DualPoints.ProblematicConfigs[pack] |= (problematicConfigs[config   ]);
+    DualPoints.ProblematicConfigs[pack] |= (problematicConfigs[config+1]) << 8;
+    DualPoints.ProblematicConfigs[pack] |= (problematicConfigs[config+2]) << 16;
+    DualPoints.ProblematicConfigs[pack] |= (problematicConfigs[config+3]) << 24;
+  }
+}
+
+void DualMCComputeFramework::InsertNewDualPoint(uint32_t id, glm::vec3 p)
+{
+  id &= 0x3ffff; // Only want 18 bits
+  // Use linear probing to find an open bucket
+  while (true)
+  {
+    const uint64_t kv = DualPointMap[id];
+    // If kv is sentinel, we can insert there, else we keep incrementing until we find an unoccupied bucket
+    if (kv == ~0ull)
+    {
+      // atomicAdd returns current value then increments by given amount
+      glm::uint pointIdx = CachedPointCounter; CachedPointCounter += 1;
+      // Assign id and pointIdx
+      DualPointMap[id] = ((uint64_t)id << 32) | (pointIdx & 0xffffffff);
+      PrecalculatedDualPoints[pointIdx] = p;
+      return;
+    }
+    id = (id + 1) & 0x3ffff;
+  }
+}
+
+bool DualMCComputeFramework::FindDualPoint(uint32_t id, glm::vec3& outPoint)
+{
+  id &= 0x3ffff;
+  // Use linear probing to find the point for this id, if it exists
+  // If the matching bucket is filled, keep looking at the following buckets until we find one with the matching id
+  // If we find an empty bucket before finding the matching id, the point is not in the map
+  while (true)
+  {
+    const uint64_t& kv = DualPointMap[id];
+    if (kv != ~0ull)
+    {
+      // Occupied, check key
+      if (((kv >> 32) & 0x3ffff) == id)
+      {
+        // Found matching key, retrieve point index and return
+        const uint32_t idx = kv & 0xffffffff;
+        outPoint = PrecalculatedDualPoints[idx];
+        return true;
+      }
+      // Else, we increment id and keep looking
+      id = (id + 1) & 0x3ffff;
+    }
+    else // Equals sentinel value
+    {
+      break;
+    }
+  }
+
+  return false;
+}
+```
+
+### dualmc-compute/dualmc-compute.h
+```
+#pragma once
+#include <array>
+#include <unordered_map>
+#include <unordered_set>
+#include <tuple>
+#include "glm/vec3.hpp"
+#include "dualmc-dualpoints.h"
+
+// 36 -2 (36 for a 32-cube with + 2 skirt)
+// Reason to -2:
+// 35 cubes (36-1)
+// 34 iterations since we look at neighbour +1 along each axis
+#define REDUCED_X 34
+#define REDUCED_Y 34
+#define REDUCED_Z 34
+
+struct Triangle
+{
+  glm::vec3 Vert0;
+  glm::vec3 Vert1;
+  glm::vec3 Vert2;
+  glm::vec3 Normal;
+};
+
+class DualMCComputeFramework
+{
+public:
+  DualMCComputeFramework();
+
+  glm::uint getProblematicConfigByteValue(int byteIndex);
+  glm::uint getDualPointListEntry(int cellCode, int index);
+  glm::uint morton3D(glm::ivec3 v);
+  glm::uint getData(glm::uint shortIndex);
+  int getCellCode(glm::ivec3 cellPos, float iso);
+  glm::uint getDualPointCode(glm::ivec3 cellPos, float iso, int edgeCode);
+  glm::vec3 calculateDualPoint(glm::ivec3 cellPos, float iso, glm::uint pointCode);
+  glm::vec3 calculateFaceNormal(glm::vec3 vert0, glm::vec3 vert1, glm::vec3 vert2);
+  
+  void execute();
+
+  int getNumDualPointCodes() const;
+
+  // 64*64*64 is the maximum possible output from a 6-bit encoded morton code
+  // TODO: work out the maximum output when we restrict the ranges to 36x36x36
+  static const size_t VolumeDataSize = (64 * 64 * 64);
+  void SetData(const std::array<glm::uint, VolumeDataSize>& inData);
+
+  static const size_t MaxTriangleCount = 34*34*34*18;
+  std::tuple<const std::array<Triangle, MaxTriangleCount>&, glm::uint> GetTriangles() const
+  {
+    return { TriangleOutput.Triangles, TriangleCounter };
+  }
+
+protected:
+  void exec_single(glm::uvec3 invocationID);
+
+  void PackDualPointsList();
+  void PackProblematicConfigs();
+
+  void InsertNewDualPoint(uint32_t id, glm::vec3 p);
+  bool FindDualPoint(uint32_t id, glm::vec3& outPoint);
+
+  // 6-bit morton encoding bumps us up to 63, even though we only use 36 in each dimension
+  struct VolumeDataBuffer
+  {
+    std::array<glm::uint, VolumeDataSize> Data;
+  } VolumeData;
+
+  struct DualPointsListBuffer
+  {
+    std::array<glm::uint, 512> DualPointsList;
+    std::array<glm::uint, 64> ProblematicConfigs;
+  } DualPoints;
+
+  glm::uint TriangleCounter;
+
+  struct TriangleBuffer
+  {
+    // Worst case, every cell produces 18 triangles... somehow
+    // Don't think this is possible
+    std::array<Triangle, 34*34*34*18> Triangles;
+  } TriangleOutput;
+
+  std::vector<uint64_t> DualPointMap;
+  std::vector<glm::vec3> PrecalculatedDualPoints;
+  glm::uint CachedPointCounter;
+};
+```
+
+### dualmc-compute/dualmc-dualpoints.h
+```
+#pragma once
+#include <glm/common.hpp>
+
+#define EDGE0 1
+#define EDGE1 2
+#define EDGE2 4
+#define EDGE3 8
+#define EDGE4 16
+#define EDGE5 32
+#define EDGE6 64
+#define EDGE7 128
+#define EDGE8 256
+#define EDGE9 512
+#define EDGE10 1024
+#define EDGE11 2048
+
+// Encodes the edge vertices for the 256 marching cubes cases.
+// A marching cube case produces up to four faces and ,thus, up to four
+// dual points.
+const glm::uint dualPointsList[256][4] = {
+{0, 0, 0, 0}, // 0
+{EDGE0 | EDGE3 | EDGE8, 0, 0, 0}, // 1
+{EDGE0 | EDGE1 | EDGE9, 0, 0, 0}, // 2
+{EDGE1 | EDGE3 | EDGE8 | EDGE9, 0, 0, 0}, // 3
+{EDGE4 | EDGE7 | EDGE8, 0, 0, 0}, // 4
+{EDGE0 | EDGE3 | EDGE4 | EDGE7, 0, 0, 0}, // 5
+{EDGE0 | EDGE1 | EDGE9, EDGE4 | EDGE7 | EDGE8, 0, 0}, // 6
+{EDGE1 | EDGE3 | EDGE4 | EDGE7 | EDGE9, 0, 0, 0}, // 7
+{EDGE4 | EDGE5 | EDGE9, 0, 0, 0}, // 8
+{EDGE0 | EDGE3 | EDGE8, EDGE4 | EDGE5 | EDGE9, 0, 0}, // 9
+{EDGE0 | EDGE1 | EDGE4 | EDGE5, 0, 0, 0}, // 10
+{EDGE1 | EDGE3 | EDGE4 | EDGE5 | EDGE8, 0, 0, 0}, // 11
+{EDGE5 | EDGE7 | EDGE8 | EDGE9, 0, 0, 0}, // 12
+{EDGE0 | EDGE3 | EDGE5 | EDGE7 | EDGE9, 0, 0, 0}, // 13
+{EDGE0 | EDGE1 | EDGE5 | EDGE7 | EDGE8, 0, 0, 0}, // 14
+{EDGE1 | EDGE3 | EDGE5 | EDGE7, 0, 0, 0}, // 15
+{EDGE2 | EDGE3 | EDGE11, 0, 0, 0}, // 16
+{EDGE0 | EDGE2 | EDGE8 | EDGE11, 0, 0, 0}, // 17
+{EDGE0 | EDGE1 | EDGE9, EDGE2 | EDGE3 | EDGE11, 0, 0}, // 18
+{EDGE1 | EDGE2 | EDGE8 | EDGE9 | EDGE11, 0, 0, 0}, // 19
+{EDGE4 | EDGE7 | EDGE8, EDGE2 | EDGE3 | EDGE11, 0, 0}, // 20
+{EDGE0 | EDGE2 | EDGE4 | EDGE7 | EDGE11, 0, 0, 0}, // 21
+{EDGE0 | EDGE1 | EDGE9, EDGE4 | EDGE7 | EDGE8, EDGE2 | EDGE3 | EDGE11, 0}, // 22
+{EDGE1 | EDGE2 | EDGE4 | EDGE7 | EDGE9 | EDGE11, 0, 0, 0}, // 23
+{EDGE4 | EDGE5 | EDGE9, EDGE2 | EDGE3 | EDGE11, 0, 0}, // 24
+{EDGE0 | EDGE2 | EDGE8 | EDGE11, EDGE4 | EDGE5 | EDGE9, 0, 0}, // 25
+{EDGE0 | EDGE1 | EDGE4 | EDGE5, EDGE2 | EDGE3 | EDGE11, 0, 0}, // 26
+{EDGE1 | EDGE2 | EDGE4 | EDGE5 | EDGE8 | EDGE11, 0, 0, 0}, // 27
+{EDGE5 | EDGE7 | EDGE8 | EDGE9, EDGE2 | EDGE3 | EDGE11, 0, 0}, // 28
+{EDGE0 | EDGE2 | EDGE5 | EDGE7 | EDGE9 | EDGE11, 0, 0, 0}, // 29
+{EDGE0 | EDGE1 | EDGE5 | EDGE7 | EDGE8, EDGE2 | EDGE3 | EDGE11, 0, 0}, // 30
+{EDGE1 | EDGE2 | EDGE5 | EDGE7 | EDGE11, 0, 0, 0}, // 31
+{EDGE1 | EDGE2 | EDGE10, 0, 0, 0}, // 32
+{EDGE0 | EDGE3 | EDGE8, EDGE1 | EDGE2 | EDGE10, 0, 0}, // 33
+{EDGE0 | EDGE2 | EDGE9 | EDGE10, 0, 0, 0}, // 34
+{EDGE2 | EDGE3 | EDGE8 | EDGE9 | EDGE10, 0, 0, 0}, // 35
+{EDGE4 | EDGE7 | EDGE8, EDGE1 | EDGE2 | EDGE10, 0, 0}, // 36
+{EDGE0 | EDGE3 | EDGE4 | EDGE7, EDGE1 | EDGE2 | EDGE10, 0, 0}, // 37
+{EDGE0 | EDGE2 | EDGE9 | EDGE10, EDGE4 | EDGE7 | EDGE8, 0, 0}, // 38
+{EDGE2 | EDGE3 | EDGE4 | EDGE7 | EDGE9 | EDGE10, 0, 0, 0}, // 39
+{EDGE4 | EDGE5 | EDGE9, EDGE1 | EDGE2 | EDGE10, 0, 0}, // 40
+{EDGE0 | EDGE3 | EDGE8, EDGE4 | EDGE5 | EDGE9, EDGE1 | EDGE2 | EDGE10, 0}, // 41
+{EDGE0 | EDGE2 | EDGE4 | EDGE5 | EDGE10, 0, 0, 0}, // 42
+{EDGE2 | EDGE3 | EDGE4 | EDGE5 | EDGE8 | EDGE10, 0, 0, 0}, // 43
+{EDGE5 | EDGE7 | EDGE8 | EDGE9, EDGE1 | EDGE2 | EDGE10, 0, 0}, // 44
+{EDGE0 | EDGE3 | EDGE5 | EDGE7 | EDGE9, EDGE1 | EDGE2 | EDGE10, 0, 0}, // 45
+{EDGE0 | EDGE2 | EDGE5 | EDGE7 | EDGE8 | EDGE10, 0, 0, 0}, // 46
+{EDGE2 | EDGE3 | EDGE5 | EDGE7 | EDGE10, 0, 0, 0}, // 47
+{EDGE1 | EDGE3 | EDGE10 | EDGE11, 0, 0, 0}, // 48
+{EDGE0 | EDGE1 | EDGE8 | EDGE10 | EDGE11, 0, 0, 0}, // 49
+{EDGE0 | EDGE3 | EDGE9 | EDGE10 | EDGE11, 0, 0, 0}, // 50
+{EDGE8 | EDGE9 | EDGE10 | EDGE11, 0, 0, 0}, // 51
+{EDGE4 | EDGE7 | EDGE8, EDGE1 | EDGE3 | EDGE10 | EDGE11, 0, 0}, // 52
+{EDGE0 | EDGE1 | EDGE4 | EDGE7 | EDGE10 | EDGE11, 0, 0, 0}, // 53
+{EDGE0 | EDGE3 | EDGE9 | EDGE10 | EDGE11, EDGE4 | EDGE7 | EDGE8, 0, 0}, // 54
+{EDGE4 | EDGE7 | EDGE9 | EDGE10 | EDGE11, 0, 0, 0}, // 55
+{EDGE4 | EDGE5 | EDGE9, EDGE1 | EDGE3 | EDGE10 | EDGE11, 0, 0}, // 56
+{EDGE0 | EDGE1 | EDGE8 | EDGE10 | EDGE11, EDGE4 | EDGE5 | EDGE9, 0, 0}, // 57
+{EDGE0 | EDGE3 | EDGE4 | EDGE5 | EDGE10 | EDGE11, 0, 0, 0}, // 58
+{EDGE4 | EDGE5 | EDGE8 | EDGE10 | EDGE11, 0, 0, 0}, // 59
+{EDGE5 | EDGE7 | EDGE8 | EDGE9, EDGE1 | EDGE3 | EDGE10 | EDGE11, 0, 0}, // 60
+{EDGE0 | EDGE1 | EDGE5 | EDGE7 | EDGE9 | EDGE10 | EDGE11, 0, 0, 0}, // 61
+{EDGE0 | EDGE3 | EDGE5 | EDGE7 | EDGE8 | EDGE10 | EDGE11, 0, 0, 0}, // 62
+{EDGE5 | EDGE7 | EDGE10 | EDGE11, 0, 0, 0}, // 63
+{EDGE6 | EDGE7 | EDGE11, 0, 0, 0}, // 64
+{EDGE0 | EDGE3 | EDGE8, EDGE6 | EDGE7 | EDGE11, 0, 0}, // 65
+{EDGE0 | EDGE1 | EDGE9, EDGE6 | EDGE7 | EDGE11, 0, 0}, // 66
+{EDGE1 | EDGE3 | EDGE8 | EDGE9, EDGE6 | EDGE7 | EDGE11, 0, 0}, // 67
+{EDGE4 | EDGE6 | EDGE8 | EDGE11, 0, 0, 0}, // 68
+{EDGE0 | EDGE3 | EDGE4 | EDGE6 | EDGE11, 0, 0, 0}, // 69
+{EDGE0 | EDGE1 | EDGE9, EDGE4 | EDGE6 | EDGE8 | EDGE11, 0, 0}, // 70
+{EDGE1 | EDGE3 | EDGE4 | EDGE6 | EDGE9 | EDGE11, 0, 0, 0}, // 71
+{EDGE4 | EDGE5 | EDGE9, EDGE6 | EDGE7 | EDGE11, 0, 0}, // 72
+{EDGE0 | EDGE3 | EDGE8, EDGE4 | EDGE5 | EDGE9, EDGE6 | EDGE7 | EDGE11, 0}, // 73
+{EDGE0 | EDGE1 | EDGE4 | EDGE5, EDGE6 | EDGE7 | EDGE11, 0, 0}, // 74
+{EDGE1 | EDGE3 | EDGE4 | EDGE5 | EDGE8, EDGE6 | EDGE7 | EDGE11, 0, 0}, // 75
+{EDGE5 | EDGE6 | EDGE8 | EDGE9 | EDGE11, 0, 0, 0}, // 76
+{EDGE0 | EDGE3 | EDGE5 | EDGE6 | EDGE9 | EDGE11, 0, 0, 0}, // 77
+{EDGE0 | EDGE1 | EDGE5 | EDGE6 | EDGE8 | EDGE11, 0, 0, 0}, // 78
+{EDGE1 | EDGE3 | EDGE5 | EDGE6 | EDGE11, 0, 0, 0}, // 79
+{EDGE2 | EDGE3 | EDGE6 | EDGE7, 0, 0, 0}, // 80
+{EDGE0 | EDGE2 | EDGE6 | EDGE7 | EDGE8, 0, 0, 0}, // 81
+{EDGE0 | EDGE1 | EDGE9, EDGE2 | EDGE3 | EDGE6 | EDGE7, 0, 0}, // 82
+{EDGE1 | EDGE2 | EDGE6 | EDGE7 | EDGE8 | EDGE9, 0, 0, 0}, // 83
+{EDGE2 | EDGE3 | EDGE4 | EDGE6 | EDGE8, 0, 0, 0}, // 84
+{EDGE0 | EDGE2 | EDGE4 | EDGE6, 0, 0, 0}, // 85
+{EDGE0 | EDGE1 | EDGE9, EDGE2 | EDGE3 | EDGE4 | EDGE6 | EDGE8, 0, 0}, // 86
+{EDGE1 | EDGE2 | EDGE4 | EDGE6 | EDGE9, 0, 0, 0}, // 87
+{EDGE4 | EDGE5 | EDGE9, EDGE2 | EDGE3 | EDGE6 | EDGE7, 0, 0}, // 88
+{EDGE0 | EDGE2 | EDGE6 | EDGE7 | EDGE8, EDGE4 | EDGE5 | EDGE9, 0, 0}, // 89
+{EDGE0 | EDGE1 | EDGE4 | EDGE5, EDGE2 | EDGE3 | EDGE6 | EDGE7, 0, 0}, // 90
+{EDGE1 | EDGE2 | EDGE4 | EDGE5 | EDGE6 | EDGE7 | EDGE8, 0, 0, 0}, // 91
+{EDGE2 | EDGE3 | EDGE5 | EDGE6 | EDGE8 | EDGE9, 0, 0, 0}, // 92
+{EDGE0 | EDGE2 | EDGE5 | EDGE6 | EDGE9, 0, 0, 0}, // 93
+{EDGE0 | EDGE1 | EDGE2 | EDGE3 | EDGE5 | EDGE6 | EDGE8, 0, 0, 0}, // 94
+{EDGE1 | EDGE2 | EDGE5 | EDGE6, 0, 0, 0}, // 95
+{EDGE1 | EDGE2 | EDGE10, EDGE6 | EDGE7 | EDGE11, 0, 0}, // 96
+{EDGE0 | EDGE3 | EDGE8, EDGE1 | EDGE2 | EDGE10, EDGE6 | EDGE7 | EDGE11, 0}, // 97
+{EDGE0 | EDGE2 | EDGE9 | EDGE10, EDGE6 | EDGE7 | EDGE11, 0, 0}, // 98
+{EDGE2 | EDGE3 | EDGE8 | EDGE9 | EDGE10, EDGE6 | EDGE7 | EDGE11, 0, 0}, // 99
+{EDGE4 | EDGE6 | EDGE8 | EDGE11, EDGE1 | EDGE2 | EDGE10, 0, 0}, // 100
+{EDGE0 | EDGE3 | EDGE4 | EDGE6 | EDGE11, EDGE1 | EDGE2 | EDGE10, 0, 0}, // 101
+{EDGE0 | EDGE2 | EDGE9 | EDGE10, EDGE4 | EDGE6 | EDGE8 | EDGE11, 0, 0}, // 102
+{EDGE2 | EDGE3 | EDGE4 | EDGE6 | EDGE9 | EDGE10 | EDGE11, 0, 0, 0}, // 103
+{EDGE4 | EDGE5 | EDGE9, EDGE1 | EDGE2 | EDGE10, EDGE6 | EDGE7 | EDGE11, 0}, // 104
+{EDGE0 | EDGE3 | EDGE8, EDGE4 | EDGE5 | EDGE9, EDGE1 | EDGE2 | EDGE10, EDGE6 | EDGE7 | EDGE11}, // 105
+{EDGE0 | EDGE2 | EDGE4 | EDGE5 | EDGE10, EDGE6 | EDGE7 | EDGE11, 0, 0}, // 106
+{EDGE2 | EDGE3 | EDGE4 | EDGE5 | EDGE8 | EDGE10, EDGE6 | EDGE7 | EDGE11, 0, 0}, // 107
+{EDGE5 | EDGE6 | EDGE8 | EDGE9 | EDGE11, EDGE1 | EDGE2 | EDGE10, 0, 0}, // 108
+{EDGE0 | EDGE3 | EDGE5 | EDGE6 | EDGE9 | EDGE11, EDGE1 | EDGE2 | EDGE10, 0, 0}, // 109
+{EDGE0 | EDGE2 | EDGE5 | EDGE6 | EDGE8 | EDGE10 | EDGE11, 0, 0, 0}, // 110
+{EDGE2 | EDGE3 | EDGE5 | EDGE6 | EDGE10 | EDGE11, 0, 0, 0}, // 111
+{EDGE1 | EDGE3 | EDGE6 | EDGE7 | EDGE10, 0, 0, 0}, // 112
+{EDGE0 | EDGE1 | EDGE6 | EDGE7 | EDGE8 | EDGE10, 0, 0, 0}, // 113
+{EDGE0 | EDGE3 | EDGE6 | EDGE7 | EDGE9 | EDGE10, 0, 0, 0}, // 114
+{EDGE6 | EDGE7 | EDGE8 | EDGE9 | EDGE10, 0, 0, 0}, // 115
+{EDGE1 | EDGE3 | EDGE4 | EDGE6 | EDGE8 | EDGE10, 0, 0, 0}, // 116
+{EDGE0 | EDGE1 | EDGE4 | EDGE6 | EDGE10, 0, 0, 0}, // 117
+{EDGE0 | EDGE3 | EDGE4 | EDGE6 | EDGE8 | EDGE9 | EDGE10, 0, 0, 0}, // 118
+{EDGE4 | EDGE6 | EDGE9 | EDGE10, 0, 0, 0}, // 119
+{EDGE4 | EDGE5 | EDGE9, EDGE1 | EDGE3 | EDGE6 | EDGE7 | EDGE10, 0, 0}, // 120
+{EDGE0 | EDGE1 | EDGE6 | EDGE7 | EDGE8 | EDGE10, EDGE4 | EDGE5 | EDGE9, 0, 0}, // 121
+{EDGE0 | EDGE3 | EDGE4 | EDGE5 | EDGE6 | EDGE7 | EDGE10, 0, 0, 0}, // 122
+{EDGE4 | EDGE5 | EDGE6 | EDGE7 | EDGE8 | EDGE10, 0, 0, 0}, // 123
+{EDGE1 | EDGE3 | EDGE5 | EDGE6 | EDGE8 | EDGE9 | EDGE10, 0, 0, 0}, // 124
+{EDGE0 | EDGE1 | EDGE5 | EDGE6 | EDGE9 | EDGE10, 0, 0, 0}, // 125
+{EDGE0 | EDGE3 | EDGE8, EDGE5 | EDGE6 | EDGE10, 0, 0}, // 126
+{EDGE5 | EDGE6 | EDGE10, 0, 0, 0}, // 127
+{EDGE5 | EDGE6 | EDGE10, 0, 0, 0}, // 128
+{EDGE0 | EDGE3 | EDGE8, EDGE5 | EDGE6 | EDGE10, 0, 0}, // 129
+{EDGE0 | EDGE1 | EDGE9, EDGE5 | EDGE6 | EDGE10, 0, 0}, // 130
+{EDGE1 | EDGE3 | EDGE8 | EDGE9, EDGE5 | EDGE6 | EDGE10, 0, 0}, // 131
+{EDGE4 | EDGE7 | EDGE8, EDGE5 | EDGE6 | EDGE10, 0, 0}, // 132
+{EDGE0 | EDGE3 | EDGE4 | EDGE7, EDGE5 | EDGE6 | EDGE10, 0, 0}, // 133
+{EDGE0 | EDGE1 | EDGE9, EDGE4 | EDGE7 | EDGE8, EDGE5 | EDGE6 | EDGE10, 0}, // 134
+{EDGE1 | EDGE3 | EDGE4 | EDGE7 | EDGE9, EDGE5 | EDGE6 | EDGE10, 0, 0}, // 135
+{EDGE4 | EDGE6 | EDGE9 | EDGE10, 0, 0, 0}, // 136
+{EDGE0 | EDGE3 | EDGE8, EDGE4 | EDGE6 | EDGE9 | EDGE10, 0, 0}, // 137
+{EDGE0 | EDGE1 | EDGE4 | EDGE6 | EDGE10, 0, 0, 0}, // 138
+{EDGE1 | EDGE3 | EDGE4 | EDGE6 | EDGE8 | EDGE10, 0, 0, 0}, // 139
+{EDGE6 | EDGE7 | EDGE8 | EDGE9 | EDGE10, 0, 0, 0}, // 140
+{EDGE0 | EDGE3 | EDGE6 | EDGE7 | EDGE9 | EDGE10, 0, 0, 0}, // 141
+{EDGE0 | EDGE1 | EDGE6 | EDGE7 | EDGE8 | EDGE10, 0, 0, 0}, // 142
+{EDGE1 | EDGE3 | EDGE6 | EDGE7 | EDGE10, 0, 0, 0}, // 143
+{EDGE2 | EDGE3 | EDGE11, EDGE5 | EDGE6 | EDGE10, 0, 0}, // 144
+{EDGE0 | EDGE2 | EDGE8 | EDGE11, EDGE5 | EDGE6 | EDGE10, 0, 0}, // 145
+{EDGE0 | EDGE1 | EDGE9, EDGE2 | EDGE3 | EDGE11, EDGE5 | EDGE6 | EDGE10, 0}, // 146
+{EDGE1 | EDGE2 | EDGE8 | EDGE9 | EDGE11, EDGE5 | EDGE6 | EDGE10, 0, 0}, // 147
+{EDGE4 | EDGE7 | EDGE8, EDGE2 | EDGE3 | EDGE11, EDGE5 | EDGE6 | EDGE10, 0}, // 148
+{EDGE0 | EDGE2 | EDGE4 | EDGE7 | EDGE11, EDGE5 | EDGE6 | EDGE10, 0, 0}, // 149
+{EDGE0 | EDGE1 | EDGE9, EDGE4 | EDGE7 | EDGE8, EDGE2 | EDGE3 | EDGE11, EDGE5 | EDGE6 | EDGE10}, // 150
+{EDGE1 | EDGE2 | EDGE4 | EDGE7 | EDGE9 | EDGE11, EDGE5 | EDGE6 | EDGE10, 0, 0}, // 151
+{EDGE4 | EDGE6 | EDGE9 | EDGE10, EDGE2 | EDGE3 | EDGE11, 0, 0}, // 152
+{EDGE0 | EDGE2 | EDGE8 | EDGE11, EDGE4 | EDGE6 | EDGE9 | EDGE10, 0, 0}, // 153
+{EDGE0 | EDGE1 | EDGE4 | EDGE6 | EDGE10, EDGE2 | EDGE3 | EDGE11, 0, 0}, // 154
+{EDGE1 | EDGE2 | EDGE4 | EDGE6 | EDGE8 | EDGE10 | EDGE11, 0, 0, 0}, // 155
+{EDGE6 | EDGE7 | EDGE8 | EDGE9 | EDGE10, EDGE2 | EDGE3 | EDGE11, 0, 0}, // 156
+{EDGE0 | EDGE2 | EDGE6 | EDGE7 | EDGE9 | EDGE10 | EDGE11, 0, 0, 0}, // 157
+{EDGE0 | EDGE1 | EDGE6 | EDGE7 | EDGE8 | EDGE10, EDGE2 | EDGE3 | EDGE11, 0, 0}, // 158
+{EDGE1 | EDGE2 | EDGE6 | EDGE7 | EDGE10 | EDGE11, 0, 0, 0}, // 159
+{EDGE1 | EDGE2 | EDGE5 | EDGE6, 0, 0, 0}, // 160
+{EDGE0 | EDGE3 | EDGE8, EDGE1 | EDGE2 | EDGE5 | EDGE6, 0, 0}, // 161
+{EDGE0 | EDGE2 | EDGE5 | EDGE6 | EDGE9, 0, 0, 0}, // 162
+{EDGE2 | EDGE3 | EDGE5 | EDGE6 | EDGE8 | EDGE9, 0, 0, 0}, // 163
+{EDGE4 | EDGE7 | EDGE8, EDGE1 | EDGE2 | EDGE5 | EDGE6, 0, 0}, // 164
+{EDGE0 | EDGE3 | EDGE4 | EDGE7, EDGE1 | EDGE2 | EDGE5 | EDGE6, 0, 0}, // 165
+{EDGE0 | EDGE2 | EDGE5 | EDGE6 | EDGE9, EDGE4 | EDGE7 | EDGE8, 0, 0}, // 166
+{EDGE2 | EDGE3 | EDGE4 | EDGE5 | EDGE6 | EDGE7 | EDGE9, 0, 0, 0}, // 167
+{EDGE1 | EDGE2 | EDGE4 | EDGE6 | EDGE9, 0, 0, 0}, // 168
+{EDGE0 | EDGE3 | EDGE8, EDGE1 | EDGE2 | EDGE4 | EDGE6 | EDGE9, 0, 0}, // 169
+{EDGE0 | EDGE2 | EDGE4 | EDGE6, 0, 0, 0}, // 170
+{EDGE2 | EDGE3 | EDGE4 | EDGE6 | EDGE8, 0, 0, 0}, // 171
+{EDGE1 | EDGE2 | EDGE6 | EDGE7 | EDGE8 | EDGE9, 0, 0, 0}, // 172
+{EDGE0 | EDGE1 | EDGE2 | EDGE3 | EDGE6 | EDGE7 | EDGE9, 0, 0, 0}, // 173
+{EDGE0 | EDGE2 | EDGE6 | EDGE7 | EDGE8, 0, 0, 0}, // 174
+{EDGE2 | EDGE3 | EDGE6 | EDGE7, 0, 0, 0}, // 175
+{EDGE1 | EDGE3 | EDGE5 | EDGE6 | EDGE11, 0, 0, 0}, // 176
+{EDGE0 | EDGE1 | EDGE5 | EDGE6 | EDGE8 | EDGE11, 0, 0, 0}, // 177
+{EDGE0 | EDGE3 | EDGE5 | EDGE6 | EDGE9 | EDGE11, 0, 0, 0}, // 178
+{EDGE5 | EDGE6 | EDGE8 | EDGE9 | EDGE11, 0, 0, 0}, // 179
+{EDGE4 | EDGE7 | EDGE8, EDGE1 | EDGE3 | EDGE5 | EDGE6 | EDGE11, 0, 0}, // 180
+{EDGE0 | EDGE1 | EDGE4 | EDGE5 | EDGE6 | EDGE7 | EDGE11, 0, 0, 0}, // 181
+{EDGE0 | EDGE3 | EDGE5 | EDGE6 | EDGE9 | EDGE11, EDGE4 | EDGE7 | EDGE8, 0, 0}, // 182
+{EDGE4 | EDGE5 | EDGE6 | EDGE7 | EDGE9 | EDGE11, 0, 0, 0}, // 183
+{EDGE1 | EDGE3 | EDGE4 | EDGE6 | EDGE9 | EDGE11, 0, 0, 0}, // 184
+{EDGE0 | EDGE1 | EDGE4 | EDGE6 | EDGE8 | EDGE9 | EDGE11, 0, 0, 0}, // 185
+{EDGE0 | EDGE3 | EDGE4 | EDGE6 | EDGE11, 0, 0, 0}, // 186
+{EDGE4 | EDGE6 | EDGE8 | EDGE11, 0, 0, 0}, // 187
+{EDGE1 | EDGE3 | EDGE6 | EDGE7 | EDGE8 | EDGE9 | EDGE11, 0, 0, 0}, // 188
+{EDGE0 | EDGE1 | EDGE9, EDGE6 | EDGE7 | EDGE11, 0, 0}, // 189
+{EDGE0 | EDGE3 | EDGE6 | EDGE7 | EDGE8 | EDGE11, 0, 0, 0}, // 190
+{EDGE6 | EDGE7 | EDGE11, 0, 0, 0}, // 191
+{EDGE5 | EDGE7 | EDGE10 | EDGE11, 0, 0, 0}, // 192
+{EDGE0 | EDGE3 | EDGE8, EDGE5 | EDGE7 | EDGE10 | EDGE11, 0, 0}, // 193
+{EDGE0 | EDGE1 | EDGE9, EDGE5 | EDGE7 | EDGE10 | EDGE11, 0, 0}, // 194
+{EDGE1 | EDGE3 | EDGE8 | EDGE9, EDGE5 | EDGE7 | EDGE10 | EDGE11, 0, 0}, // 195
+{EDGE4 | EDGE5 | EDGE8 | EDGE10 | EDGE11, 0, 0, 0}, // 196
+{EDGE0 | EDGE3 | EDGE4 | EDGE5 | EDGE10 | EDGE11, 0, 0, 0}, // 197
+{EDGE0 | EDGE1 | EDGE9, EDGE4 | EDGE5 | EDGE8 | EDGE10 | EDGE11, 0, 0}, // 198
+{EDGE1 | EDGE3 | EDGE4 | EDGE5 | EDGE9 | EDGE10 | EDGE11, 0, 0, 0}, // 199
+{EDGE4 | EDGE7 | EDGE9 | EDGE10 | EDGE11, 0, 0, 0}, // 200
+{EDGE0 | EDGE3 | EDGE8, EDGE4 | EDGE7 | EDGE9 | EDGE10 | EDGE11, 0, 0}, // 201
+{EDGE0 | EDGE1 | EDGE4 | EDGE7 | EDGE10 | EDGE11, 0, 0, 0}, // 202
+{EDGE1 | EDGE3 | EDGE4 | EDGE7 | EDGE8 | EDGE10 | EDGE11, 0, 0, 0}, // 203
+{EDGE8 | EDGE9 | EDGE10 | EDGE11, 0, 0, 0}, // 204
+{EDGE0 | EDGE3 | EDGE9 | EDGE10 | EDGE11, 0, 0, 0}, // 205
+{EDGE0 | EDGE1 | EDGE8 | EDGE10 | EDGE11, 0, 0, 0}, // 206
+{EDGE1 | EDGE3 | EDGE10 | EDGE11, 0, 0, 0}, // 207
+{EDGE2 | EDGE3 | EDGE5 | EDGE7 | EDGE10, 0, 0, 0}, // 208
+{EDGE0 | EDGE2 | EDGE5 | EDGE7 | EDGE8 | EDGE10, 0, 0, 0}, // 209
+{EDGE0 | EDGE1 | EDGE9, EDGE2 | EDGE3 | EDGE5 | EDGE7 | EDGE10, 0, 0}, // 210
+{EDGE1 | EDGE2 | EDGE5 | EDGE7 | EDGE8 | EDGE9 | EDGE10, 0, 0, 0}, // 211
+{EDGE2 | EDGE3 | EDGE4 | EDGE5 | EDGE8 | EDGE10, 0, 0, 0}, // 212
+{EDGE0 | EDGE2 | EDGE4 | EDGE5 | EDGE10, 0, 0, 0}, // 213
+{EDGE0 | EDGE1 | EDGE9, EDGE2 | EDGE3 | EDGE4 | EDGE5 | EDGE8 | EDGE10, 0, 0}, // 214
+{EDGE1 | EDGE2 | EDGE4 | EDGE5 | EDGE9 | EDGE10, 0, 0, 0}, // 215
+{EDGE2 | EDGE3 | EDGE4 | EDGE7 | EDGE9 | EDGE10, 0, 0, 0}, // 216
+{EDGE0 | EDGE2 | EDGE4 | EDGE7 | EDGE8 | EDGE9 | EDGE10, 0, 0, 0}, // 217
+{EDGE0 | EDGE1 | EDGE2 | EDGE3 | EDGE4 | EDGE7 | EDGE10, 0, 0, 0}, // 218
+{EDGE4 | EDGE7 | EDGE8, EDGE1 | EDGE2 | EDGE10, 0, 0}, // 219
+{EDGE2 | EDGE3 | EDGE8 | EDGE9 | EDGE10, 0, 0, 0}, // 220
+{EDGE0 | EDGE2 | EDGE9 | EDGE10, 0, 0, 0}, // 221
+{EDGE0 | EDGE1 | EDGE2 | EDGE3 | EDGE8 | EDGE10, 0, 0, 0}, // 222
+{EDGE1 | EDGE2 | EDGE10, 0, 0, 0}, // 223
+{EDGE1 | EDGE2 | EDGE5 | EDGE7 | EDGE11, 0, 0, 0}, // 224
+{EDGE0 | EDGE3 | EDGE8, EDGE1 | EDGE2 | EDGE5 | EDGE7 | EDGE11, 0, 0}, // 225
+{EDGE0 | EDGE2 | EDGE5 | EDGE7 | EDGE9 | EDGE11, 0, 0, 0}, // 226
+{EDGE2 | EDGE3 | EDGE5 | EDGE7 | EDGE8 | EDGE9 | EDGE11, 0, 0, 0}, // 227
+{EDGE1 | EDGE2 | EDGE4 | EDGE5 | EDGE8 | EDGE11, 0, 0, 0}, // 228
+{EDGE0 | EDGE1 | EDGE2 | EDGE3 | EDGE4 | EDGE5 | EDGE11, 0, 0, 0}, // 229
+{EDGE0 | EDGE2 | EDGE4 | EDGE5 | EDGE8 | EDGE9 | EDGE11, 0, 0, 0}, // 230
+{EDGE4 | EDGE5 | EDGE9, EDGE2 | EDGE3 | EDGE11, 0, 0}, // 231
+{EDGE1 | EDGE2 | EDGE4 | EDGE7 | EDGE9 | EDGE11, 0, 0, 0}, // 232
+{EDGE0 | EDGE3 | EDGE8, EDGE1 | EDGE2 | EDGE4 | EDGE7 | EDGE9 | EDGE11, 0, 0}, // 233
+{EDGE0 | EDGE2 | EDGE4 | EDGE7 | EDGE11, 0, 0, 0}, // 234
+{EDGE2 | EDGE3 | EDGE4 | EDGE7 | EDGE8 | EDGE11, 0, 0, 0}, // 235
+{EDGE1 | EDGE2 | EDGE8 | EDGE9 | EDGE11, 0, 0, 0}, // 236
+{EDGE0 | EDGE1 | EDGE2 | EDGE3 | EDGE9 | EDGE11, 0, 0, 0}, // 237
+{EDGE0 | EDGE2 | EDGE8 | EDGE11, 0, 0, 0}, // 238
+{EDGE2 | EDGE3 | EDGE11, 0, 0, 0}, // 239
+{EDGE1 | EDGE3 | EDGE5 | EDGE7, 0, 0, 0}, // 240
+{EDGE0 | EDGE1 | EDGE5 | EDGE7 | EDGE8, 0, 0, 0}, // 241
+{EDGE0 | EDGE3 | EDGE5 | EDGE7 | EDGE9, 0, 0, 0}, // 242
+{EDGE5 | EDGE7 | EDGE8 | EDGE9, 0, 0, 0}, // 243
+{EDGE1 | EDGE3 | EDGE4 | EDGE5 | EDGE8, 0, 0, 0}, // 244
+{EDGE0 | EDGE1 | EDGE4 | EDGE5, 0, 0, 0}, // 245
+{EDGE0 | EDGE3 | EDGE4 | EDGE5 | EDGE8 | EDGE9, 0, 0, 0}, // 246
+{EDGE4 | EDGE5 | EDGE9, 0, 0, 0}, // 247
+{EDGE1 | EDGE3 | EDGE4 | EDGE7 | EDGE9, 0, 0, 0}, // 248
+{EDGE0 | EDGE1 | EDGE4 | EDGE7 | EDGE8 | EDGE9, 0, 0, 0}, // 249
+{EDGE0 | EDGE3 | EDGE4 | EDGE7, 0, 0, 0}, // 250
+{EDGE4 | EDGE7 | EDGE8, 0, 0, 0}, // 251
+{EDGE1 | EDGE3 | EDGE8 | EDGE9, 0, 0, 0}, // 252
+{EDGE0 | EDGE1 | EDGE9, 0, 0, 0}, // 253
+{EDGE0 | EDGE3 | EDGE8, 0, 0, 0}, // 254
+{0, 0, 0, 0} // 255
+};
+
+/// Encodes the ambiguous face of cube configurations, which
+/// can cause non-manifold meshes.
+/// Non-problematic configurations have a value of 255.
+/// The first bit of each value actually encodes a positive or negative
+/// direction while the second and third bit enumerate the axis.
+const glm::uint problematicConfigs[256] = {
+255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+255,255,255,255,255,255,255,255,255,255,255,255,255,1,0,255,
+255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+255,255,255,255,255,255,255,255,255,255,255,3,255,255,2,255,
+255,255,255,255,255,255,255,5,255,255,255,255,255,255,5,5,
+255,255,255,255,255,255,4,255,255,255,3,3,1,1,255,255,
+255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+255,255,255,255,255,255,255,255,255,255,255,5,255,5,255,5,
+255,255,255,255,255,255,255,3,255,255,255,255,255,2,255,255,
+255,255,255,255,255,3,255,3,255,4,255,255,0,255,0,255,
+255,255,255,255,255,255,255,1,255,255,255,0,255,255,255,255,
+255,255,255,1,255,255,255,1,255,4,2,255,255,255,2,255,
+255,255,255,0,255,2,4,255,255,255,255,0,255,2,255,255,
+255,255,255,255,255,255,4,255,255,4,255,255,255,255,255,255
+};
+```
+
+### dualmc-compute/glm-noise.cpp
+```
+#define GLM_FORCE_DEFAULT_ALIGNED_GENTYPES
+#include "glm-noise.h"
+#include "glm/vec2.hpp"
+#include "glm/geometric.hpp"
+#include "glm/gtx/vec_swizzle.hpp"
+#include <cassert>
+
+const unsigned char perm[512] = {
+  151, 160, 137, 91, 90, 15,
+  131, 13, 201, 95, 96, 53, 194, 233, 7, 225, 140, 36, 103, 30, 69, 142, 8, 99, 37, 240, 21, 10, 23,
+  190, 6, 148, 247, 120, 234, 75, 0, 26, 197, 62, 94, 252, 219, 203, 117, 35, 11, 32, 57, 177, 33,
+  88, 237, 149, 56, 87, 174, 20, 125, 136, 171, 168, 68, 175, 74, 165, 71, 134, 139, 48, 27, 166,
+  77, 146, 158, 231, 83, 111, 229, 122, 60, 211, 133, 230, 220, 105, 92, 41, 55, 46, 245, 40, 244,
+  102, 143, 54, 65, 25, 63, 161, 1, 216, 80, 73, 209, 76, 132, 187, 208, 89, 18, 169, 200, 196,
+  135, 130, 116, 188, 159, 86, 164, 100, 109, 198, 173, 186, 3, 64, 52, 217, 226, 250, 124, 123,
+  5, 202, 38, 147, 118, 126, 255, 82, 85, 212, 207, 206, 59, 227, 47, 16, 58, 17, 182, 189, 28, 42,
+  223, 183, 170, 213, 119, 248, 152, 2, 44, 154, 163, 70, 221, 153, 101, 155, 167, 43, 172, 9,
+  129, 22, 39, 253, 19, 98, 108, 110, 79, 113, 224, 232, 178, 185, 112, 104, 218, 246, 97, 228,
+  251, 34, 242, 193, 238, 210, 144, 12, 191, 179, 162, 241, 81, 51, 145, 235, 249, 14, 239, 107,
+  49, 192, 214, 31, 181, 199, 106, 157, 184, 84, 204, 176, 115, 121, 50, 45, 127, 4, 150, 254,
+  138, 236, 205, 93, 222, 114, 67, 29, 24, 72, 243, 141, 128, 195, 78, 66, 215, 61, 156, 180,
+  // Repeat
+  151, 160, 137, 91, 90, 15,
+  131, 13, 201, 95, 96, 53, 194, 233, 7, 225, 140, 36, 103, 30, 69, 142, 8, 99, 37, 240, 21, 10, 23,
+  190, 6, 148, 247, 120, 234, 75, 0, 26, 197, 62, 94, 252, 219, 203, 117, 35, 11, 32, 57, 177, 33,
+  88, 237, 149, 56, 87, 174, 20, 125, 136, 171, 168, 68, 175, 74, 165, 71, 134, 139, 48, 27, 166,
+  77, 146, 158, 231, 83, 111, 229, 122, 60, 211, 133, 230, 220, 105, 92, 41, 55, 46, 245, 40, 244,
+  102, 143, 54, 65, 25, 63, 161, 1, 216, 80, 73, 209, 76, 132, 187, 208, 89, 18, 169, 200, 196,
+  135, 130, 116, 188, 159, 86, 164, 100, 109, 198, 173, 186, 3, 64, 52, 217, 226, 250, 124, 123,
+  5, 202, 38, 147, 118, 126, 255, 82, 85, 212, 207, 206, 59, 227, 47, 16, 58, 17, 182, 189, 28, 42,
+  223, 183, 170, 213, 119, 248, 152, 2, 44, 154, 163, 70, 221, 153, 101, 155, 167, 43, 172, 9,
+  129, 22, 39, 253, 19, 98, 108, 110, 79, 113, 224, 232, 178, 185, 112, 104, 218, 246, 97, 228,
+  251, 34, 242, 193, 238, 210, 144, 12, 191, 179, 162, 241, 81, 51, 145, 235, 249, 14, 239, 107,
+  49, 192, 214, 31, 181, 199, 106, 157, 184, 84, 204, 176, 115, 121, 50, 45, 127, 4, 150, 254,
+  138, 236, 205, 93, 222, 114, 67, 29, 24, 72, 243, 141, 128, 195, 78, 66, 215, 61, 156, 180
+};
+const unsigned char perm12_36[512] = {
+    21,12,15,21,18, 9,33, 3,27,33, 0,15, 6,15,21,27,
+    24, 0,21,18,27,30,24, 9, 3, 0,27,30,33,30,18,12,
+    21, 0,18, 9, 0, 6,15, 6,30, 0, 9,33,27,33,33,24,
+    27,27,27,12,27,15,24, 9,18,24,15,12, 9, 0,24,21,
+     6,27,33, 6,21, 0, 9,30,15, 6, 6, 9,33, 9, 3, 6,
+     0,21, 3, 6,12,27,24,15,21,30,15,12,12,18,33,18,
+    15, 3, 9,15, 3, 0,24, 3,15,12, 0,21,12,15,18, 3,
+    24,12, 9,30,24,24, 9, 6,24,12, 3,18,15,18, 9,12,
+    12, 3,30,30,12, 9,15,30, 6, 9,30,18, 9,30, 3,24,
+     9, 6,33,33,33,12,30,15, 6,27,12,18,21, 9, 6,27,
+    33,24,24, 6,24,30,21,30,15,27,15,33,33,21,12,27,
+    27,30, 9, 3,21, 6, 0, 6,21,15,24,12,30,15,12,24,
+     6,18, 3, 0,33,30, 6, 3,30,18, 0, 0,33,33,18, 3,
+    27, 9, 3,21,27, 6,33,33, 3, 0,30,21, 3,21,30, 3,
+    12, 0, 0,24,21, 3, 6,27,21,12,18, 6,18,24, 3,27,
+    18,18,21,15, 0, 0, 9,27,24, 9,18,18,33, 3, 0, 0, 
+    // Repeat
+    21,12,15,21,18, 9,33, 3,27,33, 0,15, 6,15,21,27,
+    24, 0,21,18,27,30,24, 9, 3, 0,27,30,33,30,18,12,
+    21, 0,18, 9, 0, 6,15, 6,30, 0, 9,33,27,33,33,24,
+    27,27,27,12,27,15,24, 9,18,24,15,12, 9, 0,24,21,
+     6,27,33, 6,21, 0, 9,30,15, 6, 6, 9,33, 9, 3, 6,
+     0,21, 3, 6,12,27,24,15,21,30,15,12,12,18,33,18,
+    15, 3, 9,15, 3, 0,24, 3,15,12, 0,21,12,15,18, 3,
+    24,12, 9,30,24,24, 9, 6,24,12, 3,18,15,18, 9,12,
+    12, 3,30,30,12, 9,15,30, 6, 9,30,18, 9,30, 3,24,
+     9, 6,33,33,33,12,30,15, 6,27,12,18,21, 9, 6,27,
+    33,24,24, 6,24,30,21,30,15,27,15,33,33,21,12,27,
+    27,30, 9, 3,21, 6, 0, 6,21,15,24,12,30,15,12,24,
+     6,18, 3, 0,33,30, 6, 3,30,18, 0, 0,33,33,18, 3,
+    27, 9, 3,21,27, 6,33,33, 3, 0,30,21, 3,21,30, 3,
+    12, 0, 0,24,21, 3, 6,27,21,12,18, 6,18,24, 3,27,
+    18,18,21,15, 0, 0, 9,27,24, 9,18,18,33, 3, 0, 0,
+};
+const float Gradients3D[3 * 12] = {
+    0.70710678118f, 0.70710678118f, 0.f,
+    -0.70710678118f, 0.70710678118f, 0.f,
+    0.70710678118f, -0.70710678118f, 0.f,
+    -0.70710678118f, -0.70710678118f, 0.f,
+    0.70710678118f, 0.f, 0.70710678118f,
+    -0.70710678118f, 0.f, 0.70710678118f,
+    0.70710678118f, 0.f, -0.70710678118f,
+    -0.70710678118f, 0.f, -0.70710678118f,
+    0.f, 0.70710678118f, 0.70710678118f,
+    0.f, -0.70710678118f, 0.70710678118f,
+    0.f, 0.70710678118f, -0.70710678118f,
+    0.f, -0.70710678118f, -0.70710678118f
+};
+
+//static const float Gradients3D[3 * 12] = {
+//    1.f, 1.f, 0.f,
+//    -1.f, 1.f, 0.f,
+//    1.f, -1.f, 0.f,
+//    -1.f, -1.f, 0.f,
+//    1.f, 0.f, 1.f,
+//    -1.f, 0.f, 1.f,
+//    1.f, 0.f, -1.f,
+//    -1.f, 0.f, -1.f,
+//    0.f, 1.f, 1.f,
+//    0.f, -1.f, 1.f,
+//    0.f, 1.f, -1.f,
+//    0.f, -1.f, -1.f
+//};
+
+static inline int Index3D(glm::ivec3 p, int seed)
+{
+  assert((p.z & 0xff) + (seed & 0xff) < 512);
+  assert(perm[(p.z & 0xff) + (seed & 0xff)] < 256);
+  assert((p.y & 0xff) + perm[(p.z & 0xff) + (seed & 0xff)] < 512);
+  assert(perm[(p.y & 0xff) + perm[(p.z & 0xff) + (seed & 0xff)]] < 256);
+  assert((p.x & 0xff) + perm[(p.y & 0xff) + perm[(p.z & 0xff) + (seed & 0xff)]] < 512);
+  assert(perm12_36[(p.x & 0xff) + perm[(p.y & 0xff) + perm[(p.z & 0xff) + (seed & 0xff)]]] < 36);
+
+  return perm12_36[(p.x & 0xff) + perm[(p.y & 0xff) + perm[(p.z & 0xff) + (seed & 0xff)]]];
+}
+
+static inline float Grad3D(glm::ivec3 i, glm::vec3 p, int seed)
+{
+  const int gradIdx = Index3D(p, seed);  
+  glm::vec3 grad = glm::vec3(Gradients3D[gradIdx], Gradients3D[gradIdx + 1], Gradients3D[gradIdx + 2]);
+  return glm::dot(p, grad);
+}
+
+static inline float Grad3D(glm::ivec3 i, glm::vec3 p, int seed, glm::vec3& grad)
+{
+  const int gradIdx = Index3D(i, seed);
+  grad = glm::vec3(Gradients3D[gradIdx], Gradients3D[gradIdx+1], Gradients3D[gradIdx+2]);
+  return glm::dot(p, grad);
+}
+
+// Skew/Unskew factors
+#define F3 (1.0f / 3.0f)
+#define G3 (1.0f / 6.0f)
+
+float SimplexNoise3D(const glm::vec3 p, int seed)
+{
+  const glm::vec3 Skew = glm::vec3(F3, G3, 0.5);
+  // First corner, skewed integer coord
+  glm::vec3 pI = glm::floor(p + glm::dot(p, glm::xxx(Skew))); // ijk
+  glm::vec3 surf0 = p - pI + glm::dot(pI, glm::yyy(Skew));
+
+  // Other corners
+  glm::vec3 g = glm::step(glm::yzx(surf0), glm::xyz(surf0)); // equivalent to (x < y), (y < z), (z < x)
+  glm::vec3 l = 1.f - g; // inverts?
+  // Simplex offsets (TODO, map this out for future reference?)
+  glm::vec3 iSimplex1 = glm::min(g, glm::zxy(l));
+  glm::vec3 iSimplex2 = glm::max(g, glm::zxy(l));
+
+  // Surflet coords
+  glm::vec3 surf1 = surf0 - iSimplex1 + glm::yyy(Skew); // G3
+  glm::vec3 surf2 = surf0 - iSimplex2 + glm::xxx(Skew); // 2*(1/6) == (1/3) == F3
+  glm::vec3 surf3 = surf0 -			        glm::zzz(Skew); // -1 + 3*(1/6) == -0.5
+
+  glm::vec4 t = glm::max(0.6f - glm::vec4(glm::dot(surf0, surf0), glm::dot(surf1, surf1), glm::dot(surf2, surf2), glm::dot(surf3, surf3)), 0.f);
+  t *= t;
+  glm::vec4 grads = glm::vec4(Grad3D(pI, surf0, seed), Grad3D(pI + iSimplex1, surf1, seed), Grad3D(pI + iSimplex2, surf2, seed), Grad3D(pI + glm::vec3(1), surf3, seed));
+
+  // GLSL version uses 105 here?
+  return 46.f * glm::dot(t*t, grads);
+}
+
+glm::vec4 SimplexNoise3DGrad(const glm::vec3 p, int seed)
+{
+  const glm::vec3 Skew = glm::vec3(F3, G3, 0.5);
+  // First corner, skewed integer coord
+  glm::vec3 pI = glm::floor(p + glm::dot(p, glm::xxx(Skew)));
+  glm::vec3 surf0 = p - pI + glm::dot(pI, glm::yyy(Skew));
+
+  // Other corners
+  glm::vec3 g = glm::step(glm::yzx(surf0), glm::xyz(surf0)); // equivalent to (x < y), (y < z), (z < x)
+  glm::vec3 l = 1.f - g; // inverts?
+  // Simplex offsets (TODO, map this out for future reference?)
+  glm::vec3 iSimplex1 = glm::min(g, glm::zxy(l));
+  glm::vec3 iSimplex2 = glm::max(g, glm::zxy(l));
+
+  // Surflet coords
+  glm::vec3 surf1 = surf0 - iSimplex1 + glm::yyy(Skew); // G3
+  glm::vec3 surf2 = surf0 - iSimplex2 + glm::xxx(Skew); // 2*(1/6) == (1/3) == F3
+  glm::vec3 surf3 = surf0 -			        glm::zzz(Skew); // -1 + 3*(1/6) == -0.5
+
+  glm::vec4 t = glm::max(0.6f - glm::vec4(glm::dot(surf0, surf0), glm::dot(surf1, surf1), glm::dot(surf2, surf2), glm::dot(surf3, surf3)), 0.f);
+  glm::vec3 grad0, grad1, grad2, grad3;
+  // pdotx
+  glm::vec4 grads = glm::vec4(
+      Grad3D(pI, surf0, seed, grad0)
+    , Grad3D(pI + iSimplex1, surf1, seed, grad1)
+    , Grad3D(pI + iSimplex2, surf2, seed, grad2)
+    , Grad3D(pI + glm::vec3(1), surf3, seed, grad3)
+  );
+
+  glm::vec4 t2 = t * t;
+  glm::vec4 t4 = t2*t2;
+
+  glm::vec4 temp = t2 * t * grads;
+  glm::vec3 deriv = -8.f * (temp.x * surf0 + temp.y * surf1 + temp.z * surf2 + temp.w * surf3);
+  deriv += t4.x * grad0 + t4.y * grad1 + t4.z * grad2 + t4.w * grad3;
+
+  // GLSL version uses 105 here?
+  const float valueScalar = 46.f;
+  const float derivScalar = 7.4f;
+
+  // x = noise value
+  // y,z,w = derivative
+  return glm::vec4(
+    valueScalar * glm::dot(t4, grads),
+    derivScalar * deriv
+  );
+}
+```
+
+### dualmc-compute/glm-noise.h
+```
+#pragma once
+#include <functional>
+#include "glm/vec3.hpp"
+#include "glm/vec4.hpp"
+#include "glm/geometric.hpp"
+
+float SimplexNoise3D(const glm::vec3 p, int seed);
+glm::vec4 SimplexNoise3DGrad(const glm::vec3 p, int seed);
+
+// Courtesy of FastNoise <3
+constexpr inline float CalcFractalBounding(int octaves, float gain)
+{
+  float amp = gain;
+  float ampFractal = 1.0f;
+  for (int i = 1; i < octaves; i++)
+  {
+    ampFractal += amp;
+    amp *= gain;
+  }
+  return 1.0f / ampFractal;
+}
+
+template<typename T, typename Func>
+T NoiseFBM(Func func, glm::vec3 p, int seed, int octaves, float lacunarity, float gain)
+{
+  T sum = std::invoke(func, p, seed);
+  float amp = 1.f;
+  for (int i = 1; i < octaves; ++i)
+  {
+    p *= lacunarity;
+    amp *= gain;
+    sum += std::invoke(func, p, seed+i) * amp;
+  }
+
+  return sum * CalcFractalBounding(octaves, gain);
+}
+
+inline float NoiseFBM(glm::vec3 p, int seed, int octaves, float lacunarity, float gain)
+{
+  return NoiseFBM<float>(&SimplexNoise3D, p, seed, octaves, lacunarity, gain);
+}
+
+inline glm::vec4 NoiseFBMGrads(glm::vec3 p, int seed, int octaves, float lacunarity, float gain)
+{
+  return NoiseFBM<glm::vec4>(&SimplexNoise3DGrad, p, seed, octaves, lacunarity, gain);
+}
+
+template<typename T, typename Func>
+T NoiseBillow(Func func, glm::vec3 p, int seed, int octaves, float lacunarity, float gain)
+{
+  T sum = glm::abs(std::invoke(func, p, seed)) * 2.f - 1.f;
+  float amp = 1;
+  for (int i = 1; i < octaves; ++i)
+  {
+    p *= lacunarity;
+    amp *= gain;
+    sum += (glm::abs(std::invoke(func, p, seed + i)) * 2.f - 1.f) * amp;
+  }
+  return sum * CalcFractalBounding(octaves, gain);
+}
+
+inline float NoiseBillow(glm::vec3 p, int seed, int octaves, float lacunarity, float gain)
+{
+  return NoiseBillow<float>(&SimplexNoise3D, p, seed, octaves, lacunarity, gain);
+}
+
+inline glm::vec4 NoiseBillowGrads(glm::vec3 p, int seed, int octaves, float lacunarity, float gain)
+{
+  return NoiseBillow<glm::vec4>(&SimplexNoise3DGrad, p, seed, octaves, lacunarity, gain);
+}
+```
+
+### dualmc-compute/main.cpp
+```
+#define GLM_FORCE_DEFAULT_ALIGNED_GENTYPES
+#include <memory>
+#include <limits>
+#include <cstdio>
+#include <fstream>
+#include <vector>
+
+#include "FastNoise.h"
+#include "dualmc-compute.h"
+#include "glm-noise.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#pragma warning(push)
+#pragma warning(disable:4996)
+#include "stb_image_write.h"
+#pragma warning(pop)
+#include "glm/gtx/vec_swizzle.hpp"
+
+int main()
+{
+  //std::vector<unsigned char> greyscaleNoise;
+  //std::vector<unsigned char> analyticalnoiseDerivs;
+  //greyscaleNoise.reserve(512 * 512);
+  //analyticalnoiseDerivs.reserve(512 * 512 * 3);
+  ////std::vector<unsigned char> noiseDerivs;
+
+  //for (int y = 0; y < 512; ++y)
+  //{
+  //  for (int x = 0; x < 512; ++x)
+  //  {
+  //    glm::vec3 p = glm::vec3((float)x * 0.01f, (float)y * 0.01f, 4242.234f)/* + glm::vec3(0.1234f)*/;
+  //    //glm::vec4 noise = NoiseBillowGrads(p, 0, 5, 2.f, 0.5f);
+  //    //glm::vec4 noise = NoiseFBMGrads(p, 0, 5, 2.f, 0.5f);
+  //    glm::vec4 noise = SimplexNoise3DGrad(p, 0);
+
+  //    float v = (noise.x + 1.f) * 0.5f;
+  //    unsigned char grey = (unsigned char)(v * 255.f);
+  //    greyscaleNoise.push_back(grey);
+
+  //    glm::vec3 deriv = glm::yzw(noise);
+  //    deriv = (deriv * 0.5f) + 0.5f;
+  //    glm::ivec3 iDeriv = deriv * 255.f;
+  //    analyticalnoiseDerivs.push_back((unsigned char)iDeriv.x);
+  //    analyticalnoiseDerivs.push_back((unsigned char)iDeriv.y);
+  //    analyticalnoiseDerivs.push_back((unsigned char)iDeriv.z);
+  //  }
+  //}
+  //stbi_write_bmp("greyscale.bmp", 512, 512, 1, greyscaleNoise.data());
+  //stbi_write_bmp("dervis.bmp", 512, 512, 3, analyticalnoiseDerivs.data());
+
+  FastNoise noise;
+  noise.SetSeed(42424242);
+  noise.SetFractalOctaves(5);
+  noise.SetFractalGain(0.5);
+  std::unique_ptr<DualMCComputeFramework> computeFramework = std::make_unique<DualMCComputeFramework>();
+
+  // Fill short array
+  auto volumeData = std::make_unique<std::array<unsigned short, DualMCComputeFramework::VolumeDataSize * 2>>();
+  volumeData->fill(0);
+  for (int z = 0; z < 36; ++z)
+  {
+    for (int y = 0; y < 36; ++y)
+    {
+      for (int x = 0; x < 36; ++x)
+      {
+        const glm::uint mortonCode = computeFramework->morton3D(glm::ivec3(x, y, z));
+
+        float val = noise.GetSimplexFractal((float)x, (float)y, (float)z);
+
+        // Clamp, shift range, covert to short
+        val = glm::clamp(val, -1.f, 1.f);
+        val = (val * 0.5f) + 0.5f;
+        const uint16_t shortVal = static_cast<uint16_t>(val * std::numeric_limits<uint16_t>::max());
+        (*volumeData)[mortonCode] = shortVal;
+      }
+    }
+  }
+  computeFramework->SetData(*reinterpret_cast<std::array<glm::uint, DualMCComputeFramework::VolumeDataSize>*>(volumeData.get()));
+
+  computeFramework->execute();
+
+  const auto& [triangles, count] = computeFramework->GetTriangles();
+  if (count > 0)
+  {
+    printf("Writing obj file...\n");
+
+    std::ofstream file("output.obj");
+    if (!file)
+      return -1;
+
+    // vert loop
+    for (glm::uint triIdx = 0; triIdx < count; ++triIdx)
+    {
+      const Triangle& tri = triangles[triIdx];
+      file << "v " << tri.Vert0.x << " " << tri.Vert0.y << " " << tri.Vert0.z << "\n";
+      file << "v " << tri.Vert1.x << " " << tri.Vert1.y << " " << tri.Vert1.z << "\n";
+      file << "v " << tri.Vert2.x << " " << tri.Vert2.y << " " << tri.Vert2.z << "\n";
+    }
+
+    // normal loop
+    for (glm::uint triIdx = 0; triIdx < count; ++triIdx)
+    {
+      const Triangle& tri = triangles[triIdx];
+      file << "vn " << tri.Normal.x << " " << tri.Normal.y << " " << tri.Normal.z << "\n";
+      file << "vn " << tri.Normal.x << " " << tri.Normal.y << " " << tri.Normal.z << "\n";
+      file << "vn " << tri.Normal.x << " " << tri.Normal.y << " " << tri.Normal.z << "\n";
+    }
+
+    // face loop
+    for (glm::uint triIdx = 0; triIdx < count; ++triIdx)
+    {
+      const Triangle& tri = triangles[triIdx];
+      const glm::uint triIdx3 = triIdx * 3;
+      file << "f " << triIdx3+1 << " " << triIdx3+2 << " " << triIdx3+3 << "\n";
+    }
+
+    file.close();
+
+    printf("Num dual point codes found: %d", computeFramework->getNumDualPointCodes());
+  }
+
+  return 0;
+}
+```
+
+### dualmc-compute/svdqef.cpp
+```
+#define GLM_FORCE_DEFAULT_ALIGNED_GENTYPES
+#include "svdqef.h"
+#include "glm/gtx/vec_swizzle.hpp"
+
+// sym == symmetric?
+
+void givensCoeffsSym(const float a_pp, const float a_pq, const float a_qq, float& c, float & s)
+{
+	if (a_pq == 0.f)
+	{
+		c = 1.f;
+		s = 0.f;
+		return;
+	}
+	const float tau = (a_qq - a_pp) / (2.f * a_pq);
+	const float stt = glm::sqrt(1.f + tau*tau);
+	const float tan = 1.f / ((tau >= 0.f) ? (tau + stt) : (tau - stt));
+	c = glm::inversesqrt(1.f + tan*tan);
+	s = tan * c;
+}
+
+void svdRotateXY(float& x, float& y, const float c, const float s)
+{
+	const float u = x;
+	const float v = y;
+	x = c*u - s*v;
+	y = s*u + c*v;
+}
+
+// What does the Q mean here?
+void svdRotateQXY(float& x, float& y, float& a, const float c, const float s)
+{
+	const float cc = c*c; 
+	const float ss = s*s;
+	const float mx = 2.f * c * s * a;
+	const float u = x;
+	const float v = y;
+	x = cc*u - mx + ss*v;
+	y = ss*u + mx + cc*v;
+}
+
+void svdRotate(glm::mat3& vtav, glm::mat3& v, const int a, const int b)
+{
+	if (vtav[a][b] == 0.0)
+		return;
+
+	float c, s;
+	givensCoeffsSym(vtav[a][a], vtav[a][b], vtav[b][b], c, s);
+	svdRotateQXY(vtav[a][a], vtav[b][b], vtav[a][b], c, s);
+	svdRotateXY(vtav[0][3-b], vtav[1-a][2], c, s);
+	vtav[a][b] = 0.f;
+
+	svdRotateXY(v[0][a], v[0][b], c, s);
+	svdRotateXY(v[1][a], v[1][b], c, s);
+	svdRotateXY(v[2][a], v[2][b], c, s);
+}
+
+#define SVD_NUM_SWEEPS 5
+void svdSolveSym(glm::mat3 a, glm::vec3& sigma, glm::mat3& v)
+{
+	// Assuming that A is symmetric: can optimise all operations for the upper right triagonal
+	//glm::mat3 vtav = a;
+	// Assuming V is identity: you can also pass a matrix the rotations should be applied to
+	// U is not computed
+	for (int i = 0; i < 5; ++i)
+	{
+		svdRotate(a, v, 0, 1);
+		svdRotate(a, v, 0, 2);
+		svdRotate(a, v, 1, 2);
+	}
+	sigma = glm::vec3(a[0][0], a[1][1], a[2][2]);
+}
+
+// tol?
+float svdInvDet(const float x, const float tol)
+{
+	return (abs(x) < tol || abs(1.f / x) < tol) ? 0.f : (1.f / x);
+}
+
+// o == output?
+void svdPseudoInverse(glm::mat3& o, const glm::vec3& sigma, const glm::mat3& v)
+{
+	#define TINY_NUMBER 1e-20f
+	const float d0 = svdInvDet(sigma[0], TINY_NUMBER);
+	const float d1 = svdInvDet(sigma[1], TINY_NUMBER);
+	const float d2 = svdInvDet(sigma[2], TINY_NUMBER);
+	o = glm::mat3(
+		/*[0][0]*/ v[0][0] * d0 * v[0][0] + v[0][1] * d1 * v[0][1] + v[0][2] * d2 * v[0][2],
+		/*[0][1]*/ v[0][0] * d0 * v[1][0] + v[0][1] * d1 * v[1][1] + v[0][2] * d2 * v[1][2],
+		/*[0][2]*/ v[0][0] * d0 * v[2][0] + v[0][1] * d1 * v[2][1] + v[0][2] * d2 * v[2][2],
+		/*[1][0]*/ v[1][0] * d0 * v[0][0] + v[1][1] * d1 * v[0][1] + v[1][2] * d2 * v[0][2],
+		/*[1][1]*/ v[1][0] * d0 * v[1][0] + v[1][1] * d1 * v[1][1] + v[1][2] * d2 * v[1][2],
+		/*[1][2]*/ v[1][0] * d0 * v[2][0] + v[1][1] * d1 * v[2][1] + v[1][2] * d2 * v[2][2],
+		/*[2][0]*/ v[2][0] * d0 * v[0][0] + v[2][1] * d1 * v[0][1] + v[2][2] * d2 * v[0][2],
+		/*[2][1]*/ v[2][0] * d0 * v[1][0] + v[2][1] * d1 * v[1][1] + v[2][2] * d2 * v[1][2],
+		/*[2][2]*/ v[2][0] * d0 * v[2][0] + v[2][1] * d1 * v[2][1] + v[2][2] * d2 * v[2][2]
+	);
+}
+
+void svdSolveATA_ATb(const glm::mat3& ATA, const glm::vec3 ATb, glm::vec3 x)
+{
+	glm::mat3 V(1.f);
+	glm::vec3 sigma;
+	svdSolveSym(ATA, sigma, V);
+
+	glm::mat3 Vinv;
+	svdPseudoInverse(Vinv, sigma, V);
+	x = Vinv * ATb;
+}
+
+glm::vec3 svdVmulSym(const glm::mat3& a, const glm::vec3& v)
+{
+	return glm::vec3(
+		dot(a[0], v), 
+		(a[0][1] * v.x) + (a[1][1] * v.x) + (a[1][2] * v.z),
+		(a[0][2] * v.x) + (a[1][2] * v.y) + (a[2][2] * v.z)
+	);
+}
+
+void svdMulATASym(glm::mat3& o, const glm::mat3& a)
+{
+	o[0][0] = a[0][0] * a[0][0] + a[1][0] * a[1][0] + a[2][0] * a[2][0];
+	o[0][1] = a[0][0] * a[0][1] + a[1][0] * a[1][1] + a[2][0] * a[2][1];
+	o[0][2] = a[0][0] * a[0][2] + a[1][0] * a[1][2] + a[2][0] * a[2][2];
+	o[1][1] = a[0][1] * a[0][1] + a[1][1] * a[1][1] + a[2][1] * a[2][1];
+	o[1][2] = a[0][1] * a[0][2] + a[1][1] * a[1][2] + a[2][1] * a[2][2];
+	o[2][2] = a[0][2] * a[0][2] + a[1][2] * a[1][2] + a[2][2] * a[2][2];
+}
+
+void svdSolveAxB(const glm::mat3& a, const glm::vec3& b, glm::mat3& ATA, glm::vec3& ATb, glm::vec3& x)
+{
+	svdMulATASym(ATA, a);
+	ATb = b * a; // transpose(a) * b
+	svdSolveATA_ATb(ATA, ATb, x);
+}
+
+void qefAdd(const glm::vec3& n, const glm::vec3& p, glm::mat3& ATA, glm::vec3& ATb, glm::vec4& pointAccumulate)
+{
+	ATA[0][0] += n.x * n.x;
+	ATA[0][1] += n.x * n.y;
+	ATA[0][2] += n.x * n.z;
+	ATA[1][1] += n.y * n.y;
+	ATA[1][2] += n.y * n.z;
+	ATA[2][2] += n.z * n.z;
+
+	const float b = dot(p, n);
+	ATb += n * b;
+	pointAccumulate += glm::vec4(p, 1.f);
+}
+
+float qefCalcError(const glm::mat3& A, const glm::vec3& x, const glm::vec3& b)
+{
+	glm::vec3 tmp = b - svdVmulSym(A, x);
+	return dot(tmp, tmp);
+}
+
+// x output is feature point
+float qefSolve(const glm::mat3& ATA, glm::vec3 ATb, const glm::vec4& pointAccumulate, glm::vec3& x)
+{
+	const glm::vec3 masspoint = glm::xyz(pointAccumulate) / pointAccumulate.w;
+	ATb -= svdVmulSym(ATA, masspoint);
+	svdSolveATA_ATb(ATA, ATb, x);
+	const float result = qefCalcError(ATA, x, ATb);
+
+	x += masspoint;
+
+	return result;
+}
+```
+
+### dualmc-compute/svdqef.h
+```
+#pragma once
+// SVD/QEF implementation for claculating feature points from hermite data based on glsl_svd.cpp from nickgildea/paniq
+
+#include "glm/vec4.hpp"
+#include "glm/vec3.hpp"
+#include "glm/mat3x3.hpp"
+
+void qefAdd(const glm::vec3& n, const glm::vec3& p, glm::mat3& ATA, glm::vec3& ATb, glm::vec4& pointAccumulate);
+float qefSolve(const glm::mat3& ATA, glm::vec3 ATb, const glm::vec4& pointAccumulate, glm::vec3& x);
+```

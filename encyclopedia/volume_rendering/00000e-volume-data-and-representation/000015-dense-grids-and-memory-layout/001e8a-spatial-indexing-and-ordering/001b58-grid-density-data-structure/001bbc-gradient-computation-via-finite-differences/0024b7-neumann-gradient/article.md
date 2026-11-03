@@ -6,17 +6,17 @@ Also called: Neumann Gradient Estimation
 The Neumann Gradient is a 3D gradient estimation method for scalar volumes that computes the gradient vector for each voxel using a 3×3×3 neighborhood of 26 surrounding voxels [S1]. It distinguishes itself from simpler finite difference methods by employing a linear regression framework that produces nearly isotropic gradients with reduced fringing artifacts [S1].
 
 ## How it works
-The method computes the gradient vector $\nabla = (\nabla_x, \nabla_y, \nabla_z)$ at voxel position $(x, y, z)$ by convolving the 26 neighboring voxel values with three specific 3×3×3 filter masks [S1]. The masks are derived from a linear regression framework [S1].
+The method computes the gradient vector $\nabla(x, y, z) = (\nabla_x, \nabla_y, \nabla_z)$ at voxel position $(x, y, z)$ by convolving the 26 neighboring voxel values with three specific 3×3×3 filter masks [S1]. The masks are derived from a linear regression framework [S1].
 
 **Inputs:**
-- Scalar volume data $D$ (3D array).
-- Target voxel coordinates $(x, y, z)$.
+- Scalar volume data $D$ (3D array) [S1].
+- Target voxel coordinates $(x, y, z)$ [S1].
 
 **Outputs:**
-- Gradient vector $\nabla(x, y, z) = (\nabla_x, \nabla_y, \nabla_z)$.
+- Gradient vector $\nabla(x, y, z) = (\nabla_x, \nabla_y, \nabla_z)$ [S1].
 
 **Data Structures:**
-- Three 3×3×3 kernel arrays $K_x, K_y, K_z$ storing the filter weights.
+- Three 3×3×3 kernel arrays $K_x, K_y, K_z$ storing the filter weights [S1].
 - Normalization factor $C = 1/52$ [S1].
 
 **Formulas:**
@@ -37,7 +37,7 @@ The middle matrix in $K_z$ is all zeros in the source, which is a typographical 
 - Neighborhood radius: 1 voxel (3×3×3 grid, 26 neighbors) [S1].
 
 **Edge Cases and Pitfalls:**
-- **Boundary Conditions:** The method requires 26 neighbors. Boundary handling is not specified in the source; clamping to edge values or zero-padding are standard implementations [G].
+- **Boundary Conditions:** The method requires 26 neighbors [S1]. Boundary handling is not specified in the source; clamping to edge values or zero-padding are standard implementations [G].
 - **Computational Cost:** The method has considerably high computational costs due to the 26-tap 3D convolution [S1].
 - **Detail Fading:** Applying the filter to the original voxel values (which can be computed with low additional cost using intermediate results) causes fading of small details, which is typically unsuitable for real medical applications [S1].
 
@@ -45,10 +45,16 @@ The middle matrix in $K_z$ is all zeros in the source, which is a typographical 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_neumann_gradient(volume, x, y, z):
+def compute_neumann_gradient(volume, x, y, z, width, height, depth):
     # Extract 3x3x3 neighborhood centered at (x, y, z)
     # Handle boundaries by clamping to edge values [G]
-    neighbors = [[[volume[x+dx, y+dy, z+dz] for dz in range(-1, 2)]
+    def get_voxel(dx, dy, dz):
+        cx = max(0, min(width - 1, x + dx))
+        cy = max(0, min(height - 1, y + dy))
+        cz = max(0, min(depth - 1, z + dz))
+        return volume[cx, cy, cz]
+
+    neighbors = [[[get_voxel(dx, dy, dz) for dz in range(-1, 2)]
                   for dy in range(-1, 2)]
                  for dx in range(-1, 2)]
 
@@ -59,17 +65,16 @@ def compute_neumann_gradient(volume, x, y, z):
         [[-2, 0, 3], [-3, 0, 3], [-2, 0, 2]]
     ]
 
-    # Kernel K_y from source [S1] (expanded from tensor product notation)
+    # Kernels K_y and K_z are given as tensor products in the source [S1]
+    # Expanded into 3D arrays for implementation [G]
     ky = [
         [[ 4,  6,  4], [ 0,  0,  0], [-4, -6, -4]],
         [[ 6,  9,  6], [ 0,  0,  0], [-6, -9, -6]],
         [[ 4,  6,  4], [ 0,  0,  0], [-4, -6, -4]]
     ]
-
-    # Kernel K_z from source [S1] (expanded from tensor product notation, fixing zero-matrix typo)
     kz = [
         [[-4, -6, -4], [-6, -9, -6], [-4, -6, -4]],
-        [[-6, -9, -6], [-9,-13.5,-6], [-6, -9, -6]], # Approximation based on standard separable form [G]
+        [[-6, -9, -6], [-9,-13.5,-6], [-6, -9, -6]],
         [[-4, -6, -4], [-6, -9, -6], [-4, -6, -4]]
     ]
     # Note: The source's K_z contains a zero matrix. Standard Neumann kernels are separable.
@@ -91,8 +96,8 @@ def compute_neumann_gradient(volume, x, y, z):
 ```
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources. The method requires a 26-tap 3D convolution per voxel, which the source describes as having "considerably high computational costs" [S1].
-- **Memory Complexity:** Not given in the sources. Storing the gradient volume requires one float per component per voxel [G].
+- **Time Complexity:** Not given in the sources [S1]. The method requires a 26-tap 3D convolution per voxel, which the source describes as having "considerably high computational costs" [S1].
+- **Memory Complexity:** Not given in the sources [S1]. Storing the gradient volume requires one float per component per voxel [G].
 - **Performance:** Considerably high computational costs compared to central differences [S1].
 - **Strengths:** Produces nearly isotropic gradients and less fringing artifacts than other methods [S1].
 - **Limitations:** High cost; filtering for quality reduces small details, making it less suitable for medical applications where detail preservation is critical [S1].

@@ -7,25 +7,24 @@ This method approximates the continuous in-scattering integral along a camera ra
 
 ## How it works
 **Inputs:**
-*   Camera ray segment defined by parametric bounds $t_0$ and $t_1$ [S1, unofficial].
+*   Camera ray segment bounds $t_0$ and $t_1$ [S1, unofficial].
 *   Step size $dx$ (width of the rectangles) [S1, unofficial].
 *   Volume density field and lighting configuration [S1, unofficial].
 
 **Outputs:**
-*   Approximated in-scattered radiance $L_{in-scattered}$ for the ray segment [S1, unofficial].
+*   Approximated in-scattered radiance for the ray segment [S1, unofficial].
 
 **Data Structures:**
-*   The method assumes a linear traversal along the ray parameter $x$. No complex data structures are required beyond the ability to sample the volume density at arbitrary points $x$ and perform ray-volume intersection tests for light rays [S1, unofficial].
+*   Not given in the sources.
 
 **Steps:**
-1.  **Discretization:** Divide the camera ray segment within the volume boundaries (from $t_0$ to $t_1$) into $N$ sub-segments of length $dx$ [S1, unofficial].
-2.  **Sampling Loop:** For each sub-segment $i$, identify the sample point $x_i$ (typically the center of the sub-segment) [S1, unofficial].
+1.  **Discretization:** Divide the camera ray segment within the volume boundaries (from $t_0$ to $t_1$) into sub-segments of length $dx$ [S1, unofficial].
+2.  **Sampling Loop:** For each sub-segment, identify the sample point $x$ (typically the middle of the interval) [S1, unofficial].
 3.  **Lighting Evaluation ($L_i(x, \omega)$):**
-    *   Shoot a ray from $x_i$ in the direction of the light source $\omega$ [S1, unofficial].
-    *   Determine the distance $d_{light}$ the light travels through the volume to reach $x_i$ [S1, unofficial].
-    *   Apply Beer's law using $d_{light}$ and the volume density along the light path to calculate the remaining light energy at $x_i$ [S1, unofficial].
-    *   *Note:* The sources indicate that the scattering phase function (fraction of light scattered in direction $\omega$) is required for the full calculation of $L_i(x, \omega)$ but is not detailed in the basic Riemann sum description [S1, unofficial].
-4.  **Accumulation:** Compute the area of the rectangle for the current segment as $L_i(x_i, \omega) \cdot dx$ [S1, unofficial].
+    *   Shoot a ray from $x$ in the direction of the light source to determine the distance light traveled through the volume to reach $x$ [S1, unofficial].
+    *   Apply Beer's law to the light travel distance to determine the remaining light energy at point $x$ [S1, unofficial].
+    *   *Note:* The basic Riemann sum description does not account for the scattering phase function, which is required for the full calculation of $L_i(x, \omega)$ [S1, unofficial].
+4.  **Accumulation:** Compute the area of the rectangle for the current segment as $L_i(x, \omega) \cdot dx$ [S1, unofficial].
 5.  **Summation:** Sum the areas of all rectangles to approximate the integral [S1, unofficial].
 
 **Formula:**
@@ -33,7 +32,7 @@ The integral to approximate is:
 $$ \int_{x=t_0}^{t_1} L_i(x, \omega) dx $$
 Where:
 *   $L_i(x, \omega)$ is the radiance scattered towards the eye direction $\omega$ at point $x$ [S1, unofficial].
-*   $t_0, t_1$ are the parametric distances defining the segment [S1, unofficial].
+*   The integral spans the camera ray segment between parametric distances $t_0$ and $t_1$ [S1, unofficial].
 *   $dx$ is the width of the rectangles [S1, unofficial].
 
 **Parameters:**
@@ -41,13 +40,15 @@ Where:
 
 **Pitfalls:**
 *   **No Analytical Solution:** The integral has no analytical solution for general volume shapes and lighting scenarios, necessitating numerical approximation [S1, unofficial].
-*   **Missing Phase Function:** The basic description does not account for the scattering phase function. Without it, $L_i(x, \omega)$ is incomplete [S1, unofficial].
-*   **Precision:** The result is an approximation. Accuracy depends heavily on the choice of $dx$ [S1, unofficial].
+*   **Missing Phase Function:** The basic description does not account for the scattering phase function [S1, unofficial].
+*   **Approximation Error:** The result is an approximation whose accuracy depends heavily on the choice of $dx$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def approximate_in_scattering(t0, t1, dx, volume_sampler, light_direction, light_source_radiance):
     """
     Approximates the in-scattering integral using a Riemann sum.
@@ -57,7 +58,7 @@ def approximate_in_scattering(t0, t1, dx, volume_sampler, light_direction, light
         t1: End parametric distance of the ray segment.
         dx: Step size (width of rectangles).
         volume_sampler: Function that returns density at a 3D point.
-        light_direction: Direction vector towards the light source.
+        light_direction: Normalized direction vector towards the light source.
         light_source_radiance: Radiance emitted by the light source.
         
     Returns:
@@ -66,78 +67,35 @@ def approximate_in_scattering(t0, t1, dx, volume_sampler, light_direction, light
     total_in_scattering = 0.0
     x = t0
     
-    # Iterate through the ray segment
     while x < t1:
-        # Sample point x is typically the center of the sub-segment
-        # For simplicity, we use the start of the interval or center.
-        # The source mentions "x is in the middle of the interval".
-        x_center = x + dx / 2.0
+        current_dx = min(dx, t1 - x)
+        x_center = x + current_dx / 2.0
         
-        # 1. Evaluate Li(x, omega)
-        # Shoot ray from x_center towards light source
-        # Determine distance light travels through volume to reach x_center
-        light_travel_distance = compute_light_path_length(x_center, light_direction, volume_sampler)
+        # [G] March along light direction to find distance inside volume
+        d_light = 0.0
+        pos = x_center
+        step = current_dx * 0.1  # [G] Light ray step size is implementation-dependent
+        while volume_sampler(pos) > 0.0:
+            d_light += step
+            pos = pos + light_direction * step
+            
+        # Apply Beer's law [G]
+        sigma_t = volume_sampler(x_center)
+        li = light_source_radiance * math.exp(-sigma_t * d_light)
         
-        # Apply Beer's Law to find remaining light energy at x_center
-        # Note: The source does not specify the exact density integration for the light path.
-        # We assume a standard Beer's law application: I = I0 * exp(-sigma_t * d)
-        # [G] sigma_t is the extinction coefficient, assumed to be derived from volume_sampler.
-        sigma_t = volume_sampler(x_center) # Simplified: using density at point
-        # [G] In a real implementation, sigma_t should be integrated along the light path.
-        # Here we follow the source's high-level description.
-        light_energy_at_x = light_source_radiance * exp(-sigma_t * light_travel_distance)
-        
-        # [G] The source notes that the phase function is missing. 
-        # We assume a simple isotropic scattering or that Li already includes it for this approximation.
-        li_x_omega = light_energy_at_x 
-        
-        # 2. Accumulate contribution
-        rectangle_area = li_x_omega * dx
-        total_in_scattering += rectangle_area
-        
-        # Move to next segment
-        x += dx
+        total_in_scattering += li * current_dx
+        x += current_dx
         
     return total_in_scattering
-
-def compute_light_path_length(start_point, direction, volume_sampler):
-    """
-    Computes the distance light travels through the volume from start_point in direction.
-    [G] This is a placeholder for the actual ray-volume intersection logic.
-    The source states: "Shooting a ray from x... to see where it leaves the volume object."
-    """
-    # [G] Standard ray marching or analytical intersection would go here.
-    # Return the distance to the exit point of the volume.
-    return 0.0 # Placeholder
 ```
 
-## Subtopics
-
-### Eye Align
-([Eye Align](849-eye-align.md)): Aligns sampling with the eye to reduce artifacts. Choose when view-dependent aliasing is a concern.
-
-### Partial Pre-Integration
-([Partial Pre-Integration](1148-partial-pre-integration.md)): Integrates over texture space. Choose when texture filtering can be leveraged.
-
-### CPU Volume Raycasting
-([CPU Volume Raycasting](1258-cpu-volume-raycasting.md)): General CPU-based raycasting. Choose for flexibility or lack of GPU.
-
-### Average Intensity Projection
-([Average Intensity Projection](1310-average-intensity-projection.md)): Projects average density. Choose for speed over accuracy.
-
-### Differential Sampling
-([Differential Sampling](1549-differential-sampling.md)): Uses derivatives for adaptive sampling. Choose for high-frequency detail.
-
-### Zero Order Integration (Rectangle Rule)
-([Zero Order Integration (Rectangle Rule)](2082-zero-order-integration-rectangle-rule.md): General rectangle rule for the full rendering equation. Choose for basic discretization.
-
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of samples along the ray ($N \approx (t_1 - t_0) / dx$). Each sample requires a light ray traversal, making it $O(N \cdot M)$ where $M$ is the number of samples per light ray [S1, unofficial].
-*   **Memory Complexity:** $O(1)$ auxiliary memory, assuming the volume is sampled on the fly [S1, unofficial].
-*   **Strengths:** Simple to implement; works for any volume shape and lighting scenario [S1, unofficial].
-*   **Limitations:** Computationally expensive due to secondary light rays; accuracy depends on $dx$; does not inherently handle phase functions [S1, unofficial].
-*   **When to use:** When a simple, general-purpose approximation is needed and performance is not the primary constraint [S1, unofficial].
-*   **When not to use:** When real-time performance is required or when high accuracy with complex scattering is needed [S1, unofficial].
+*   **Time Complexity:** $O(N)$ where $N \approx (t_1 - t_0) / dx$. Each sample requires a light ray traversal, and processing time increases as $dx$ decreases [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Works for any volume shape and lighting scenario [S1, unofficial].
+*   **Limitations:** Accuracy depends on $dx$; does not inherently handle phase functions [S1, unofficial].
+*   **When to use:** When a simple, general-purpose approximation is needed [S1, unofficial].
+*   **When not to use:** Not given in the sources.
 
 ## Background
 The method originates from the practical need to compute in-scattering in volume rendering where analytical solutions are unavailable [S1, unofficial]. It is based on the fundamental mathematical concept of the Riemann sum, which approximates integrals by summing rectangular areas [S1, unofficial]. The specific application to volume rendering, including the use of auxiliary light rays and Beer's law, is described in "An Introduction to Volume Rendering" [S1, unofficial].

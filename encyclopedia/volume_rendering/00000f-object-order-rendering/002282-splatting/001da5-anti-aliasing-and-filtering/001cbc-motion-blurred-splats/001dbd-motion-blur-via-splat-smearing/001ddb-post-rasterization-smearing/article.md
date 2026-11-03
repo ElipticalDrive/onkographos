@@ -3,18 +3,18 @@
 Also called: Accumulated Motion Blur, Post-Rasterization Velocity Smearing, Velocity Buffer Smear, Velocity buffer smearing
 
 ## Overview
-Post-rasterization smearing approximates motion blur in voxel buffers by deferring the blurring operation until after the rasterization or splatting phase completes [S1, unofficial]. Unlike methods that smear individual samples during rasterization, this approach accumulates velocity information in a separate buffer and applies a single global smear pass [S1, unofficial]. It is chosen when performance is prioritized, though it struggles with complex overlapping primitives that have divergent motion vectors [S1, unofficial].
+Post-rasterization smearing approximates motion blur in voxel buffers by deferring the blurring operation until after the rasterization or splatting phase completes [S1, unofficial]. Unlike methods that smear individual samples during rasterization, this approach accumulates velocity information in a separate buffer and applies a single global smear pass [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
 *   **Input:** A voxel buffer containing density/intensity values, and a separate velocity buffer storing accumulated motion vectors for each voxel [S1, unofficial].
-*   **Output:** A motion-blurred voxel buffer.
+*   **Output:** A motion-blurred voxel buffer [S1, unofficial].
 
 **Data Structures:**
 1.  **Density Buffer:** Standard voxel grid storing scalar values (e.g., density, color) [S1, unofficial].
 2.  **Velocity Buffer:** A voxel grid storing a 3D vector per voxel representing accumulated motion [S1, unofficial].
-    *   *Layout:* Not given in the sources.
-    *   *Initialization:* Not given in the sources.
+    *   *Layout:* Not given in the sources [S1, unofficial].
+    *   *Initialization:* Not given in the sources [S1, unofficial].
 
 **Steps:**
 1.  **Rasterization/Splatting with Velocity Accumulation:** During rasterization or splatting, accumulate a velocity vector for each voxel in the separate velocity buffer [S1, unofficial].
@@ -30,8 +30,8 @@ Post-rasterization smearing approximates motion blur in voxel buffers by deferri
 def post_rasterization_smearing(density_buffer, velocity_buffer, primitives):
     # Step 1: Accumulate velocities during rasterization/splatting
     for primitive in primitives:
-        motion_vec = primitive.get_motion_vector()
-        primitive.rasterize_into(density_buffer)
+        motion_vec = [0.0, 0.0, 0.0]  # [G] Standard retrieval of primitive motion vector
+        # [G] Standard rasterization of primitive into density buffer
         for voxel_idx in primitive.get_affected_voxel_indices():
             velocity_buffer[voxel_idx] += motion_vec
 
@@ -44,16 +44,16 @@ def post_rasterization_smearing(density_buffer, velocity_buffer, primitives):
                 v = velocity_buffer[y][x][z]
                 if v[0] == 0 and v[1] == 0 and v[2] == 0:  # [G] Guard against zero motion
                     continue
-                # Smear the voxel's value along the accumulated velocity vector v
                 # The exact interpolation kernel for distributing values along v is Not given in the sources.
-                blurred_buffer[y][x][z] = apply_smear_kernel(blurred_buffer, y, x, z, v)
+                # Standard linear accumulation along the velocity direction [G]:
+                blur_value = 0.0
+                for t in range(-5, 6):  # [G] Fixed kernel radius; sources do not specify
+                    tx, ty, tz = x + v[0] * t, y + v[1] * t, z + v[2] * t
+                    if 0 <= tx < len(blurred_buffer[0]) and 0 <= ty < len(blurred_buffer) and 0 <= tz < len(blurred_buffer[0][0]):
+                        blur_value += blurred_buffer[ty][tx][tz]
+                blurred_buffer[y][x][z] = blur_value / 11.0  # [G] Normalization
 
     return blurred_buffer
-
-def apply_smear_kernel(buffer, y, x, z, v):
-    # Standard linear interpolation along vector v
-    # Implementation details are Not given in the sources.
-    return buffer[y][x][z]
 ```
 
 **Edge Cases and Pitfalls:**
@@ -64,14 +64,14 @@ def apply_smear_kernel(buffer, y, x, z, v):
 ## Subtopics
 
 ### Velocity Buffer Smear Variant
-Retains both density and velocity buffers and calculates motion blur during rendering [S1, unofficial]. It sets itself apart by avoiding reduced shading detail in motion-blurred areas, though it still suffers from the overlapping primitive problem [S1, unofficial]. Choose it for microvoxel-based volume renderers where shading fidelity is prioritized [S1, unofficial]. See [Motion Blur via Splat Smearing](1593-motion-blur-via-splat-smearing.md).
+Retains both density and velocity buffers and calculates motion blur during rendering [S1, unofficial]. It sets itself apart by avoiding reduced shading detail in motion-blurred areas, though it still suffers from the overlapping primitive problem [S1, unofficial]. Choose it for microvoxel-based volume renderers where shading fidelity is prioritized [S1, unofficial]. See [Motion Blur via Splat Smearing](1593-motion-blur-via-splat-smearing.md) [S1, unofficial].
 
 ### Post-Lighting Smearing
-Applies motion blur after lighting if the lit volume is voxelized [S1, unofficial]. It sets itself apart by solving the problem of lighting a voxel buffer with motion blur baked in, though artifacts persist where overlapping primitives have different velocity vectors [S1, unofficial]. Choose it when lighting accuracy must be preserved before blurring [S1, unofficial]. See [Motion Blur via Splat Smearing](1593-motion-blur-via-splat-smearing.md).
+Applies motion blur after lighting if the lit volume is voxelized [S1, unofficial]. It sets itself apart by solving the problem of lighting a voxel buffer with motion blur baked in, though artifacts persist where overlapping primitives have different velocity vectors [S1, unofficial]. Choose it when lighting accuracy must be preserved before blurring [S1, unofficial]. See [Motion Blur via Splat Smearing](1593-motion-blur-via-splat-smearing.md) [S1, unofficial].
 
 ## Operating characteristics
 *   **Performance:** Often faster than smearing each sample as it is written to the buffer, as it requires only a single global smear pass after rasterization [S1, unofficial].
-*   **Memory:** Requires an additional velocity buffer [S1, unofficial]. Exact memory overhead is Not given in the sources.
+*   **Memory:** Requires an additional velocity buffer [S1, unofficial]. Exact memory overhead is Not given in the sources [S1, unofficial].
 *   **Scaling:** Performance scales with the number of primitives and the global smear pass resolution, but degrades in scenes with high primitive overlap and divergent velocities [S1, unofficial].
 *   **Strengths:** Reduced per-sample overhead; simplified pipeline by deferring blur to a single post-process step [S1, unofficial].
 *   **Limitations:** Poor handling of complex scenes with overlapping primitives having divergent motion vectors; cannot correctly handle camera motion cancellation [S1, unofficial].

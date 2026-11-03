@@ -1,0 +1,202 @@
+# Developability Regularizer
+
+Also called: Stein et al. regularizer
+
+## Overview
+The Developability Regularizer is a mesh regularization term that encourages geometric flatness (developability) by minimizing the smallest eigenvalue of the vertex normal covariance matrix, weighted by vertex area. It is primarily used in differentiable surface reconstruction to penalize curvature and promote planar patches, distinguishing it from smoothness-based regularizers like Laplacian smoothing. It builds on [Mesh Reconstruction Evaluation](2909-mesh-reconstruction-evaluation.md).
+
+## How it works
+The method computes a per-vertex contribution to the loss based on the local geometry of the incident triangles. It aggregates normal covariances and areas, then computes the minimum eigenvalue as a measure of non-developability.
+
+**Inputs:**
+- `tri_pos`: Tensor of shape $(T, 3, 3)$, containing the 3D positions of the three vertices for each of the $T$ triangles.
+- `tris`: Tensor of shape $(T, 3)$, containing the vertex indices for each triangle.
+- $V$: Number of unique vertices in the mesh.
+
+**Outputs:**
+- `loss`: Scalar tensor representing the total developability loss.
+
+**Data Structures:**
+- `vert_normal_covariance_sum`: Tensor of shape $(V, 9)$, initialized to zeros. Stores the flattened $3 \times 3$ normal covariance matrix for each vertex.
+- `vert_area`: Tensor of shape $(V)$, initialized to zeros. Stores the weighted area contribution for each vertex.
+- `vert_degree`: Tensor of shape $(V)$, initialized to zeros (int32). Stores the number of triangles incident to each vertex.
+
+**Parameters:**
+- `REL_EPS`: $1 \times 10^{-6}$. Added to the covariance matrix to ensure numerical stability during eigenvalue decomposition [S1, unofficial].
+- `POS_EPS`: $1 \times 10^{-6}$. Used in normalization denominators to prevent division by zero [S1, unofficial].
+
+**Steps:**
+
+1.  **Initialize Accumulators:**
+    Set `vert_normal_covariance_sum`, `vert_area`, and `vert_degree` to zero tensors of the specified shapes.
+
+2.  **Iterate Over Triangle Corners:**
+    For each triangle $t$ in the mesh, and for each corner index $i_C \in \{0, 1, 2\}$:
+    
+    a.  **Gather Vertices:**
+        Let $p_{Root} = \text{tri\_pos}[t, i_C]$, $p_A = \text{tri\_pos}[t, (i_C + 1) \pmod 3]$, and $p_B = \text{tri\_pos}[t, (i_C + 2) \pmod 3]$.
+        
+    b.  **Compute Edge Vectors:**
+        $v_A = p_A - p_{Root}$
+        $v_B = p_B - p_{Root}$
+        $v_{An} = \frac{v_A}{\|v_A\| + \text{POS\_EPS}}$
+        $v_{Bn} = \frac{v_B}{\|v_B\| + \text{POS\_EPS}}$
+        
+    c.  **Compute Face Geometry:**
+        $area\_normal = v_A \times v_B$
+        $face\_area = 0.5 \times \|area\_normal\|$
+        $normal = \frac{area\_normal}{\|area\_normal\| + \text{POS\_EPS}}$
+        
+    d.  **Compute Corner Angle (for reference, though not explicitly used in the final loss formula in the source snippet, it is computed):**
+        $corner\_angle = \arccos(\text{clamp}(\text{dot}(v_{An}, v_{Bn}), -1, 1))$
+        
+    e.  **Compute Normal Outer Product:**
+        $outer = normal \otimes normal$ (Resulting in a $3 \times 3$ matrix).
+        Flatten $outer$ to a vector of length 9.
+        
+    f.  **Scatter Updates:**
+        Let $idx = \text{tris}[t, i_C]$.
+        $\text{vert\_normal\_covariance\_sum}[idx] \leftarrow \text{vert\_normal\_covariance\_sum}[idx] + outer$
+        $\text{vert\_area}[idx] \leftarrow \text{vert\_area}[idx] + \frac{face\_area}{3}$
+        $\text{vert\_degree}[idx] \leftarrow \text{vert\_degree}[idx] + 1$
+
+3.  **Process Covariance Matrices:**
+    Reshape `vert_normal_covariance_sum` to $(V, 3, 3)$.
+    Add $\text{REL\_EPS} \times I$ to each $3 \times 3$ matrix, where $I$ is the identity matrix.
+
+4.  **Compute Minimum Eigenvalues:**
+    Compute the eigenvalues for each vertex's covariance matrix.
+    $\text{min\_eigvals}[v] = \min(|\lambda_1|, |\lambda_2|, |\lambda_3|)$ for vertex $v$.
+
+5.  **Mask Degree-3 Vertices:**
+    Vertices with exactly 3 incident triangles (degree 3) are typically not penalized or handled specially to avoid singularities or irrelevant curvature measures in simple meshes. Set $\text{vert\_area}[v] = 0$ where $\text{vert\_degree}[v] == 3$.
+
+6.  **Normalize Area:**
+    Calculate the total area sum: $A_{total} = \sum \text{vert\_area}$.
+    If $A_{total} > 0$:
+    $\text{vert\_area} \leftarrow \text{vert\_area} \times \frac{V}{A_{total}}$
+    Else:
+    $\text{vert\_area} \leftarrow 0$
+
+7.  **Compute Loss:**
+    $\text{loss} = \sum_{v=0}^{V-1} (\text{vert\_area}[v] \times \text{min\_eigvals}[v])$
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import numpy as np
+
+def compute_developability_regularizer(tri_pos, tris, V, rel_eps=1e-6, pos_eps=1e-6):
+    """
+    Compute the Developability Regularizer loss.
+    
+    Args:
+        tri_pos: Tensor (T, 3, 3) - Vertex positions for each triangle.
+        tris: Tensor (T, 3) - Vertex indices for each triangle.
+        V: int - Number of vertices.
+        rel_eps: float - Regularization epsilon for eigenvalues.
+        pos_eps: float - Epsilon for normalization.
+        
+    Returns:
+        loss: Tensor (1,) - Scalar loss value.
+    """
+    T = tri_pos.shape[0]
+    
+    # Initialize accumulators
+    vert_normal_covariance_sum = torch.zeros((V, 9), device=tri_pos.device)
+    vert_area = torch.zeros((V), device=tri_pos.device)
+    vert_degree = torch.zeros((V), dtype=torch.int32, device=tri_pos.device)
+    
+    # Loop over triangles and corners
+    for iC in range(3):
+        # Gather vertices
+        p_root = tri_pos[:, iC]
+        p_a = tri_pos[:, (iC + 1) % 3]
+        p_b = tri_pos[:, (iC + 2) % 3]
+        
+        # Edge vectors
+        v_a = p_a - p_root
+        v_b = p_b - p_root
+        
+        # Normalize edges
+        norm_v_a = torch.norm(v_a, dim=1, keepdim=True)
+        norm_v_b = torch.norm(v_b, dim=1, keepdim=True)
+        v_an = v_a / (norm_v_a + pos_eps)
+        v_bn = v_b / (norm_v_b + pos_eps)
+        
+        # Face area and normal
+        area_normal = torch.cross(v_a, v_b, dim=1)
+        face_area = 0.5 * torch.norm(area_normal, dim=1)
+        
+        norm_area_normal = torch.norm(area_normal, dim=1, keepdim=True)
+        normal = area_normal / (norm_area_normal + pos_eps)
+        
+        # Outer product of normal (3x3 matrix)
+        # normal shape: (T, 3)
+        # outer shape: (T, 3, 3)
+        outer = torch.einsum('ti,tj->tij', normal, normal)
+        outer_flat = outer.reshape(T, 9)
+        
+        # Scatter updates
+        # tris[:, iC] gives vertex indices for the current corner
+        indices = tris[:, iC]
+        
+        # Accumulate covariance
+        # Using scatter_add for efficiency
+        vert_normal_covariance_sum.scatter_add_(0, indices.unsqueeze(1).expand(-1, 9), outer_flat)
+        
+        # Accumulate area
+        vert_area.scatter_add_(0, indices, face_area / 3.0)
+        
+        # Accumulate degree
+        vert_degree.scatter_add_(0, indices, torch.ones(T, dtype=torch.int32, device=tri_pos.device))
+
+    # Reshape covariance to (V, 3, 3)
+    cov_matrix = vert_normal_covariance_sum.reshape(V, 3, 3)
+    
+    # Add regularization
+    identity = torch.eye(3, device=tri_pos.device)
+    cov_matrix = cov_matrix + rel_eps * identity
+    
+    # Compute eigenvalues
+    # torch.linalg.eigvals returns complex numbers, but covariance matrix is symmetric real, so eigenvalues are real.
+    # Using eigvalsh for symmetric matrices is more efficient and stable.
+    eigvals = torch.linalg.eigvalsh(cov_matrix)
+    
+    # Minimum absolute eigenvalue
+    min_eigvals = torch.min(torch.abs(eigvals), dim=1).values
+    
+    # Mask out degree-3 vertices
+    mask_degree_3 = (vert_degree == 3)
+    vert_area = vert_area.clone() # Clone to avoid in-place modification issues if needed
+    vert_area[mask_degree_3] = 0.0
+    
+    # Normalize area
+    total_area = vert_area.sum()
+    if total_area > pos_eps:
+        vert_area = vert_area * (V / total_area)
+    else:
+        vert_area = torch.zeros_like(vert_area)
+        
+    # Final loss
+    loss = torch.sum(vert_area * min_eigvals)
+    
+    return loss
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(T)$, where $T$ is the number of triangles. The dominant operations are the scatter adds and the eigenvalue decomposition for $V$ vertices, which is $O(V)$ since the matrix size is fixed at $3 \times 3$.
+- **Memory Complexity:** $O(V + T)$. Requires storage for the covariance sums, areas, and degrees.
+- **Strengths:** Effectively encourages planar surfaces, which is beneficial for reconstructing man-made objects or smooth surfaces with large flat regions. It is differentiable, allowing gradient-based optimization.
+- **Limitations:** May over-smooth complex curved details. The masking of degree-3 vertices can lead to discontinuities in the regularization effect if the mesh topology is not uniform.
+- **When to use:** When reconstructing meshes from implicit fields or point clouds where flatness is a desired prior.
+- **When not to use:** For highly curved organic shapes where preserving fine geometric detail is more important than planarity.
+
+## Background
+The Developability Regularizer, also known as the Stein et al. regularizer, originates from the FlexiCubes framework [S1, unofficial]. It is designed to improve the quality of reconstructed meshes by penalizing non-developable surfaces. The method leverages the fact that a surface is developable (can be flattened onto a plane without distortion) if and only if its Gaussian curvature is zero, which corresponds to the smallest eigenvalue of the normal covariance matrix being zero.
+
+## Sources
+[S1] GitHub - nv-tlabs/FlexiCubes, https://github.com/nv-tlabs/FlexiCubes, fetched 2026-10-27 (unofficial)

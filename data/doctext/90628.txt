@@ -1,0 +1,510 @@
+Gaussian Splatting — All Variants Cheat Sheet
+Gaussian Splatting — All Variants Cheat Sheet
+Updated July 2026 with 2025–2026 SOTA additions — new entries marked ★. Algorithm names link to their papers (arXiv / project page).
+July 2026 • Updated Edition
+Contents
+The big picture: why 3DGS won
+Mathematical foundations
+The vanilla 3DGS pipeline
+Quality-improving variants
+Compression and efficiency
+Geometry and meshing
+Dynamic and 4D Gaussian Splatting
+Generative 3D / image-to-3D with Gaussians
+SLAM and online mapping with Gaussians
+Large-scale and city-scale GS
+Relighting, materials, and physics
+Editing and segmentation
+Avatars and human-centric Gaussian Splatting
+Autonomous driving and outdoor scenes
+GS variants beyond standard 3DGS
+Engineering and systems
+Evaluation and metrics
+Failure modes and pitfalls
+Comparison with NeRF and other neural fields
+Open research directions and 2026 frontier
+Pipelines and reference recipes
+Appendix A: 25 things every principal must know about Gaussian Splatting
+Appendix B: decision tree — which GS variant?
+Appendix C: year-by-year milestones
+1. The big picture: why 3DGS won
+3DGS is a differentiable, point-based, sort-and-blend rasterizer. It replaces NeRF's implicit MLP and raymarched volume integration with an explicit collection of 3D anisotropic Gaussians, each carrying position, covariance, opacity, and view-dependent color (spherical harmonics). Training jointly optimizes all parameters via image-space photometric loss, with adaptive density control (clone/split/prune) over the lifetime of the optimization.
+Aspect
+NeRF (vanilla)
+3DGS
+Representation
+MLP implicit, \(f(\mathbf{x},\mathbf{d}) \to (\mathbf{c},\sigma)\)
+Explicit 3D anisotropic Gaussians
+Inference
+Ray marching, MLP per sample
+Tile-based GPU rasterization
+Speed (1080p)
+0.05–3 FPS (vanilla)
+100–300+ FPS
+Train time (NeRF synthetic / Mip-NeRF 360)
+Hours to days
+5–40 minutes
+Memory at inference
+MLP weights (small) but slow
+Hundreds of MB to GB of points
+Editability
+Hard (implicit)
+Native (move/edit primitives)
+Quality ceiling
+High (Mip-NeRF 360 / Zip-NeRF)
+Matches or exceeds for most scenes
+Key
+3DGS is fundamentally a return to explicit geometry but with two innovations that made it work: (i) a differentiable, alpha-compositing tile rasterizer with backward-sortable gradients, and (ii) adaptive density control that grows/shrinks the point cloud during training. Without either, the prior point-based renderers (Pulsar, surface splatting) could not reach photorealism.
+2. Mathematical foundations
+2.1 The 3D Gaussian primitive
+A 3D Gaussian centered at \(\boldsymbol{\mu}\in\mathbb{R}^3\) with covariance \(\Sigma\in\mathbb{R}^{3\times3}\) is
+\[G(\mathbf{x}) = \exp\!\left(-\tfrac{1}{2}(\mathbf{x}-\boldsymbol{\mu})^\top \Sigma^{-1}(\mathbf{x}-\boldsymbol{\mu})\right).\]
+\(\Sigma\) must be positive semi-definite, so it is parameterized via a rotation \(R\in SO(3)\) (unit quaternion \(q\)) and per-axis scale \(\mathbf{s}\in\mathbb{R}^3_{>0}\):
+\[\Sigma = R\,\mathrm{diag}(\mathbf{s})^2\,R^\top.\]
+Each Gaussian also has opacity \(\alpha\in(0,1)\) (raw logit) and a vector of spherical harmonic coefficients up to degree \(\ell\in\{0,1,2,3\}\) for view-dependent color.
+2.2 Projection and 2D covariance (EWA splatting)
+Given world-to-camera \(W\) and the Jacobian \(J\) of the perspective projection at \(\boldsymbol{\mu}_c = W\boldsymbol{\mu}\), the projected 2D covariance is
+\[\Sigma_{2D} = J\,W\,\Sigma\,W^\top J^\top \in \mathbb{R}^{2\times2}.\]
+This is the EWA (Elliptical Weighted Average, Zwicker 2001) approximation: the local linearization is exact at \(\boldsymbol{\mu}_c\) and degrades away from it (a key source of artifacts addressed by Mip-Splatting and 2DGS).
+2.3 Alpha compositing
+For pixel \(\mathbf{p}\) and Gaussians sorted front-to-back along the view direction:
+\[C(\mathbf{p}) = \sum_{i\in N} \mathbf{c}_i(\mathbf{d})\,\alpha_i\,G_i^{2D}(\mathbf{p}) \prod_{j<i}\!\left(1 - \alpha_j\,G_j^{2D}(\mathbf{p})\right),\]
+where \(\mathbf{c}_i(\mathbf{d})\) is the SH-evaluated color in viewing direction \(\mathbf{d}\) and \(G_i^{2D}\) is the 2D Gaussian footprint. This is the volume rendering equation discretized over Gaussians instead of ray-marched samples.
+2.4 Spherical harmonics for view dependence
+SH up to degree \(\ell\) has \((\ell+1)^2\) coefficients per channel. Vanilla 3DGS uses degree 3 (16 coefs \(\times\) 3 channels = 48 floats per Gaussian). The view-dependent color is \(c(\mathbf{d}) = \sum_{l,m} c_{lm}\,Y_{lm}(\mathbf{d})\). Higher-frequency view-dependent specularity needs more bands; many compression methods strip degree \(\ge 1\).
+2.5 Adaptive density control
+The optimizer prunes Gaussians whose opacity drops below \(\epsilon_\alpha \sim 0.005\) and densifies where the 2D position gradient magnitude \(\|\nabla_{\boldsymbol{\mu}_{2D}} L\|\) exceeds a threshold \(\tau_\nabla \sim 2\times10^{-4}\):
+Clone (small Gaussians, under-reconstructed): duplicate, perturb position.
+Split (large Gaussians, over-reconstructed): replace with two smaller Gaussians.
+Prune: remove low-opacity / off-screen / huge-projection points.
+Periodic opacity reset (every 3000 iters) to escape local minima of opaque-but-wrong points.
+Key
+The position-gradient densification heuristic is surprisingly load-bearing. Many follow-ups (GaussianPro, AbsGS, Pixel-GS, GOF, RAIN-GS) report that better densification triggers account for most of their quality gains. "Where do new Gaussians come from?" is the most important under-the-hood question in 3DGS.
+3. The vanilla 3DGS pipeline
+3.1 Training loop
+Initialization from SfM (COLMAP) sparse point cloud; if no SfM, use random uniform points in scene bound (lower quality).
+Each iteration: pick a random training view \(I_v\), project all Gaussians, tile-rasterize to image \(\hat{I}_v\), compute photometric loss
+\[\mathcal{L} = (1-\lambda)\,\|\hat{I}_v - I_v\|_1 + \lambda\,\big(1 - \mathrm{SSIM}(\hat{I}_v, I_v)\big),\quad \lambda = 0.2.\]
+Backprop through tile rasterizer; Adam updates of \(\{\boldsymbol{\mu}, q, s, \alpha, \mathrm{SH}\}\).
+Every \(K\) iters apply density control; total \(\sim\!30\text{k}\) iters.
+3.2 Default hyperparameters
+Parameter
+Value
+Notes
+Iterations
+30,000
+7k–15k for fast preview
+LR position
+\(1.6\times10^{-4}\) scaled by scene extent
+exp. decay
+LR opacity
+\(5\times10^{-2}\)
+sigmoid raw
+LR scale
+\(5\times10^{-3}\)
+exp. raw
+LR rotation
+\(10^{-3}\)
+quaternion, normalized after step
+LR SH
+\(2.5\times10^{-3}\) for DC, \(/20\) for higher bands
+3 bands
+Densification window
+500 – 15000
+every 100 iters
+Densify gradient
+threshold \(2\times10^{-4}\)
+2D position grad
+Opacity reset interval
+3000
+set \(\alpha\leftarrow0.01\)
+Tile size
+\(16\times16\)
+rasterizer constant
+\(\lambda_{\mathrm{SSIM}}\)
+0.2
+1.0–SSIM weight
+SH degree warm-up
+every 1000 iters \(+1\) band
+up to 3
+3.3 Tile-based rasterizer details
+Cull Gaussians outside view frustum and behind camera.
+Compute 2D bounding ellipse from \(\Sigma_{2D}\), expand to AABB.
+Bin Gaussians into tile lists (bucket by tile id).
+Per-tile depth sort (via cub::DeviceRadixSort on 64-bit keys = depth | tile-id).
+Per-tile alpha-composite front-to-back; early-out at \(T < 0.0001\) or after maximum depth.
+Backward pass: stored sorted lists; per-pixel walk reverse, accumulate gradients.
+Watch out
+The tile rasterizer's popping artifacts arise because the per-tile depth sort uses the Gaussian center depth, not per-pixel depth. Distant tiles where two Gaussians overlap strongly can flip order across views. StopThePop, MIP-Splatting, GES, and 2DGS all attempt to fix this through different mechanisms (per-pixel sort, hierarchical sort, surface alignment).
+4. Quality-improving variants
+Anti-aliasing and frequency control
+Mip-Splatting (Yu et al., CVPR 2024) introduces a 3D smoothing filter and 2D Mip filter on Gaussians to enforce a maximum sampling rate, eliminating dilation/erosion artifacts when zooming in/out. Multiscale 3DGS adds explicit pyramid handling. Analytic-Splatting replaces the box pixel filter with a closed-form convolution. Mini-Splatting / Mini-Splatting2 constrain Gaussian sizes to image-space bounds.
+Sort and rendering accuracy
+StopThePop (Radl et al., SIGGRAPH 2024): hierarchical / pixel-resorting to remove popping without sacrificing speed. Gaussian Opacity Fields (GOF) uses ray-tracing-style intersection for accurate depth. Per-pixel sort (PSGS) is exact but slower.
+Better densification
+GaussianPro (CVPR'24): progressive propagation along normals to fill texture-less regions. AbsGS: takes absolute positional gradients across views (not the average) to find "fence-sitting" Gaussians. Pixel-GS: scales the densification gradient by the projected area in pixels, so a Gaussian that hurts many pixels is split first. RAIN-GS: relaxes the SfM-only initialization assumption with sparse-large-variance random init. FreGS: frequency regularization to push Gaussians toward high-frequency regions.
+Surface alignment / 2D Gaussians
+2D Gaussian Splatting (2DGS) (Huang et al., SIGGRAPH'24): replaces 3D ellipsoids with oriented disks that intersect surfaces accurately, dramatically improving geometry and mesh extraction. SuGaR: post-hoc surface alignment + Poisson meshing. PGSR (Planar GS): planarity loss for low-frequency surfaces. Gaussian Surfels: zero-thickness oriented surfels.
+Sparse-view / few-shot 3DGS
+FSGS: Gaussian unpooling for few-shot. SparseGS: monocular depth + diffusion priors for \(\sim\!3\)-view input. DNGaussian: depth-normal regularizers. InstantSplat: pose-free + sparse via MASt3R/VGGT geometry priors, trains in seconds. pixelSplat / MVSplat / latentSplat / Splatter Image: feed-forward 2-view to splat generators. NoPoSplat: no-pose feed-forward splat from images alone.
+Key
+★ 2026 SOTA update
+AnySplat (link): Pose-free feed-forward network: a single forward pass over uncalibrated image collections yields 3D Gaussian primitives plus per-image intrinsics and extrinsics. Scales to casual dense or sparse multi-view captures with no pose annotations; matches pose-aware baselines and surpasses prior pose-free methods (NoPoSplat-class) in zero-shot evaluations at real-time rendering latency.
+5. Compression and efficiency
+A vanilla 3DGS scene of Mip-NeRF 360 averages 1–2 M Gaussians and 200–800 MB on disk. Compression is critical for mobile/web/streaming.
+5.1 Lossless / structural reductions
+Pruning by importance: rank Gaussians by their contribution to training views (e.g., the average alpha-weighted contribution); drop bottom 30–80%.
+LightGaussian (NeurIPS'23): pruning + SH distillation to lower bands + vector quantization \(\to 15\times\) size reduction at \(<0.5\) dB drop.
+Compact3D / C3DGS / EAGLES: vector quantize SH and scale parameters.
+Self-Organizing Gaussians (SOG): project all attributes into 2D maps so we can use PNG/JPEG/EXR-style image codecs.
+Reduced-MS / RDO-Gaussian: rate–distortion optimization at compression time.
+5.2 Quantization and representation tricks
+Quantize positions to 16-bit half or per-block 12-bit residuals; quantize SH DC to FP16, higher bands to INT8 with per-channel scale.
+Quantize \((q, s)\) to 8–16 bits; opacity to 8 bits (raw logit).
+Entropy code groups (Huffman / range / zstd).
+Trained codecs: latent representation that decodes to a Gaussian on the fly.
+5.3 Hierarchical / level-of-detail
+Hierarchical 3DGS (Inria, SIGGRAPH'24): octree-like tree of clusters; renders only the relevant LoD; 99% reduction at far distances.
+Octree-GS, Scaffold-GS: anchor-based with neural decoder per anchor; large size reduction and better generalization to extrapolated views.
+CityGaussian / VastGaussian / DoGaussian: divide the city into tiles, train per tile, merge with overlap; LoD pyramid for streaming.
+Recipe. Production compression baseline: prune 50% by importance, distill SH to band 1, quantize positions to 16-bit half, \((q, s, \alpha)\) to 8 bits, SH DC to FP16, higher SH to INT6, zstd entropy code, store as tiled file with bbox header. Expect \(8\text{–}20\times\) size reduction with \(<0.5\) dB PSNR drop. Stream LoD by training Hierarchical-GS or Scaffold-GS.
+Key
+★ 2026 SOTA update
+HAC++ (link): Anchor-based compression that couples unorganized Scaffold-GS anchors with a binarized structured hash grid, using their mutual information plus intra-anchor context for entropy modeling. Adaptive quantization estimates per-attribute distributions with Gaussian models. Reaches ~100x size reduction over vanilla 3DGS, a leading rate-distortion result in the compression line.
+6. Geometry and meshing
+2DGS / Gaussian Surfels produce surface-aligned primitives whose centers and normals lie on the visible surface; depth and normal maps are crisp.
+SuGaR: penalty term to make Gaussians flat and aligned, then Poisson reconstruction on samples.
+TrimGS: trims Gaussians whose contribution is outside the surface. NeuSG combines NeuS-style SDF with a GS rasterizer.
+GOF (Gaussian Opacity Fields): derive a level-set surface from accumulated opacity.
+PGSR: planar regularization plus single-view + multi-view depth-normal consistency.
+GauStudio / NeRFStudio gsplat: tools for mesh extraction.
+Watch out
+3DGS geometry is an emergent property, not a constraint. Vanilla 3DGS produces floating ellipsoids, not surfaces. If you need a mesh for physics, collision, or DCC pipelines, use 2DGS or SuGaR-style surface alignment from the start, not a post-hoc mesh of vanilla 3DGS.
+7. Dynamic and 4D Gaussian Splatting
+7.1 Per-frame baselines
+Train independent 3DGS per frame — baseline, but storage explodes and temporal flicker.
+Dynamic 3DGS (Luiten et al., 3DV'24): each Gaussian has time-varying \((\boldsymbol{\mu}_t, q_t)\) tracked via local-rigid + ARAP / isometry constraints.
+7.2 Deformation-field 4DGS
+4D Gaussian Splatting (4DGS) (Wu et al., CVPR'24): canonical 3DGS + HexPlane / k-Plane decoder to predict \((\Delta\boldsymbol{\mu}, \Delta q, \Delta s)\) at time \(t\); renders from a "canonical + deformation" decomposition.
+Deformable 3DGS (Yang et al., CVPR'24): MLP deformation network on per-Gaussian features over time.
+SC-GS (Sparse-Controlled): a small set of control points with influence weights drives the rest — compact and editable.
+7.3 Native 4D primitives
+Spacetime Gaussians (STG) (Li et al., CVPR'24): each Gaussian has a temporal opacity envelope (born/dies/peaks), polynomial trajectory, and per-band SH; renders any time slice in real time.
+Gaussian Marbles: physics-style flow plus appearance.
+4D-Rotor Gaussian Splatting: 4D rotor-based primitives (Clifford algebra).
+D-MiSo: motion-aware optimization with sparse control trajectories.
+7.4 Monocular video and casual capture
+MoSca, Shape-of-Motion: prior-aided monocular dynamic GS using CoTracker / VGG-T / DUSt3R / metric-depth priors.
+GaussianFlow: explicit flow field for temporal regularization.
+Choosing a 4D variant. Multi-view rigs → Spacetime Gaussians or Dynamic 3DGS; hand-held casual phone video → MoSca / Shape-of-Motion; physically-plausible content for AR/VR → PhysGaussian.
+Key
+★ 2026 SOTA update
+L4GM (link): First feed-forward 4D large reconstruction model: from a single-view video it outputs per-frame 3DGS in one ~1s forward pass, then upsamples to higher fps for temporal smoothness via temporal self-attention. Built on LGM and trained on a new Objaverse-derived multiview-video dataset (44K objects, 12M videos, 300M frames).
+8. Generative 3D / image-to-3D with Gaussians
+Diffusion + SDS / SDS-variants
+DreamGaussian (Tang et al., ICLR'24): 2-stage — (1) SDS-optimize Gaussians from a generated image; (2) refine via UV-texture diffusion. Generates a textured mesh in 2 minutes. GaussianDreamer, LucidDreamer, HiFi-123, GS-Gen, HumanGaussian: text-to-3D via SDS over GS instead of NeRF. ProlificDreamer-style VSD also applies.
+Feed-forward 3D generators (latent splat)
+LRM / Splatter Image / pixelSplat / MVSplat / latentSplat: predict 3DGS directly from one or two posed images via a transformer/U-Net. LGM (Large Gaussian Model): feed-forward to dense splats. GRM (Gaussian Reconstruction Model). TriplaneGaussian: tri-plane to GS. GSGEN / GS-Dream: text-to-3D with feed-forward backbone. Trellis, Hunyuan3D-2: state-of-the-art image-to-3D in 2025; outputs PBR mesh and/or 3DGS.
+Avatars and humans
+HUGS, GaussianAvatars, GoMAvatar, 3DGS-Avatar, AnimatableGaussians, Animatable 3D Gaussian (rigged via SMPL/X / FLAME), PSAvatar (relightable head). Apple Vision-Pro Persona avatar pipeline is an internal GS-style relightable head model. Codec Avatars 3D (Meta) – production-grade GS-based heads.
+Key
+★ 2026 SOTA update
+DiffSplat (link): Natively generates 3D Gaussian splats by fine-tuning a pretrained text-to-image diffusion model, exploiting web-scale 2D priors while keeping 3D consistency. A lightweight reconstruction model bootstraps multi-view Gaussian-splat grids for dataset curation; a 3D rendering loss enforces cross-view coherence. Text- and image-to-3DGS in ~1-2 seconds.
+9. SLAM and online mapping with Gaussians
+SplaTAM: RGB-D SLAM that maps the world as 3DGS, uses depth + photometric ICP to track and densify online.
+Gaussian Splatting SLAM (MonoGS): monocular RGB-only with online optimization.
+Photo-SLAM, GS-SLAM, LoopSplat: loop closure with GS maps; Gaussians get re-anchored after loop correction.
+RTG-SLAM: real-time GS for room-scale scanning.
+LiveSplat / OnlineGS: stream-friendly incremental densification.
+Gaussian-SLAM (Yugay et al., 2024): keyframe-based with sub-map fusion.
+Key
+The SLAM angle is the cleanest evidence that 3DGS is a real geometry representation: the same map can be (i) rendered photorealistically, (ii) used for ICP-style tracking, (iii) edited locally without retraining a global MLP. NeRF-SLAM (NICE-SLAM, NeRF-SLAM, Co-SLAM) struggled on (iii).
+Key
+★ 2026 SOTA update
+WildGS-SLAM (link): Robust monocular RGB 3DGS-SLAM for dynamic in-the-wild scenes. A shallow MLP over DINOv2 features predicts an uncertainty map that guides dynamic-object removal during tracking and mapping, feeding uncertainty-aware dense bundle adjustment and Gaussian-map optimization. Reconstructs a clean static Gaussian map while ignoring moving distractors.
+10. Large-scale and city-scale GS
+VastGaussian (CVPR'24): partition the scene into spatially-disjoint regions; train per region; decoupled appearance handling for varying lighting; merge with feathered overlap.
+CityGaussian / CityGaussianV2: hierarchical LoD across square kilometers; depth regularization and visibility-aware training.
+DoGaussian: distributed training across nodes.
+Hierarchical 3DGS (Inria): cluster-based LoD; can render Mont Saint-Michel interactively.
+H3DGS / OmniRe / StreetGaussians / EmerNeRF / NeuRAD: city-scale street scenes for AV simulation; explicit dynamics for vehicles and pedestrians.
+Aerial-GS: drone-scale scenes with appearance and exposure handling.
+Key
+★ 2026 SOTA update
+Momentum-GS (link): Block-wise large-scene training with a momentum-updated teacher Gaussian decoder that gives each block global self-distillation guidance, decoupling block count from GPU count and restoring cross-block spatial consistency. Block weighting adjusts each block by reconstruction accuracy; reports ~18.7% LPIPS improvement over CityGaussian with far fewer blocks.
+11. Relighting, materials, and physics
+11.1 Relightable Gaussians
+Relightable 3D Gaussian (Gao et al., ECCV'24): per-Gaussian BRDF (albedo, roughness, normal); precomputed visibility for shadows.
+GS-IR / GIR: inverse rendering with split-sum approximation; handles indirect light.
+GShader / IRGaussian: per-Gaussian shader for surface material parameters.
+R3DG: BRDF + ambient-occlusion baked per Gaussian.
+DeferredGS / GUS-IR / DPI-IR: deferred shading for high-frequency materials.
+Split-sum or pre-filtered environment maps integrate well; SH-only is too low-bandwidth for sharp reflections.
+11.2 Physics and simulation
+PhysGaussian (CVPR'24): material-point method (MPM) over Gaussians; one representation for both rendering and simulation; cloth, jelly, sand, snow.
+GIC / DiffGS: differentiable physical interactions for editable scenes.
+Gaussian-Splatting MPM: multi-physics with explicit constitutive models.
+Useful for AV / robotics simulation: drop a 3DGS scan into the simulator, simulate physics, re-render with rasterizer.
+Key
+★ 2026 SOTA update
+IRGS (link): Inverse-rendering framework that models inter-reflections by applying the full rendering equation without simplification, computing incident radiance on the fly via differentiable 2D Gaussian ray tracing. Fixes the inaccurate material/lighting estimates of earlier 3DGS inverse-rendering methods (GS-IR, Relightable 3DG) that used simplified equations or learned light approximations.
+12. Editing and segmentation
+Gaussian Grouping: per-Gaussian instance ID supervised by SAM / video tracking.
+SAGA / SegAnyGaussians / OmniSeg3D-GS: 2D promptable segmentation lifted to 3D.
+Feature-3DGS / LangSplat / N2F2: per-Gaussian language features (CLIP, LSeg) for open-vocabulary 3D segmentation.
+GaussianEditor (Chen et al., CVPR'24): text-driven local edits via Hierarchical Gaussian Semantic Tracing + diffusion-guided refinement.
+GSEdit, GScalpel: paint-bucket / boolean edits.
+Style-GS / GaussianStyle: stylization with 2D style references.
+13. Avatars and human-centric Gaussian Splatting
+Model
+Driving rig
+What's special
+HUGS
+SMPL
+first SMPL-driven body GS
+3DGS-Avatar
+SMPL-X
+per-Gaussian deformation MLP
+GaussianAvatars
+FLAME
+head-driven, riggable
+GoMAvatar
+SMPL-X
+monocular video, mesh-coupled
+AnimatableGaussians
+SMPL-X
+explicit pose-conditioned offsets
+SplattingAvatar
+SMPL-X
+embedded in mesh tangent space
+GoHA / GHG
+FLAME
+relightable Gaussian heads
+PSAvatar / Relightable Avatar
+FLAME + light
+photoreal head with relight
+GaussianHair
+strand + GS
+strand-aware hair
+Codec Avatar 3D (Meta)
+internal production
+volumetric telepresence
+Recipe. To build a phone-captured talking head GS avatar: (1) capture 30s multi-angle video; (2) run MICA / DECA to fit FLAME; (3) initialize a Gaussian per mesh triangle in tangent space; (4) train 3DGS with pose-conditioned offsets and an expression-condition network; (5) freeze geometry + train a relightable BRDF if needed; (6) compress to \(\le\!30\) MB.
+14. Autonomous driving and outdoor scenes
+StreetGaussians: per-scene + per-vehicle GS; static background plus dynamic actor splats with explicit poses.
+EmerNeRF-style decomposition adapted to GS: static + dynamic + sky.
+OmniRe: holistic scene reconstruction including humans, vehicles, and static background.
+NeuRAD: neural rendering for AD with sensor models (camera + LiDAR).
+Drive-GS / GaussianAD / Drive4D: end-to-end driving simulators.
+4D-Driving-GS: drives time-of-day and weather conditioning for closed-loop sim.
+Key
+Per-actor 3DGS plus per-scene 3DGS background is the dominant pattern for AV simulation in 2026: you can place rare-event vehicles (e.g., school buses) into any scene and render them with sensor realism. Together with StreetGaussians, this is the basis for Tesla's, Waymo's, and Wayve's internal closed-loop simulators.
+15. GS variants beyond standard 3DGS
+Different primitives
+2DGS (oriented disks); Gaussian Surfels; GES (Generalized Exponential Splatting): replace Gaussian with generalized exponential, shape parameter learned per primitive — lower count for the same quality. TetraGS / Mesh-Gauss: tetrahedron primitives. Beta-Splatting / TriangleSplatting / Convex Splatting / PolySplatting: alternative shape kernels. HoGS (homogeneous): unifies near and far Gaussians via projective coordinates.
+Anchored / structured GS
+Scaffold-GS (Lu et al., CVPR'24): voxel anchors + tiny neural decoder per anchor predicts \(k\) Gaussians; great compression and far-view extrapolation. Octree-GS: explicit octree LoD over scaffold anchors. Mip-Splatting + Scaffold stack is a strong production baseline.
+Frequency / spectral
+FreGS: frequency-aware densification. SpectralGS: spectral analysis of training residuals to direct optimization. FourierGS: Fourier-feature view-dependent appearance.
+Ray-tracing GS
+3D-GRT (3D Gaussian Ray Tracing, NVIDIA): ray-trace through 3D Gaussian primitives via proxy AABBs and OptiX; gives correct depth and shadowing, supports refraction. EnvGS / RGS-Tracing: environment lighting via path tracing on GS.
+Key
+★ 2026 SOTA update
+3DGUT (link): Replaces EWA splatting with the 3D Gaussian Unscented Transform: projects each Gaussian via sigma points, so rasterization works exactly under nonlinear projections (fisheye, rolling shutter, distortion). The tracing-compatible formulation supports secondary rays (reflections/refraction) in the same representation while keeping real-time rasterization speed. Ships in NVIDIA's 3dgrut codebase, hybridizing with 3DGRT.
+EVER (link): Ray-traces constant-density volumetric ellipsoids with exact emission-only volume rendering instead of alpha-compositing, intersecting each primitive twice. Eliminates popping and view-dependent-density artifacts, is 3D-consistent, and supports defocus blur and camera distortion. ~30 FPS at 720p on RTX 4090; sharpest real-time results on large-scale Zip-NeRF scenes.
+16. Engineering and systems
+16.1 Reference implementations
+Inria reference (CUDA + PyTorch, original SIGGRAPH'23 code): diff-gaussian-rasterization.
+gsplat (Nerfstudio): cleaner CUDA kernels, used by industry; supports 2DGS, anti-alias, multi-GPU.
+Brush (Rust + WGPU) and lerf-style nerfstudio for cross-platform.
+taichi-3DGS: Taichi backend, GPU-portable.
+Mobile / WebGL viewers: gsplat.js, antimatter15, three.js, Babylon.js.
+Unity / Unreal plugins: Aras-P viewer, Luma Unreal, Polycam SDK.
+16.2 Performance tuning
+Backward sort is the dominant GPU cost. Cache sorted lists per tile when re-using views.
+Cap Gaussians per tile via early-termination thresholds on transmittance.
+Use 16-bit SH evaluation, fused FMA for projection.
+In multi-GPU, partition by Gaussians (data parallel) or by tiles (image parallel); merge gradients with all-reduce.
+For mobile: prune to <300k Gaussians, SH band 1, half-precision; expect 30 FPS at 720p.
+16.3 Common file formats
+.ply reference (used by Inria): per-point xyz + DC + higher SH + scale + rotation + opacity.
+.splat (Aras-P viewer): packed binary for web playback.
+.spz (Niantic): compressed splat with quantized fields, \(\sim\!10\times\) smaller than .ply.
+.compressed.ply (gsplat): vector-quantized SH and scales.
+Internal team formats: tiled, with bbox header for streaming and LoD.
+17. Evaluation and metrics
+17.1 Standard rendering metrics
+PSNR: cheap but insensitive to perceptual quality.
+SSIM / MS-SSIM: structural; standard companion to PSNR.
+LPIPS: learned perceptual; correlates better with human judgment.
+FID / KID on rendered crops vs. training images for generative models.
+17.2 Geometry metrics
+Chamfer distance, F-score on extracted point cloud / mesh.
+Depth error vs. ground-truth (when available, as in DTU, Tanks & Temples).
+Normal error.
+17.3 Standard benchmarks
+Mip-NeRF 360: 9 outdoor / indoor object-centric scenes, the de-facto NVS benchmark.
+Tanks & Temples: 2 scenes (Truck, Train) reported by 3DGS; Advanced subset.
+Deep Blending (Hedman et al.): 2 indoor.
+NeRF Synthetic (8 toy scenes): for sanity check.
+DTU: object-centric for geometry / mesh.
+Free dataset (Wang et al.): trajectory-free evaluation.
+HyperNeRF, NeRF-DS: dynamic / deformable.
+D-NeRF / Plenoptic Video / Technicolor: 4D / dynamic.
+17.4 Common benchmark numbers (M360, average PSNR / LPIPS, room scale)
+Approximate, for orientation:
+Vanilla 3DGS: 27.4 / 0.18.
+Mip-Splatting: 27.7 / 0.17.
+Scaffold-GS: 27.9 / 0.18.
+2DGS: \(\sim\!27.0\) / similar with much better geometry.
+GES: comparable PSNR with \(\sim\!30\%\) fewer primitives.
+Hierarchical 3DGS: comparable with LoD streaming.
+Watch out
+Beware of cherry-picked metrics. Train PSNR is easy to overfit; test PSNR on a held-out trajectory matters. LPIPS often disagrees with PSNR — a model can look better while having lower PSNR. Also check inference FPS, model size, and memory footprint — many papers win PSNR but inflate Gaussian count by 3×.
+18. Failure modes and pitfalls
+Watch out
+Pitfall catalog:
+Floaters from over-eager densification or missing depth supervision.
+Popping between views from per-tile center-depth sort.
+Aliasing / scale dilation when zooming in/out (fixed by Mip-Splatting).
+Over-smoothing from too few Gaussians or too-strong SSIM weight.
+Background bleed-through if the bounding box is mis-set; opaque sky Gaussians can develop wrong negative covariance.
+Cracks in low-texture regions (fences, walls) without GaussianPro / FreGS.
+Pose noise: small SfM rotational error leads to large per-pixel error; use bundle adjustment + monocular depth priors.
+Underfitting at far field due to perspective compression; HoGS or hierarchical LoD helps.
+Specular reflections require SH band \(\ge 2\) plus plenty of training views; otherwise reflections are baked into a non-physical floater.
+Hidden surfaces can stay opaque if an occluder is added later (no built-in visibility cleanup; need re-train / explicit pruning).
+Recipe. Quality-recovery checklist: (1) Recompute SfM with more match correspondences; (2) Use Mip-Splatting 3D smoothing filter; (3) Add monocular depth + normal regularizer (Marigold, Depth-Anything-v2); (4) Lower densification threshold, more frequent opacity reset; (5) Switch to 2DGS for surface-heavy scenes; (6) Increase SH degree for shiny scenes, or add per-primitive BRDF; (7) Try Scaffold-GS for far-view extrapolation; (8) Validate on held-out trajectory, not training views.
+19. Comparison with NeRF and other neural fields
+Family
+Representative
+Train
+Render
+Editable
+Vanilla NeRF
+MipNeRF360 / Zip-NeRF
+hours–days
+0.05–3 FPS
+no
+Hash NeRF
+Instant-NGP
+minutes
+30–60 FPS
+limited
+Tri-plane / k-plane
+EG3D / k-Planes
+hours
+medium
+limited
+SDF + neural
+NeuS / VolSDF
+hours
+low
+moderate
+Gaussian Splatting
+3DGS / Mip-Splatting / 2DGS
+5–40 min
+100–300 FPS
+yes
+Feed-forward GS
+pixelSplat / MVSplat
+inference
+real-time
+yes
+Surfels / Pulsar
+Pulsar / DSS
+seconds
+high
+yes
+Volumetric mesh
+differentiable mesh
+medium
+high
+yes
+20. Open research directions and 2026 frontier
+Foundation 3DGS: feed-forward generators trained on internet-scale 3D / multi-view data (LRM, Trellis, Hunyuan3D-2, NoPoSplat) approach Sora/Veo level for static 3D.
+World-model integration: Cosmos-style video world models that emit 3DGS as a per-frame state; closed-loop AV simulation.
+4D foundation models: feed-forward 4DGS from a few seconds of monocular video; combine with VGGT / DUSt3R-style geometry priors.
+Differentiable physics + GS: PhysGaussian-style for end-to-end robotics learning.
+On-device GS rendering: Apple Vision Pro, Quest 3, mobile WebGL — requires <50 MB scenes at 30 FPS.
+Relightable BRDF GS at scale: solving rendering equations on Gaussians efficiently.
+Generative editing: 3D-consistent local edits driven by 2D diffusion, propagating cleanly in 3D and 4D.
+GS + Neural SDF hybrids: GS for rendering, SDF for geometry.
+GS for medical / scientific data: sparse 3D microscopy, CT, ultrasound.
+GS as the universal scene language: a representation that simulators, generators, reconstructions, and renderers all share. Already happening internally at Tesla, Waymo, Wayve, NVIDIA, Meta, Apple.
+21. Pipelines and reference recipes
+Recipe. Casual capture → web-viewable 3DGS scene: COLMAP (SfM) → 3DGS (15–30k iters) → prune & VQ compress (LightGaussian / SOG) → .spz / .splat for the web → gsplat.js viewer. Total ~30 min from phone video to live URL.
+Recipe. Pose-free fast 3D reconstruction (no COLMAP): DUSt3R / MASt3R / VGGT → point cloud + intrinsics + extrinsics → InstantSplat or NoPoSplat → 3DGS in seconds. Trade some quality for huge wall-clock savings.
+Recipe. High-quality production scene with mesh: COLMAP → 2DGS or Mip-Splatting + GOF → extract mesh via SuGaR / Poisson → bake albedo into mesh → 3DGS for rendering, mesh for collision/physics.
+Recipe. Dynamic 4D capture (multi-camera rig): Per-frame SfM → Spacetime Gaussians or Dynamic 3DGS → temporal compression → stream as time-series of point clouds with deltas.
+Recipe. Avatar pipeline (phone-captured talking head): 30s video at 4K → DECA / MICA → FLAME mesh → Gaussian per triangle in tangent space → pose+expression conditioning → relightable BRDF if needed → compress to \(\le\!30\) MB.
+Recipe. Generative 3D from a text prompt: Trellis or Hunyuan3D-2 (image → 3D) for shape; SDS via DreamGaussian if you need stylization; finalize as 3DGS or PBR mesh; compress; serve.
+22. Appendix A: 25 things every principal must know about Gaussian Splatting
+3DGS replaces NeRF's MLP+ray-march with explicit anisotropic Gaussians + tile rasterization.
+Each primitive stores \((\boldsymbol{\mu}, q, s, \alpha, \mathrm{SH})\); covariance is reconstructed \(\Sigma = R\,\mathrm{diag}(s)^2\,R^\top\).
+EWA splatting linearizes the perspective projection at \(\boldsymbol{\mu}_c\) to get \(\Sigma_{2D}\).
+Volume rendering equation is approximated as alpha compositing of 2D Gaussian footprints.
+Adaptive density control (clone, split, prune, opacity reset) is the key training trick.
+Vanilla 3DGS uses 1–3 M Gaussians for room-scale; 200–800 MB on disk.
+Mip-Splatting fixes scale-aliasing via 3D smoothing + 2D Mip filter.
+2DGS replaces 3D ellipsoids with oriented disks; far better surfaces and meshes.
+Scaffold-GS / Octree-GS use voxel anchors + tiny MLP → compression and far-view extrapolation.
+Hierarchical 3DGS (Inria) gives LoD from city-scale to centimeter close-ups.
+Densification gradient threshold (\(\sim\!2\text{e-}4\)) and opacity reset every 3000 iters are load-bearing.
+Popping artifacts come from per-tile center-depth sort; StopThePop, GOF, exact pixel sort fix it.
+Compression: prune importance + SH distill + VQ + zstd → smaller, <0.5 dB drop.
+LightGaussian, SOG, EAGLES, RDO-Gaussian are the standard compression toolbox.
+4DGS approaches: per-frame; canonical+deformation field; native 4D primitives (Spacetime Gaussians).
+Gaussian SLAM: SplaTAM, MonoGS, LoopSplat, Gaussian-SLAM all replace NeRF-SLAM.
+Generative 3D: feed-forward (LRM, Splatter Image, Trellis, Hunyuan3D-2) and SDS (DreamGaussian) both target GS now.
+Relightable GS: per-Gaussian BRDF + visibility (Relightable 3DG, GS-IR, GShader).
+PhysGaussian unifies rendering and simulation primitives via MPM.
+Avatars: FLAME / SMPL-X driven; GaussianAvatars, AnimatableGaussians, Codec Avatars 3D.
+AV simulation: StreetGaussians, OmniRe, NeuRAD — per-actor + per-scene splats.
+Production format: .spz / .splat / quantized .ply with bbox + LoD header.
+gsplat (Nerfstudio) is the reference implementation; Inria's diff-gaussian-rasterization is the original.
+Benchmark numbers without compression / FPS / memory are misleading; always report all four.
+The frontier is foundation 3DGS + 4D world models + real-time on-device rendering.
+23. Appendix B: decision tree — which GS variant?
+Goal: photoreal NVS, room-scale, plenty of views. → Vanilla 3DGS or Mip-Splatting.
+Goal: surface mesh / geometry. → 2DGS, optionally + SuGaR / GOF.
+Goal: tiny model size. → LightGaussian + Scaffold-GS + SOG.
+Goal: city-scale / aerial. → VastGaussian / CityGaussian / Hierarchical 3DGS.
+Goal: dynamic from multi-camera rig. → Spacetime Gaussians / Dynamic 3DGS.
+Goal: dynamic from monocular phone video. → MoSca / Shape-of-Motion (with VGG-T / DUSt3R / Depth-Anything priors).
+Goal: SLAM / online mapping. → SplaTAM / Gaussian-SLAM / MonoGS.
+Goal: relightable / inverse-rendering. → Relightable 3DG / GS-IR / GShader.
+Goal: text or image to 3D. → Trellis / Hunyuan3D-2 / DreamGaussian / LGM.
+Goal: digital human / talking head. → GaussianAvatars / AnimatableGaussians / Codec Avatar 3D.
+Goal: AV closed-loop sim. → StreetGaussians / OmniRe / NeuRAD.
+Goal: physics simulation in the same scene. → PhysGaussian.
+Goal: editable scene. → 2DGS + SuGaR (mesh) or GaussianEditor (text-driven).
+Goal: pose-free / sparse-view. → InstantSplat / NoPoSplat / pixelSplat / MVSplat.
+Goal: ray-traced refraction / shadows. → 3D-GRT (NVIDIA Gaussian Ray Tracing).
+24. Appendix C: year-by-year milestones
+Year
+Milestones
+2001
+Zwicker et al. EWA splatting — foundational 2D footprint formula.
+2018
+Pulsar, NSVF, surface splatting renaissance.
+2020
+NeRF (Mildenhall et al.) — the implicit baseline 3DGS would overtake.
+2022
+Plenoxels, Instant-NGP — explicit / hash-based fast NeRFs.
+2023 (Aug)
+3D Gaussian Splatting (Kerbl et al., SIGGRAPH'23) — the watershed paper.
+2023 (Q4)
+DreamGaussian, Mip-Splatting prototypes, SplaTAM, LangSplat, GaussianEditor.
+2024 (CVPR)
+4DGS, Deformable 3DGS, Scaffold-GS, GaussianAvatars, GaussianPro, PhysGaussian, MipSplat, Spacetime Gaussians, Dynamic 3DGS.
+2024 (SIGGRAPH)
+2DGS, Hierarchical 3DGS, StopThePop, NeuRAD, OmniRe.
+2024 (Q3-Q4)
+Mip-Splatting refinements, Relightable 3DG, GES, GS-IR, GShader, LightGaussian, EAGLES, SOG, Trellis-style feed-forward generators.
+2025
+Foundation feed-forward 3DGS (LGM, Splatter Image v2, MVSplat, NoPoSplat); GS in production at Niantic, Polycam, Luma, Apple Persona, Codec Avatars 3D; GS becomes the universal AV / world-model 3D representation.
+2026
+World-model + 4DGS coupling (Cosmos, GAIA-2); on-device <50 MB scenes; differentiable physics + GS in robotics training; closed-loop AV simulation built around per-actor + per-scene Gaussians; "Gaussian renderer" is a standard module like "rasterizer".
+Key
+The arc: 2023 introduced 3DGS; 2024 built every major variant (geometry, dynamics, compression, generation, SLAM, avatars, AV); 2025 pushed toward feed-forward foundation models and on-device serving; 2026 fuses 3DGS with world-models and physics so a single representation supports rendering, simulation, generation, and learning.

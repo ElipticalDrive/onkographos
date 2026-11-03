@@ -1,1 +1,415 @@
-Web-based large-scale terrain visualization is often limited by traditional graphics APIs in computation and data transfer. This paper presents an efficient parsing and rendering method using WebGPU, covering data organization, compute pipeline scheduling, and rendering optimization. A block-based quadtree index is designed for GPU batch reading, with elevation and texture data rearranged by spatial proximity. Compute shaders handle frustum culling, continuous LOD calculation, and dynamic vertex generation, offloading geometry processing from CPU to GPU. Multi-level index buffers and instanced drawing reduce draw calls. Experiments on SRTM30m and NASADEM datasets show that, against a WebGL 2.0 baseline, our method maintains 58–62 FPS at 10 million triangles, cuts initial loading time by ∼62%, and reduces memory usage by ∼41%. This work offers a feasible path for high-performance web-based geospatial visualization.
+Efficient Parsing and Rendering of Large-Scale Terrain Data
+Based on WebGPU
+Jie Qin∗
+Kuncheng Zhuo
+Xiamen Great Power Geo Information Technology
+Company Ltd
+Xiamen, China
+qinjiejoy@126.com
+Xiamen Great Power Geo Information Technology
+Company Ltd
+Xiamen, China
+1379999327@163.com
+Ying Jiang
+Xirong Lv
+Xiamen Great Power Geo Information Technology
+Company Ltd
+Xiamen, China
+yingjiangqingzhou@163.com
+Xiamen Great Power Geo Information Technology
+Company Ltd
+Xiamen, China
+lvxirong@163.com
+Abstract
+1
+Web-based large-scale terrain visualization is often limited by traditional graphics APIs in computation and data transfer. This paper
+presents an efficient parsing and rendering method using WebGPU,
+covering data organization, compute pipeline scheduling, and rendering optimization. A block-based quadtree index is designed for
+GPU batch reading, with elevation and texture data rearranged
+by spatial proximity. Compute shaders handle frustum culling,
+continuous LOD calculation, and dynamic vertex generation, offloading geometry processing from CPU to GPU. Multi-level index
+buffers and instanced drawing reduce draw calls. Experiments on
+SRTM30m and NASADEM datasets show that, against a WebGL
+2.0 baseline, our method maintains 58–62 FPS at 10 million triangles, cuts initial loading time by ∼62%, and reduces memory usage
+by ∼41%. This work offers a feasible path for high-performance
+web-based geospatial visualization.
+Web-based geospatial visualization underpins digital twins, smart
+cities, and online GIS. With remote sensing resolution improving
+from 90 m to 30 m or finer, elevation datasets have grown from
+hundreds of megabytes to gigabytes, making smooth 3D interaction
+in browsers challenging.
+WebGL, the de facto standard over the past decade, was designed
+for earlier GPU hardware. It does not fully embrace programmable
+pipelines, strictly separating compute and rendering. Dynamic vertex updates require repeated CPU–GPU memory copies. For massive terrain, geometry processing cannot be effectively offloaded,
+and data paths contain redundant copying. Studies indicate that
+when rendering over one million triangles, CPU-side vertex processing and state switching may consume over 60% of the frame
+budget in WebGL.
+WebGPU, the next-generation W3C Web graphics standard, natively maps to Vulkan, Metal, and DirectX 12. Unlike WebGL, it
+exposes general-purpose compute shaders in the browser, enabling
+geometry generation, culling, and LOD decisions entirely on the
+GPU, while the CPU handles logical scheduling and resource management.
+Previous works have explored WebGPU for terrain visualization.
+Liu et al. proposed occlusion culling and multi-threaded scheduling
+[1]; Komon et al. developed weBIGeo for geosimulation, achieving
+large speedups [2]; Shu et al. applied WebGPU to underwater terrain with LOD and multi-pass rendering [3]; ISPRS comparative
+studies confirmed WebGPU’s superior rendering throughput over
+WebGL [4]; Tong et al. extended it to marine TIN data [5]. However, most existing studies pay less attention to raw terrain parsing
+and organization, often assuming preprocessed formats. In practice, reading, decoding, and reorganizing elevation data consume
+significant loading time, especially over networks.
+This paper proposes a full-chain terrain processing and rendering method tailored for WebGPU, addressing three issues: GPUfriendly storage organization, compute-shader-based dynamic LOD,
+and copy-free rendering pipeline scheduling. The following sections detail data organization, algorithm design, and experimental
+validation.
+CCS Concepts
+• Computing methodologies → Computer graphics; Graphics
+systems and interfaces.
+Keywords
+WebGPU, large-scale terrain rendering, compute shader, level of
+detail, data scheduling
+ACM Reference Format:
+Jie Qin, Kuncheng Zhuo, Ying Jiang, and Xirong Lv. 2026. Efficient Parsing
+and Rendering of Large-Scale Terrain Data Based on WebGPU. In 2026 3rd
+International Conference on Computer Application and Computer Graphics
+(CACG 2026), July 17–19, 2026, Xiamen, China. ACM, New York, NY, USA,
+5 pages. https://doi.org/10.1145/3844212.3844228
+∗
+Corresponding author
+This work is licensed under a Creative Commons Attribution 4.0 International License.
+CACG 2026, Xiamen, China
+© 2026 Copyright held by the owner/author(s).
+ACM ISBN 979-8-4007-2531-9/2026/07
+https://doi.org/10.1145/3844212.3844228
+102
+INTRODUCTION
+CACG 2026, July 17–19, 2026, Xiamen, China
+Jie Qin et al.
+2
+GPU-FRIENDLY ORGANIZATION OF
+TERRAIN DATA
+2.1 Data Tiling and Spatial Indexing
+The core contradiction of terrain elevation data lies in the fact that
+the total data volume far exceeds the geometric scale required for
+a single frame, yet real-time interaction demands that data access
+latency from any viewpoint must be controlled within milliseconds. Traditional solutions rely on CPU-side quadtree traversal
+to select visible tiles, then assemble the vertex data corresponding
+to the selected results and upload to the GPU. This path incurs
+non-negligible traversal and assembly overhead at the CPU when
+data scales grow large.
+This paper adopts a block-based quadtree index structure [6],
+dividing the terrain region into fixed-size tile blocks, each containing N×N elevation samples. The difference from conventional
+schemes lies in the storage of index information: bounding boxes,
+center coordinates, hierarchy levels, and offsets within the data
+buffer of quadtree nodes are packed into a compact structure array that resides entirely in GPU video memory. Frustum culling
+and occlusion determination are directly executed on the GPU via
+compute shaders in parallel, with each thread processing one node
+and outputting the list of visible nodes and their LOD levels. The
+constraints of data tiling and dynamic update strategies can refer to
+related research on dynamic terrain [7]. The efficiency advantage
+of parallel processing on the GPU has been verified in relevant performance comparison studies [8]. In addition, tile data are written
+into the buffer in the order of a space-filling curve (Z-order curve),
+so that spatially adjacent tiles also remain adjacent in storage addresses; space-filling curves have been shown to offer good cache
+friendliness in large-area terrain data [9].
+Let the total terrain size be2L × 2L samples, and the leaf node
+size be2K × 2K , then the quadtree depth is D=L−K, and the total
+D
+number of nodes is ∑i=0 4i . It is important to distinguish between
+global data scale and the scale of a specific experimental region.
+For global SRTM30m data, using the standard 1°×1° tiling scheme,
+the total number of samples is approximately 1.66×1011 . Taking
+K=9 (i.e., 512×512 samples per tile), the number of leaf nodes would
+be about 6.3×105 , and the total number of nodes would be about
+8.4×105 . This level of index data can fully reside in GPU memory.
+However, the experimental test region used in this paper is a 2°×2°
+area in the Rocky Mountains. At one-arc-second resolution, this
+region contains approximately 7200×7200 samples. Dividing this
+by a tile size of 512×512 yields about 15×15=225 leaf nodes, and the
+total number of nodes in the quadtree is approximately
+4
+∑𝑖=0 4𝑖 ≈ 341.
+2.2
+Data Layout and Contiguous Storage
+The memory access pattern of elevation data has a direct impact
+on rendering performance. When terrain is rendered, adjacent tiles
+are spatially adjacent, and their vertex data are read contiguously.
+If the data are discretely distributed in storage, GPU cache hit
+rates will drop significantly. In this paper, tile data are written
+into the buffer according to the Z-order curve, and within each
+tile, elevation values are stored contiguously in row-major order,
+facilitating linear address access by the vertex shader.
+103
+Texture data are organized following the same principle. For
+satellite imagery or terrain color maps containing RGB threechannel data, texture atlases are aligned one-to-one with elevation
+data blocks, ensuring that elevation and texture for the same tile
+have a deterministic mapping relationship in buffer offsets. The construction method of 3D terrain models based on big data provides
+reference for the corresponding organization of texture atlases and
+elevation data blocks [10]. This design avoids secondary lookup
+tables for texture coordinates during rendering.
+3
+DYNAMIC LOD GENERATION BASED ON
+COMPUTE SHADERS
+3.1 GPU-Based LOD Parameter Computation
+In traditional terrain LOD methods, the subdivision level of each
+tile is calculated by the CPU based on viewpoint distance, screenspace error, and other parameters. When the number of visible
+tiles reaches several thousand, the CPU-side computation is not
+negligible. This paper fully migrates LOD decisions to compute
+shaders. The parallelization strategy for frustum culling and occlusion judgment draws on related achievements based on the
+WebGPU compute pipeline [11]. In addition, big data processing
+techniques for large-scale terrain mapping also provide references
+for efficient data scheduling and parallel computation [12].
+For each visible tile, the compute shader determines its LOD
+level according to Equation 1):
+LOD = max (0, [log2 (
+d ⋅ tan(𝜃/2)
+)])
+r⋅ ∈ ⋅ (1 + 𝛼 ⋅ 𝜎)
+(1)
+where d is the distance from the tile center to the viewpoint, 𝜃 is
+the field of view, r is the ground resolution of the tile (meters per
+pixel), ∈ is the allowable screen-space error threshold (typically 1–2
+pixels), 𝜎 is the normalized standard deviation of elevation values
+within the tile (reflecting terrain ruggedness), and 𝛼 is a coefficient
+adjusting the influence weight of terrain relief. The value 𝛼=0.5
+is determined as follows: in preprocessing, we tested 𝛼∈[0.0,1.0]
+on 30 different terrain samples (covering plains, hills, mountains,
+and high mountains), using the original resolution rendering result
+as a benchmark, and selected the global value that minimized the
+root-mean-square pixel error, finally obtaining 𝛼=0.5. The introduction of 𝜎 aims to compensate for the visual importance difference
+between flat and rugged terrains at the same spatial scale, as the
+latter requires higher resolution to represent terrain details. This
+computation is performed in the compute shader in parallel per tile,
+outputting the LOD level and corresponding vertex buffer offset
+for each tile.
+It is worth noting that the logarithmic operation in Equation
+1) can be efficiently executed on the GPU via the log2 instruction.
+However, when LOD levels switch, the formula produces discrete
+jumps that may cause visual “popping” artifacts. To alleviate this
+issue, this paper adopts linear interpolation of LOD levels in the
+vertex shader for transition: for each vertex, t is taken as the ratio
+of the minimum distance from the vertex to the tile boundary to
+the tile’s inscribed circle radius (t∈[0,1]), smoothly transitioning
+the LOD level to (1 − t) ⋅ LODcurrent + t ⋅ LODneighbor , and the interpolated level is used for vertex position sampling. This treatment
+Efficient Parsing and Rendering of Large-Scale Terrain Data Based on WebGPU
+CACG 2026, July 17–19, 2026, Xiamen, China
+4.2
+eliminates visual mutations during LOD switching to a certain
+extent.
+3.2
+Dynamic Assembly of Vertex Data
+After determining the LOD level, the next step is to extract the vertex grid at the corresponding resolution from the raw elevation data.
+For a tile at LOD level ll, its grid resolution is (N/2l + 1)×(N/2l + 1)
+vertices. Traditional methods complete vertex data extraction and
+assembly on the CPU, then upload to the GPU via buffer updates.
+This process involves substantial memory allocation and data copying, which is a performance bottleneck.
+This paper leverages WebGPU’s storage buffers and the random
+write capability of compute shaders to accomplish dynamic vertex
+assembly on the GPU. The compute shader computes the sampling
+step s = 2l for each vertex based on the LOD level, then reads the
+corresponding z-values from the elevation buffer and calculates
+world coordinates in combination with the tile’s spatial position.
+The assembled vertex data are written directly to the target vertex
+buffer without passing through CPU memory.
+The core advantage of this scheme is that vertex buffer updates
+are completed entirely within the GPU, eliminating per-frame CPUGPU transfers of dynamic vertex data. The elevation data itself is
+uploaded from CPU to GPU storage buffers during initialization,
+and subsequent per-frame vertex assembly is performed entirely
+on the GPU. This difference is particularly significant for terrain
+meshes that need updating every frame. Taking 10 million vertices as an example, the traditional scheme would need to transfer
+about 120 MB of vertex data per frame (positions + normals + texture coordinates), whereas the GPU-side assembly scheme reduces
+this transfer volume to zero (except for the one-time initialization
+transfer).
+4 RENDERING PIPELINE OPTIMIZATION
+4.1 Multi-Level Index Buffer Design
+The triangle topology of terrain meshes is highly regular—the vertex
+connectivity pattern within each tile depends only on the grid
+resolution, not on the elevation values. Based on this observation,
+this paper pre-generates corresponding index buffers for all possible
+LOD levels and stores them in GPU memory. During rendering,
+the index buffer corresponding to the tile’s LOD level is directly
+bound, eliminating per-frame regeneration or upload.
+For a tile size of N=512, the LOD level ranges from 0 to
+log2 (512) = 9. The number of triangles for each tile at LOD level
+lis 2 × (N/2l )2 . The total number of indices across all LOD levels is
+9
+9
+∑l=0 2×(N/2l )2 ×3 ≈ 6× N2 ×∑l=0 4−l ≈ 6×262144×1.333≈2.1×106
+indices. Stored as 32-bit unsigned integers (4 bytes each), the total
+size is about 8.4 MB. If 16-bit indices are used (since the vertex
+count per tile does not exceed 65535), it can be further compressed
+to about 4.2 MB. This storage overhead is completely acceptable
+under current GPU memory capacities. This design minimizes the
+vertex count per draw call while avoiding the overhead of dynamic
+index buffer generation.
+104
+Instanced Drawing and Batch Merging
+When the number of terrain tiles is large, issuing draw calls one
+by one incurs non-negligible CPU overhead. This paper adopts
+WebGPU’s instanced drawing mechanism, merging tiles with the
+same LOD level into the same draw call. Each instance passes
+the tile’s world transformation matrix and texture atlas offset as
+instance data.
+Let the total number of visible tiles in the current frame be M,
+with LOD level distribution c0 , c1 , … , cmax . The number of draw
+calls is reduced from M to the number of distinct LOD levels (typically no more than 10). In our experimental scenario with a 2°×2°
+region, M is typically between 50 and 200, reducing draw call counts
+by one to two orders of magnitude.
+4.3
+Overlapped Compute-Render Scheduling
+WebGPU’s API is built around the concept of a device queue, to
+which applications submit command buffers. Within a single command buffer, compute and render passes are encoded using GPUComputePassEncoder and GPURenderPassEncoder, respectively.
+Although the WebGPU runtime may internally overlap the execution of these passes on the GPU, this behavior is not directly
+controlled by application fences. To systematically overlap computation and rendering, this paper implements a double-buffering
+strategy.
+In this design, two sets of resources (vertex buffers and indirect
+draw buffers) are allocated, functioning as a front buffer and a back
+buffer. For each frame:
+1. The CPU submits a command buffer to the device queue that
+encodes compute passes for LOD calculation and vertex assembly,
+writing the results into the back buffer.
+2. The CPU then submits a second command buffer that encodes
+a render pass, which draws the terrain mesh using the front buffer
+(prepared in the previous frame).
+Synchronization between these two operations is implicitly handled by the WebGPU queue, which guarantees that commands are
+executed in the order they are submitted. Crucially, the results of
+the compute work from frame N (written to the back buffer) are consumed by the render pass of frame N+1 (after swapping the buffer
+roles). This pipelining scheme ensures that the GPU can continue
+rendering previously prepared data while simultaneously computing data for the next frame, effectively overlapping compute and
+render workloads. This method partially removes compute latency
+from the critical path of the frame budget, effectively improving
+overall throughput. It should be noted that this mechanism introduces a one-frame latency (about 16.7 ms), which is negligible for
+interactive experience in most terrain navigation scenarios. Based
+on our experimental measurements, this compute-render overlap
+scheduling improves the effective frame rate by approximately 11%
+compared to a serial execution model.
+5 EXPERIMENTS AND ANALYSIS
+5.1 Experimental Setup
+The datasets used in the experiments are SRTM30m (nominal resolution 1 arc-second, about 30 meters) and NASADEM (an improved
+version of SRTM incorporating ASTER GDEM and ICESat GLAS
+CACG 2026, July 17–19, 2026, Xiamen, China
+Jie Qin et al.
+Table 1: Performance comparison results
+Metric
+Proposed method
+WebGL 2.0 scheme
+Improvement
+Average frame rate (FPS)
+Initial loading time (s)
+Video memory usage (MB)
+CPU time per frame (ms)
+Draw calls per frame
+59.7
+4.3
+1,247
+2.1
+4-6
+37.2
+11.4
+2,108
+14.6
+3,142
++60.5%
+-62.3%
+-40.8%
+-85.6%
+-99.8%
+auxiliary data). The test area is the Rocky Mountains region in Colorado, USA, with longitude approximately from 107°W to 105°W
+and latitude from 37°N to 39°N, covering an area of about 200 km ×
+150 km. The terrain data for this region (including 16-bit elevation
+and 8-bit three-channel RGB texture) totals about 620 MB. It should
+be noted that the raw data volume of 2.8 GB was measured when
+using uncompressed multi-band remote sensing imagery as texture;
+in standard tests we used compressed RGB textures to control data
+size.
+The client hardware configuration is Intel Core i7-12700H,
+NVIDIA RTX 3060 Laptop GPU (video memory bandwidth 360
+GB/s), 16 GB RAM, and Windows 11 operating system. The browser
+is Chrome 120 (with WebGPU support enabled). The RTX 3060’s
+memory bandwidth is 360 GB/s. In a 10-million-triangle scenario,
+each frame needs to read about 320 MB of vertex data (at 32 bytes
+per vertex), corresponding to a bandwidth requirement of 19.2 GB/s,
+which accounts for about 5.3% of the available bandwidth and is
+far from becoming a bottleneck.
+The comparison scheme is a WebGL 2.0 implementation based
+on Three.js, using the same quadtree data organization and LOD
+strategy, but with vertex assembly and LOD computation performed
+on the CPU. It should be noted that the comparison scheme does
+not use optimizations such as InstanceMesh, reflecting the typical
+performance level of conventional WebGL implementations.
+5.2
+Performance Metrics
+Test results are shown in Table 1. All data are averages over 300
+consecutive frames.
+The proposed method maintains stable 58–62 FPS at 10M triangles, vs. 32–42 FPS for WebGL. Improvements stem from GPU-based
+vertex assembly and instanced drawing. Loading time reduction:
+only indices and metadata are parsed initially; elevation data are
+decompressed on GPU. Of 4.3 s, network ∼2.8 s, GPU decompression / indexing ∼1.5 s. Memory reduction comes from multi-level
+index buffers and compressed vertex storage. CPU time 14.6 ms for
+WebGL aligns with literature [8].
+5.3
+Scalability at Different Data Scales
+To evaluate the scalability of the method, we tested frame rates at
+different data scales, covering scenes from 1 million to 50 million
+triangles. When the triangle count grows from 1 million to 10
+million, the frame rate drops slowly from 64.2 FPS to 59.7 FPS, a
+decrease of about 7%; when the triangle count further increases to
+50 million, the frame rate drops to 41.3 FPS, with a larger decline.
+Bottleneck analysis shows that at the 50-million scale, vertex shader
+105
+execution time becomes the main limiting factor, directly related
+to GPU floating-point throughput.
+5.4
+Discussion
+Results confirm that offloading parsing and assembly to GPU is feasible and beneficial in Web environments. Compute shaders eliminate
+CPU–GPU transfers and enable high parallelism. The method’s effectiveness depends on WebGPU runtime; major browsers (Chrome,
+Edge) support it natively, and Firefox/Safari are progressing, ensuring portability.
+6
+CONCLUSION
+This paper addresses performance bottlenecks in large-scale terrain rendering on the Web with a WebGPU-based solution. Data
+organization uses block quadtree and Z-order for GPU-friendly
+layout. Compute shaders handle LOD and vertex assembly entirely
+on the GPU, avoiding per-frame data transfers. Multi-level index
+buffers and instanced drawing reduce draw calls by two orders of
+magnitude. Experiments confirm significant gains in FPS, loading
+time, and memory usage.
+Future work includes combining WebGPU ray tracing with terrain rendering for enhanced realism, and extending to dynamic
+terrain data (e.g., hydrological or geological simulation) leveraging
+per-frame compute-shader updates.
+Acknowledgments
+Fund Project: Research on Multi-scale Map Model Rendering, Data
+Processing and Refined Operation Technologies Based on WebGPU
+(No:T1524040298)
+References
+[1] G. Liu, G. Chen, Q. Chen, et al., “Key technologies for efficient visualization of
+large-scale 3D spatial models based on Web,” Geospatial Information, vol. 21, no.
+12, pp. 8–13, 2023. (in Chinese) DOI:10.3969/j.issn.1672-4623.2023.12.002.
+[2] Z. Wang, “Research on workflow construction method for distributed integrated
+simulation of geographic models,” Master’s thesis, Nanjing Normal University,
+2022. (in Chinese) DOI:10.27245/d.cnki.gnjsu.2022.003415.
+[3] M. Scarpino, The WebGPU Sourcebook: High-Performance Graphics and Machine
+Learning in the Browser, CRC Press, 2024.
+[4] Z. Usta. WEBGPU: A NEW GRAPHIC API FOR 3D WEBGIS APPLICATIONS[C]//GeoAdvances 2024 - 8th International Conference on GeoInformation
+Advances: 11-12 January 2024.Istanbul, Turkiye. 2024:377-382.
+[5] X. Tong, X. Jiang, Y. Lü, et al., “Lightweight rendering and real-time interaction
+method for marine TIN data based on WebGPU,” Marine Information Technology
+and Applications, pp. 1–9, 2026. (in Chinese) [Online]. Available: https://link.
+cnki.net/urlid/12.1469.P7.20260623.1033.002.
+[6] Y. Wu, X. Zhang, and F. Ru, “Continuous LOD roaming terrain rendering based
+on quadtree subdivision,” Computer Technology and Development, vol. 21, no. 4,
+pp. 5–8,12, 2011. (in Chinese) DOI:10.3969/j.issn.1673-629X.2011.04.002.
+Efficient Parsing and Rendering of Large-Scale Terrain Data Based on WebGPU
+CACG 2026, July 17–19, 2026, Xiamen, China
+[7] G. Chen, X. Sui, W. Wang, et al., “Construction of large-scale dynamic terrain
+based on constrained Delaunay triangulation,” Computer and Digital Engineering, vol. 52, no. 6, pp. 1842–1847, 2024. (in Chinese) DOI:10.3969/j.issn.16729722.2024.06.041.
+[8] E. Fransson, J. Hermansson, and Y. Hu, “A comparison of performance on WebGPU and WebGL in the Godot game engine,” in 2024 IEEE Gaming, Entertainment, and Media Conference, 2024, pp. 1–6.
+[9] M. Cai, P. Xu, and Q. Chen, “Research on optimization method of embedded 3D
+realistic rendering driven by surveying, mapping and geographic information
+data,” Foreign Electronic Measurement Technology, vol. 45, no. 1, pp. 391–396,434,
+106
+2026. (in Chinese) DOI:10.19652/j.cnki.femt.2601064.
+[10] J. Wang, G. Shen, G. Luo, et al., “Establishment of a 3D terrain model based on
+big data,” in Fifth International Conference on Geology, Mapping, and Remote
+Sensing (ICGMRS 2024), Wuhan, China, 2024, pp. 132231X.1–132231X.8.
+[11] Y. Liming, L. Gang, C. Genshen, et al., “3D model occlusion culling optimization
+method based on WebGPU computing pipeline,” Computer Systems Science and
+Engineering, vol. 47, no. 2, pp. 2529–2545, 2023. DOI:10.32604/CSSE.2023.041488.
+[12] Q. Jiang, “Research on big data processing technology for intelligent UAVs in
+large-scale terrain mapping,” Microcomputer, vol. 2025, no. 24, pp. 235–237, 2025.
+(in Chinese)

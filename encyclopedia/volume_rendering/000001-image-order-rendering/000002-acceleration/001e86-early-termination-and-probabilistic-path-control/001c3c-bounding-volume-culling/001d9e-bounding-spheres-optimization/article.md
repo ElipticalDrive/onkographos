@@ -1,23 +1,22 @@
 # Bounding Spheres Optimization
 
-Also called: Bounding Volume Optimization
 
 ## Overview
-Bounding Spheres Optimization is an acceleration technique for volume rendering and Signed Distance Field (SDF) raymarching that eliminates unnecessary distance computations by culling rays that do not intersect the bounding volume of a scene object [S1, S2]. It sets itself apart from general bounding volume culling by specifically using spherical bounds to simplify intersection tests, thereby reducing the cost of the map function evaluation [S1, S2].
+Bounding Spheres Optimization is an acceleration technique for volume rendering and Signed Distance Field (SDF) raymarching that eliminates unnecessary distance computations during ray traversal by culling rays that miss a scene object's bounding sphere [S1]. It is a specific application of bounding volume optimization, which minimizes the cost of the map function by skipping SDF evaluations for objects that do not contribute to the minimal distance field [S2].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a scene object defined by its SDF map function $f(\mathbf{p})$ and its bounding sphere defined by center $\mathbf{c}$ and radius $r$.
-*   **Output:** A boolean indicating whether the ray intersects the bounding sphere, or a reduced set of points for which the SDF $f(\mathbf{p})$ must be evaluated.
+*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a scene object defined by its SDF map function $f(\mathbf{p})$ and its bounding sphere defined by center $\mathbf{c}$ and radius $r$ [G].
+*   **Output:** A boolean indicating whether the ray intersects the bounding sphere, determining whether $f(\mathbf{p})$ must be evaluated [G].
 
 **Data Structures:**
-*   **Bounding Sphere:** Defined by a 3D vector $\mathbf{c} = (c_x, c_y, c_z)$ and a scalar radius $r$.
-*   **Ray:** Defined by origin $\mathbf{o}$ and normalized direction $\mathbf{d}$.
+*   **Bounding Sphere:** Defined by a 3D vector $\mathbf{c} = (c_x, c_y, c_z)$ and a scalar radius $r$ [G].
+*   **Ray:** Defined by origin $\mathbf{o}$ and normalized direction $\mathbf{d}$ [G].
 
 **Algorithm:**
-1.  Compute the vector from the ray origin to the sphere center: $\mathbf{v} = \mathbf{o} - \mathbf{c}$.
-2.  Project $\mathbf{v}$ onto the ray direction to find the distance to the closest point on the ray line to the sphere center: $t_{ca} = \mathbf{v} \cdot \mathbf{d}$.
-3.  Calculate the squared distance from the closest point on the ray line to the sphere center: $d^2 = \|\mathbf{v}\|^2 - t_{ca}^2$.
+1.  Compute the vector from the ray origin to the sphere center: $\mathbf{v} = \mathbf{o} - \mathbf{c}$ [G].
+2.  Project $\mathbf{v}$ onto the ray direction to find the distance to the closest point on the ray line to the sphere center: $t_{ca} = \mathbf{v} \cdot \mathbf{d}$ [G].
+3.  Calculate the squared distance from the closest point on the ray line to the sphere center: $d^2 = \|\mathbf{v}\|^2 - t_{ca}^2$ [G].
 4.  Check for intersection:
     *   If $d^2 > r^2$, the ray does not intersect the sphere. Skip the evaluation of the object's SDF map function for this ray [S1, S2].
     *   If $d^2 \le r^2$, the ray intersects the sphere. Proceed to evaluate the SDF $f(\mathbf{p})$ at the ray's current position [S1, S2].
@@ -47,34 +46,34 @@ def bounding_sphere_cull(ray_origin, ray_direction, sphere_center, sphere_radius
 ```
 
 **Parameters:**
-*   **Sphere Radius ($r$):** Must tightly bound the object to maximize culling efficiency. Loose bounds reduce performance gains [S1, S2].
+*   **Sphere Radius ($r$):** Must tightly bound the object to maximize culling efficiency [G].
 *   **Threshold:** The comparison $d^2 \le r^2$ is exact. No tolerance is typically applied in the culling step itself, though precision issues may arise with very large coordinates [G].
 
 **Edge Cases and Pitfalls:**
 *   **Precision:** For scenes with large coordinate values, floating-point precision errors in $d^2$ calculation may lead to incorrect culling. Using double precision for the culling test may be necessary in extreme cases [G].
 *   **Degenerate Input:** If the ray direction is not normalized, the projection $t_{ca}$ is invalid. The direction must be normalized before use [G].
-*   **Overhead:** The cost of the sphere intersection test must be less than the cost of the SDF evaluation it replaces. If the SDF is trivial, the culling overhead may negate benefits [S2].
+*   **Overhead:** The cost of the sphere intersection test must be less than the cost of the SDF evaluation it replaces. If the SDF is trivial, the culling overhead may negate benefits [G].
 
 ## Subtopics
 
 ### Bounding Volume Optimization
-An optimization technique that minimizes the cost of the map function by skipping the evaluation of Signed Distance Fields (SDFs) for objects that do not contribute to the minimal distance field, using bounding volumes [S2]. Unlike pure bounding spheres, this term is used more broadly to include other bounding primitives, though the principle of culling based on spatial bounds remains the same [S2]. It is chosen when a scene contains dozens or hundreds of expensive primitives, and the goal is to localize expensive computations to areas with complex geometry [S2].
+An optimization technique that minimizes the cost of the map function by skipping the evaluation of Signed Distance Fields (SDFs) for objects that do not contribute to the minimal distance field, using bounding volumes [S2]. Without this optimization, computation cost is uniform across the frame; with it enabled, expensive computations are localized to areas where complex geometry is present [S2]. It is chosen when a scene contains dozens or hundreds of expensive primitives [S2]. A pitfall to note is that modern GPUs are MIMD rather than pure SIMD, allowing different Streaming Multiprocessors to process different instruction streams simultaneously, which helps distribute expensive threads after cheaper parts finish early [S2]. In a scene with 20 expensive primitives at 720p, enabling this optimization reduced average frame duration from 41 ms (24 fps) to 21 ms (48 fps) [S2].
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-*   **Time:** The culling test is $O(1)$ per object per ray. The total time saved is proportional to the number of rays that miss the bounding volumes. In the zeno logo scene, execution time was reduced from 26:29 to 5:28 (21% relative time) [S1]. In a scene with 20 expensive primitives at 720p, average frame duration dropped from 41 ms (24 fps) to 21 ms (48 fps) [S2].
-*   **Memory:** Requires storing the center and radius for each object's bounding sphere. This is minimal overhead compared to the scene geometry [S1, S2].
+*   **Time:** The culling test is $O(1)$ per object per ray. The total time saved is proportional to the number of rays that miss the bounding volumes [G]. In the zeno logo scene, execution time was reduced from 26:29 to 5:28 (21% relative time) [S1]. In a scene with 20 expensive primitives at 720p, average frame duration dropped from 41 ms (24 fps) to 21 ms (48 fps) [S2].
+*   **Memory:** Requires storing the center and radius for each object's bounding sphere [G].
 
 **Measured Performance:**
 *   **Zeno Logo:** Bounding spheres reduced execution time to 21% of the unenhanced time [S1].
 *   **20 Primitives Scene:** Frame rate doubled from 24 fps to 48 fps at 720p resolution [S2].
 
 **Scaling:**
-*   Performance gains scale with the number of objects and the complexity of their SDF evaluations. Scenes with many simple objects may see less benefit if the culling overhead is significant [S2].
+*   Performance gains scale with the number of objects and the complexity of their SDF evaluations [G].
 
 **Strengths and Limitations:**
-*   **Strengths:** Significantly reduces the number of SDF evaluations, especially in scenes with sparse geometry or large empty spaces. Modern GPUs, being MIMD (Multiple Instruction, Multiple Data), can efficiently distribute the remaining expensive threads after cheaper culling operations finish early [S2].
-*   **Limitations:** Requires pre-computation of bounding volumes. If the bounding volumes are loose, culling efficiency drops. Not effective for scenes where geometry fills the entire view volume [S2].
+*   **Strengths:** Significantly reduces the number of SDF evaluations, especially in scenes with sparse geometry or large empty spaces [G]. Modern GPUs, being MIMD, can efficiently distribute the remaining expensive threads after cheaper culling operations finish early [S2].
+*   **Limitations:** Requires pre-computation of bounding volumes [G]. If the bounding volumes are loose, culling efficiency drops [G].
 
 ## Background
 Bounding spheres optimization was introduced as part of the sphere tracing method for rendering implicit surfaces [S1]. It was demonstrated in the context of the "zeno" logo and other geometric primitives, showing significant speedups by eliminating unnecessary distance computations [S1]. The broader concept of bounding volume optimization for SDFs was further explored in CUDA-based raymarching implementations, highlighting the benefits of skipping SDF evaluations for non-contributing objects [S2].

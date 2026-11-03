@@ -1,0 +1,4141 @@
+# Discretized Gaussian Representation for Tomographic Reconstruction (DGR)
+
+This repository contains the implementation of the proposed DGR algorithm as described in our paper submission.
+
+## Announcement
+**Update (2026.01.27):** I’ve been very busy over the past week and haven’t had time to fully test the earlier code yet. I’ve received feedback from several users and am actively testing and fixing issues now. Thanks for your patience.
+
+
+## File Structure
+
+- **[CT](CT)**: Contains the geometry of the Computed Tomography system.
+- **[params](params)**: Contains the parameters (partial) for the DGR algorithm.
+- **[utils](utils)**: Contains the utility functions.
+- **[DGR.py](DGR.py)**: Contains the implementation of the Discretized Gaussian Representation (DGR).
+- **[cone_beam_svct.py](cone_beam_svct.py)**: The reconstruction code for cone beam sparse-view CT.
+- **[fan_beam_svct.py](fan_beam_svct.py)**: The reconstruction code for fan beam sparse-view CT.
+- **[fan_beam_lact.py](fan_beam_lact.py)**: The reconstruction code for fan beam limited-angle CT.
+
+## Quick Start
+
+Within the comparisons of the 6 Tables in the paper, the cone-beam sparse-view CT is the most cutting-edge task compared to research of SAX-NeRF (CVPR 24), X-Gaussian (ECCV 24), and R$^2$-Gaussian (NeurIPS 24). For a quick start, we advise you to run the cone-beam sparse-view CT with 300 iterations, which will take about 3-4 minutes.
+
+### Step-by-Step Guide
+
+1. **Download the Real-World Dataset**:  
+   Please download the real-world dataset from [this website](https://fips.fi/category/open-datasets/x-ray-tomographic-datasets/). The config file also needs to be downloaded.  Following the $R^2$-Gaussian method, you need to reconstruct the pseudo ground truth from these projections.  
+   Alternatively, you can directly download the pseudo ground truth provided by the $R^2$-Gaussian team from [Google Drive](https://drive.google.com/drive/folders/1YZ3w87XrCNyjDRos6gkY8zgT5hESl-PN?usp=sharing).
+
+2. **Adjust Dataset Path**:  
+   Then, adjust the path of the dataset in the [DGR.py](DGR.py) file:  
+   ```python
+   self.img_path = 'path/to/your/dataset'
+    ```
+
+3. **Adjust Number of Views**:  
+   Adjust the number of views in the [DGR.py](DGR.py) file:  
+   ```python
+   self.n_view = 75/50/25
+   ```
+
+4. **Check the path of config file**
+  In [cbct_utils.py](cbct_utils.py), you need to adjust the path of the config file.
+
+5. **Run the Code**:  
+   Run the code by executing the following command:  
+   ```bash
+   python cone_beam_svct.py
+   ```
+6. **Evaluation**:
+We provide a quick evaluation during the reconstruction process for PSNR and SSIM. The quick evaluation includes both volume-wise and slice-wise results. Note that the quick evaluation is not the final evaluation. 
+In the 6 Tables in the paper, the cone-beam sparse-view CT evaluates with a subset of the 3D volume according to the baseline $R^2$-Gaussian; the fan-beam sparse-view CT evaluates with the full 3D volume according to the baseline SWORD method; the ultra sparse-view CT and limited-angle CT evaluate with axial, coronal, and sagittal slices according to the baseline diffusionMBIR. Please save the reconstructed volume and keep the same format as the baseline method for the final evaluation.
+
+### Change the loss function
+In [cone_beam_svct.py](cone_beam_svct.py), [fan_beam_svct.py](fan_beam_svct.py), and [fan_beam_lact.py](fan_beam_lact.py), you can change the loss function by adjusting the following code:
+```python
+loss = Ll1
+loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(projs, gaussians.gt_projs.cuda()))
+loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(projs, gaussians.gt_projs.cuda())) + volume_tv_loss
+```
+
+
+## Note
+
+### Please note that the code is currently in its beta version. We are actively working on it and it will be updated for release soon.
+
+### DGR.py
+```
+import torch
+import torch.nn.functional as F
+from odl.contrib import torch as odl_torch
+import numpy as np
+from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
+from torch import nn
+import os
+import odl
+import cv2
+from tqdm import tqdm
+from utils.previous_utils import read_image
+from utils.system_utils import mkdir_p
+from plyfile import PlyData, PlyElement
+from utils.general_utils import strip_symmetric, build_scaling_rotation
+from utils.utils import load_reconstruction, quick_evaluation, count_neighbors_gpu, resize_and_crop_sr, resize_volume, resize_volume2, compute_mean_distance
+from utils.odl_utils import ConeBeam3DProjector
+from utils.cbct_utils import init_geometry
+import tigre
+import tigre.algorithms as algs
+
+def build_isotropic_covariance(sigma):
+    """
+    Creates an isotropic covariance matrix for 3D Gaussian splatting.
+
+    Args:
+        sigma: The desired standard deviation (same for all axes).
+
+    Returns:
+        A 3x3 isotropic covariance matrix.
+    """
+    isotropic_variance = sigma ** 2  # Square sigma to get variance
+    covariance = torch.eye(3).cuda() * isotropic_variance.unsqueeze(1)
+    return covariance
+
+class DGR:
+
+    def setup_functions(self):
+        def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
+            L = build_scaling_rotation(scaling_modifier * scaling, rotation)
+            std = scaling * scaling_modifier
+            covariance = build_isotropic_covariance(std)
+            actual_covariance = L @ L.transpose(1, 2)
+            symm = strip_symmetric(actual_covariance)
+            return symm, actual_covariance, covariance, std
+        
+        self.scaling_activation = torch.exp
+        self.scaling_inverse_activation = torch.log
+
+        self.covariance_activation = build_covariance_from_scaling_rotation
+
+        self.opacity_activation = torch.sigmoid
+        self.inverse_opacity_activation = inverse_sigmoid
+
+        self.rotation_activation = torch.nn.functional.normalize
+
+
+    def __init__(self, sh_degree : int):
+        self.active_sh_degree = 0
+        self.max_sh_degree = sh_degree  
+        self._xyz = torch.empty(0)
+        self._features_dc = torch.empty(0)
+        self._features_rest = torch.empty(0)
+        self._scaling = torch.empty(0)
+        self._rotation = torch.empty(0)
+        self._opacity = torch.empty(0)
+        self.max_radii2D = torch.empty(0)
+        self.xyz_gradient_accum = torch.empty(0)
+        self.denom = torch.empty(0)
+        self.optimizer = None
+        self.percent_dense = 0
+        self.spatial_lr_scale = 0
+        self.setup_functions()
+        self.image_size = 256
+        self.n_view = 50
+        self.img_path = '/sharedata/datasets/real/real_dataset/cone_ntrain_50_angle_360/pine/vol_gt.npy'
+        # self.img_path = 'L067.npy'
+
+    def capture(self):
+        return (
+            self.active_sh_degree,
+            self._xyz,
+            self._features_dc,
+            self._features_rest,
+            self._scaling,
+            self._rotation,
+            self._opacity,
+            self.max_radii2D,
+            self.xyz_gradient_accum,
+            self.denom,
+            self.optimizer.state_dict(),
+            self.spatial_lr_scale,
+        )
+    
+    def restore(self, model_args, training_args):
+        (self.active_sh_degree, 
+        self._xyz, 
+        self._features_dc, 
+        self._features_rest,
+        self._scaling, 
+        self._rotation, 
+        self._opacity,
+        self.max_radii2D, 
+        xyz_gradient_accum, 
+        denom,
+        opt_dict, 
+        self.spatial_lr_scale) = model_args
+        self.training_setup(training_args)
+        self.xyz_gradient_accum = xyz_gradient_accum
+        self.denom = denom
+        self.optimizer.load_state_dict(opt_dict)
+
+    @property
+    def get_scaling(self):
+        return self.scaling_activation(self._scaling)
+    
+    @property
+    def get_rotation(self):
+        return self.rotation_activation(self._rotation)
+    
+    @property
+    def get_xyz(self):
+        return self._xyz
+    
+    @property
+    def get_features(self):
+        features_dc = self._features_dc
+        features_rest = self._features_rest
+        return torch.cat((features_dc, features_rest), dim=1)
+    
+    @property
+    def get_opacity(self):
+        return self.opacity_activation(self._opacity)
+    
+    def get_covariance(self, scaling_modifier = 1):
+        return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
+
+    def oneupSHdegree(self):
+        if self.active_sh_degree < self.max_sh_degree:
+            self.active_sh_degree += 1
+
+    def count_neighbors(points, distance_threshold):
+        """
+        Counts the number of neighbors for each point in a 3D space.
+
+        Args:
+            points: A NumPy array of shape [N, 3], where N is the number of points
+                    and each row represents a point's coordinates (x, y, z).
+            distance_threshold: The maximum distance considered as a neighbor.
+
+        Returns:
+            A NumPy array of shape [N] containing the number of neighbors for each point.
+        """
+
+        # Calculate pairwise squared distances for efficiency
+        squared_distances = np.linalg.norm(points[:, None] - points[None], axis=2) ** 2
+
+        # Create a mask to exclude points from their own neighborhood and diagonal elements
+        mask = np.ones_like(squared_distances, dtype=bool)
+        np.fill_diagonal(mask, False)
+
+        # Count neighbors based on distance threshold
+        neighbors = np.count_nonzero(squared_distances[mask] <= distance_threshold**2, axis=1)
+
+        return neighbors
+    
+    
+    def create_from_svct(self, test_id='', spatial_lr_scale=0, process='odl'):
+        self.vis_dir = 'vis_svct'
+        if process == 'odl':
+            view_number = self.n_view
+            self.n_view = int(view_number)
+            Fan_angle_partition = odl.uniform_partition(0, 2 * np.pi, self.n_view)
+            Fan_detector_partition = odl.uniform_partition(-360, 360, 720)
+            Fan_geometry = odl.tomo.FanBeamGeometry(Fan_angle_partition, Fan_detector_partition,
+                                        src_radius=500, det_radius=500)
+            Fan_reco_space = odl.uniform_discr(min_pt=[-128, -128], max_pt=[128, 128], shape=[self.image_size, self.image_size], dtype='float32')
+            Fan_ray_trafo = odl.tomo.RayTransform(Fan_reco_space, Fan_geometry, impl='astra_cuda')
+            Fan_FBP = odl.tomo.fbp_op(Fan_ray_trafo)
+            Fan_filter = odl.tomo.fbp_filter_op(Fan_ray_trafo)
+            self.Fan_ray_trafo = odl_torch.OperatorModule(Fan_ray_trafo) 
+            self.Fan_FBP = odl_torch.OperatorModule(Fan_FBP)      
+            self.vis_dir = f'vis_{os.path.basename(test_id)}_{self.n_view}'
+            img_path = self.img_path
+            volume = np.load(img_path, allow_pickle=True)
+            if volume.max() <= 1:
+                volume = volume * 255
+            self.image_size = (volume.shape[0], self.image_size, self.image_size)
+            self.scene_extent = np.linalg.norm(self.image_size) / self.image_size[1]
+            volume = resize_volume2(volume, self.image_size[1:], save_root='input') / 255
+            low_sinogram = self.Fan_ray_trafo(volume)
+            self.gt_projs = low_sinogram
+            self.gt_image = volume
+            # low_sinogram = F.interpolate(low_sinogram[None,...], size=(720, 720), mode='bilinear', align_corners=False)[0]
+            I_FBP = self.Fan_FBP(low_sinogram)  # [bs, n, h, w] -> [bs, x, y, z]
+            sample_img = I_FBP[8].cpu().numpy()*255
+            cv2.imwrite(f'{self.vis_dir}/FBP.png', sample_img)
+            print(low_sinogram.shape)
+            print(I_FBP.shape)
+            quick_evaluation(I_FBP, volume)
+        elif process == 'tigre':
+            # cone beam ct
+            img_path = self.img_path
+            # img_path = 'gt_256.npy'
+            volume = np.load(img_path, allow_pickle=True)
+            if volume.max() > 1:
+                volume = volume / 255
+            geo, angles = init_geometry(n_sample=self.n_view)
+            self.geo = geo
+            self.angles = angles
+            self.image_size = (volume.shape[0], self.image_size, self.image_size)
+            self.scene_extent = np.linalg.norm(self.image_size) / self.image_size[1]
+            sparse_projection = tigre.Ax(volume, geo, angles)
+            I_FBP = algs.fdk(sparse_projection, geo, angles)
+            I_FBP = torch.from_numpy(I_FBP)
+            volume = torch.from_numpy(volume)
+            quick_evaluation(I_FBP, volume)
+            print(sparse_projection.shape)
+            self.gt_projs = torch.from_numpy(sparse_projection).cuda()
+            self.gt_image = volume.cuda()
+        else:
+            raise NotImplementedError
+        grad_maximum = 1e-5 # the upper bound for the gradient
+        intensity_threshold = 0.001 # the lower bound for intensity
+        fbp_threshold = 0.05 # threshold for the FBP image
+        n_gaussian = 200000 # number of initail gaussians 150K-400K. 
+        max_gaussian = 250000
+        distance_threshold = 0.1 # threshold for neighbor distance
+        radii_coefficient = 0.12 # coefficient for the radii of the gaussians
+        intensity_coefficient = 0.3 # coefficient for the intensity of the gaussians
+        
+        I_FBP = I_FBP.cpu()
+        self.volume_shape = I_FBP.shape
+        self.max_gaussian = max_gaussian
+        # filter I_FBP lower than the threshold
+        I_FBP[I_FBP < fbp_threshold] = 0
+        # compute the gradient of I_FBP
+        grad_I_FBP = np.gradient(I_FBP)
+        # compute the norm of the gradient
+        # grad_norm = np.sqrt(grad_I_FBP[0]**2 + grad_I_FBP[1]**2 + grad_I_FBP[2]**2)
+        grad_norm = np.linalg.norm(grad_I_FBP, axis=0, keepdims=True)[0]
+        # rank the coordinates based on the grad_norm
+        median = np.median(grad_norm[grad_norm > 0])
+        distance = np.abs(grad_norm - median)
+        median_indices = np.argsort(distance.reshape(-1))[:n_gaussian]
+        median_indices = np.unravel_index(median_indices, grad_norm.shape)
+        selected_norm_value = grad_norm[median_indices] # just used for debug. They should be near the median value
+        points = np.stack(median_indices, axis=-1)
+        # normalize the points into [0, 1]
+        points = points / np.array(I_FBP.shape)
+        colors = I_FBP[median_indices].unsqueeze(dim=1)
+        
+        # n_neighbours = count_neighbors(points,distance_threshold)
+        n_neighbours = count_neighbors_gpu(points, distance_threshold)
+        radii = radii_coefficient / n_neighbours
+        colors = intensity_coefficient * colors
+        
+        colors[colors < intensity_threshold] = intensity_threshold
+
+        self.spatial_lr_scale = spatial_lr_scale
+        fused_point_cloud = torch.tensor(np.asarray(points)).float().cuda()
+        # fused_color = RGB2SH(torch.tensor(np.asarray(colors)).float().cuda())
+        fused_color = torch.tensor(np.asarray(colors)).float().cuda()
+        features = torch.zeros((fused_color.shape[0], 1, (self.max_sh_degree + 1) ** 2)).float().cuda()
+        features[:, :1, 0 ] = fused_color
+        features[:, 1:, 1:] = 0.0
+
+        print("Number of points at initialisation : ", fused_point_cloud.shape[0])
+
+        dist = torch.clamp_min(compute_mean_distance(torch.from_numpy(np.asarray(points)).float().cuda()), 1e-7)
+        scales = torch.log(torch.sqrt(dist))[...,None].repeat(1, 3)
+        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        rots[:, 0] = 1
+
+        opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+
+        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+        self._scaling = nn.Parameter(scales.requires_grad_(True))
+        self._rotation = nn.Parameter(rots.requires_grad_(True))
+        self._opacity = nn.Parameter(opacities.requires_grad_(True))
+        # self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        self.max_radii2D = torch.from_numpy(radii).cuda()
+
+
+
+
+    def create_from_lact(self, source_path : str, spatial_lr_scale : float, process='odl'):
+        self.vis_dir = 'vis_lact'
+        if process == 'odl':
+            self.n_view = 720 # full view, and then need to limit the angle
+            Fan_angle_partition = odl.uniform_partition(0, 2 * np.pi, self.n_view)
+            Fan_detector_partition = odl.uniform_partition(-360, 360, 720)
+            Fan_geometry = odl.tomo.FanBeamGeometry(Fan_angle_partition, Fan_detector_partition,
+                                        src_radius=500, det_radius=500)
+            Fan_reco_space = odl.uniform_discr(min_pt=[-128, -128], max_pt=[128, 128], shape=[self.image_size, self.image_size], dtype='float32')
+            Fan_ray_trafo = odl.tomo.RayTransform(Fan_reco_space, Fan_geometry, impl='astra_cuda')
+            Fan_FBP = odl.tomo.fbp_op(Fan_ray_trafo)
+            Fan_filter = odl.tomo.fbp_filter_op(Fan_ray_trafo)
+            self.Fan_ray_trafo = odl_torch.OperatorModule(Fan_ray_trafo) 
+            self.Fan_FBP = odl_torch.OperatorModule(Fan_FBP)      
+            img_path = self.img_path
+            volume = np.load(img_path, allow_pickle=True)
+            if volume.max() <= 1:
+                volume = volume * 255
+            self.image_size = (volume.shape[0], self.image_size, self.image_size)
+            self.scene_extent = np.linalg.norm(self.image_size) / self.image_size[1]
+            volume = resize_volume2(volume, self.image_size[1:], save_root='input') / 255
+            low_sinogram = self.Fan_ray_trafo(volume)
+            low_sinogram[:, low_sinogram.shape[1]//2:] = 0 # limit the angle of view
+            self.gt_projs = low_sinogram
+            self.gt_image = volume
+            # low_sinogram = F.interpolate(low_sinogram[None,...], size=(720, 720), mode='bilinear', align_corners=False)[0]
+            I_FBP = self.Fan_FBP(low_sinogram)  # [bs, n, h, w] -> [bs, x, y, z]
+            sample_img = I_FBP[8].cpu().numpy()*255
+            resp = cv2.imwrite(f'{self.vis_dir}/FBP.png', sample_img)
+            print(resp)
+            print(low_sinogram.shape)
+            print(I_FBP.shape)
+            quick_evaluation(I_FBP, volume)
+        else:
+            raise NotImplementedError
+        grad_maximum = 1e-5 # the upper bound for the gradient
+        intensity_threshold = 0.001 # the lower bound for intensity
+        fbp_threshold = 0.05 # threshold for the FBP image
+        n_gaussian = 200000 # number of initail gaussians 150K-400K. 
+        max_gaussian = 250000
+        distance_threshold = 0.1 # threshold for neighbor distance
+        radii_coefficient = 0.12 # coefficient for the radii of the gaussians
+        intensity_coefficient = 0.3 # coefficient for the intensity of the gaussians
+        self.volume_shape = I_FBP.shape
+        self.max_gaussian = max_gaussian
+        points = torch.rand(n_gaussian, 3).numpy()
+        colors = torch.rand(n_gaussian, 1).numpy()
+        
+        # n_neighbours = count_neighbors(points,distance_threshold)
+        n_neighbours = count_neighbors_gpu(points, distance_threshold)
+        radii = radii_coefficient / n_neighbours
+        colors = intensity_coefficient * colors
+        
+        colors[colors < intensity_threshold] = intensity_threshold
+
+        self.spatial_lr_scale = spatial_lr_scale
+        fused_point_cloud = torch.tensor(np.asarray(points)).float().cuda()
+        # fused_color = RGB2SH(torch.tensor(np.asarray(colors)).float().cuda())
+        fused_color = torch.tensor(np.asarray(colors)).float().cuda()
+        features = torch.zeros((fused_color.shape[0], 1, (self.max_sh_degree + 1) ** 2)).float().cuda()
+        features[:, :1, 0 ] = fused_color
+        features[:, 1:, 1:] = 0.0
+
+        print("Number of points at initialisation : ", fused_point_cloud.shape[0])
+
+        dist = torch.clamp_min(compute_mean_distance(torch.from_numpy(np.asarray(points)).float().cuda()), 1e-7)
+        scales = torch.log(torch.sqrt(dist))[...,None].repeat(1, 3)
+        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        rots[:, 0] = 1
+
+        opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+
+        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+        self._scaling = nn.Parameter(scales.requires_grad_(True))
+        self._rotation = nn.Parameter(rots.requires_grad_(True))
+        self._opacity = nn.Parameter(opacities.requires_grad_(True))
+        # self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        self.max_radii2D = torch.from_numpy(radii).cuda()
+
+
+    def training_setup(self, training_args):
+        self.percent_dense = training_args.percent_dense
+        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+
+        l = [
+            {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
+            {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
+            {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
+            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
+            {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+        ]
+
+        self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+        self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
+                                                    lr_final=training_args.position_lr_final*self.spatial_lr_scale,
+                                                    lr_delay_mult=training_args.position_lr_delay_mult,
+                                                    max_steps=training_args.position_lr_max_steps)
+        
+    def training_ct_setup(self, training_args):
+        self.percent_dense = training_args.percent_dense
+        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+
+        l = [
+            {'params': [self._xyz], 'lr': 3e-4, "name": "xyz"}, # decay from 2e-4 to 2e-6
+            {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
+            {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
+            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
+            {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+        ]
+
+        self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+        self.xyz_scheduler_args = get_expon_lr_func(lr_init=3e-4,
+                                                    lr_final=3e-5,
+                                                    lr_delay_mult=training_args.position_lr_delay_mult,
+                                                    max_steps=training_args.position_lr_max_steps)
+
+    def update_learning_rate(self, iteration):
+        ''' Learning rate scheduling per step '''
+        for param_group in self.optimizer.param_groups:
+            if param_group["name"] == "xyz":
+                lr = self.xyz_scheduler_args(iteration)
+                param_group['lr'] = lr
+                return lr
+
+    def construct_list_of_attributes(self):
+        l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
+        # All channels except the 3 DC
+        for i in range(self._features_dc.shape[1]*self._features_dc.shape[2]):
+            l.append('f_dc_{}'.format(i))
+        for i in range(self._features_rest.shape[1]*self._features_rest.shape[2]):
+            l.append('f_rest_{}'.format(i))
+        l.append('opacity')
+        for i in range(self._scaling.shape[1]):
+            l.append('scale_{}'.format(i))
+        for i in range(self._rotation.shape[1]):
+            l.append('rot_{}'.format(i))
+        return l
+
+    def save_ply(self, path):
+        mkdir_p(os.path.dirname(path))
+
+        xyz = self._xyz.detach().cpu().numpy()
+        normals = np.zeros_like(xyz)
+        f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        opacities = self._opacity.detach().cpu().numpy()
+        scale = self._scaling.detach().cpu().numpy()
+        rotation = self._rotation.detach().cpu().numpy()
+
+        dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
+
+        elements = np.empty(xyz.shape[0], dtype=dtype_full)
+        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        elements[:] = list(map(tuple, attributes))
+        el = PlyElement.describe(elements, 'vertex')
+        PlyData([el]).write(path)
+
+    def reset_opacity(self):
+        opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
+        optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
+        self._opacity = optimizable_tensors["opacity"]
+        
+    def reset_opacity_ct(self):
+        opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.1))
+        optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
+        self._opacity = optimizable_tensors["opacity"]
+
+
+    def load_ply(self, path):
+        plydata = PlyData.read(path)
+
+        xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
+                        np.asarray(plydata.elements[0]["y"]),
+                        np.asarray(plydata.elements[0]["z"])),  axis=1)
+        opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+
+        features_dc = np.zeros((xyz.shape[0], 3, 1))
+        features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
+        features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"])
+        features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
+
+        extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
+        extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
+        assert len(extra_f_names)==3*(self.max_sh_degree + 1) ** 2 - 3
+        features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
+        for idx, attr_name in enumerate(extra_f_names):
+            features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
+        # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
+        features_extra = features_extra.reshape((features_extra.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
+
+        scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
+        scale_names = sorted(scale_names, key = lambda x: int(x.split('_')[-1]))
+        scales = np.zeros((xyz.shape[0], len(scale_names)))
+        for idx, attr_name in enumerate(scale_names):
+            scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
+
+        rot_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("rot")]
+        rot_names = sorted(rot_names, key = lambda x: int(x.split('_')[-1]))
+        rots = np.zeros((xyz.shape[0], len(rot_names)))
+        for idx, attr_name in enumerate(rot_names):
+            rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
+
+        self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
+        self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
+
+        self.active_sh_degree = self.max_sh_degree
+
+    def replace_tensor_to_optimizer(self, tensor, name):
+        optimizable_tensors = {}
+        for group in self.optimizer.param_groups:
+            if group["name"] == name:
+                stored_state = self.optimizer.state.get(group['params'][0], None)
+                stored_state["exp_avg"] = torch.zeros_like(tensor)
+                stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
+
+                del self.optimizer.state[group['params'][0]]
+                group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
+                self.optimizer.state[group['params'][0]] = stored_state
+
+                optimizable_tensors[group["name"]] = group["params"][0]
+        return optimizable_tensors
+
+    def _prune_optimizer(self, mask):
+        optimizable_tensors = {}
+        for group in self.optimizer.param_groups:
+            stored_state = self.optimizer.state.get(group['params'][0], None)
+            if stored_state is not None:
+                stored_state["exp_avg"] = stored_state["exp_avg"][mask]
+                stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
+
+                del self.optimizer.state[group['params'][0]]
+                group["params"][0] = nn.Parameter((group["params"][0][mask].requires_grad_(True)))
+                self.optimizer.state[group['params'][0]] = stored_state
+
+                optimizable_tensors[group["name"]] = group["params"][0]
+            else:
+                group["params"][0] = nn.Parameter(group["params"][0][mask].requires_grad_(True))
+                optimizable_tensors[group["name"]] = group["params"][0]
+        return optimizable_tensors
+
+    def prune_points(self, mask):
+        valid_points_mask = ~mask
+        optimizable_tensors = self._prune_optimizer(valid_points_mask)
+
+        self._xyz = optimizable_tensors["xyz"]
+        self._features_dc = optimizable_tensors["f_dc"]
+        self._features_rest = optimizable_tensors["f_rest"]
+        self._opacity = optimizable_tensors["opacity"]
+        self._scaling = optimizable_tensors["scaling"]
+        self._rotation = optimizable_tensors["rotation"]
+
+        self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
+
+        self.denom = self.denom[valid_points_mask]
+        self.max_radii2D = self.max_radii2D[valid_points_mask]
+
+    def cat_tensors_to_optimizer(self, tensors_dict):
+        optimizable_tensors = {}
+        for group in self.optimizer.param_groups:
+            assert len(group["params"]) == 1
+            extension_tensor = tensors_dict[group["name"]]
+            stored_state = self.optimizer.state.get(group['params'][0], None)
+            if stored_state is not None:
+
+                stored_state["exp_avg"] = torch.cat((stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0)
+                stored_state["exp_avg_sq"] = torch.cat((stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)), dim=0)
+
+                del self.optimizer.state[group['params'][0]]
+                group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
+                self.optimizer.state[group['params'][0]] = stored_state
+
+                optimizable_tensors[group["name"]] = group["params"][0]
+            else:
+                group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
+                optimizable_tensors[group["name"]] = group["params"][0]
+
+        return optimizable_tensors
+
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation):
+        d = {"xyz": new_xyz,
+        "f_dc": new_features_dc,
+        "f_rest": new_features_rest,
+        "opacity": new_opacities,
+        "scaling" : new_scaling,
+        "rotation" : new_rotation}
+
+        optimizable_tensors = self.cat_tensors_to_optimizer(d)
+        self._xyz = optimizable_tensors["xyz"]
+        self._features_dc = optimizable_tensors["f_dc"]
+        self._features_rest = optimizable_tensors["f_rest"]
+        self._opacity = optimizable_tensors["opacity"]
+        self._scaling = optimizable_tensors["scaling"]
+        self._rotation = optimizable_tensors["rotation"]
+
+        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+ 
+
+    def densify_and_split_ct(self, grads, grad_threshold, scene_extent, N=2, increase_factor=1.1):     
+        n_init_points = self.get_xyz.shape[0]
+        max_gaussian = min(self.max_gaussian, int(n_init_points * increase_factor))
+        available_gaussian = max_gaussian - n_init_points
+        if available_gaussian <= 0:
+            return
+        # Extract points that satisfy the gradient condition
+        padded_grad = torch.zeros((n_init_points), device="cuda")
+        padded_grad[:grads.shape[0]] = grads.squeeze()
+        selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
+        selected_pts_mask = torch.logical_and(selected_pts_mask,
+                                              torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
+        pts_rank = torch.argsort(torch.norm(padded_grad.unsqueeze(1), dim=-1), descending=True)
+        available_gaussian_mask = torch.zeros_like(selected_pts_mask, dtype=torch.bool)
+        available_gaussian_mask[pts_rank[:available_gaussian]] = True
+        selected_pts_mask = torch.logical_and(selected_pts_mask, available_gaussian_mask)
+        split_count = torch.sum(selected_pts_mask).item()
+        stds = self.get_scaling[selected_pts_mask].repeat(N,1)
+        means =torch.zeros((stds.size(0), 3),device="cuda")
+        samples = torch.normal(mean=means, std=stds)
+        rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
+        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
+        new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
+        new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
+        new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
+        new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
+        new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
+
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
+
+        prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
+        self.prune_points(prune_filter)
+        return split_count
+        
+
+    def densify_and_clone_ct(self, grads, grad_threshold, scene_extent, increase_factor=1.1):
+        # Extract points that satisfy the gradient condition
+        current_gaussian = grads.shape[0]
+        max_gaussian = min(self.max_gaussian, int(current_gaussian * increase_factor))
+        available_gaussian = max_gaussian - current_gaussian
+        if available_gaussian <= 0:
+            return
+        selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
+        selected_pts_mask = torch.logical_and(selected_pts_mask,
+                                              torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent) 
+          
+        pts_rank = torch.argsort(torch.norm(grads, dim=-1), descending=True)
+        available_gaussian_mask = torch.zeros_like(selected_pts_mask, dtype=torch.bool)
+        available_gaussian_mask[pts_rank[:available_gaussian]] = True
+        selected_pts_mask = torch.logical_and(selected_pts_mask, available_gaussian_mask)
+        clone_count = torch.sum(selected_pts_mask).item()
+        indices = torch.where(selected_pts_mask)[0]
+        self._features_dc[indices] /= 2
+        self._features_rest[indices] /= 2
+        new_xyz = self._xyz[selected_pts_mask]
+        new_features_dc = self._features_dc[selected_pts_mask] 
+        new_features_rest = self._features_rest[selected_pts_mask] 
+        new_opacities = self._opacity[selected_pts_mask]
+        new_scaling = self._scaling[selected_pts_mask]
+        new_rotation = self._rotation[selected_pts_mask]
+
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
+        return clone_count
+        
+        
+    def densify_and_prune_ct(self, max_grad, extent):
+        grads = self.xyz_gradient_accum / self.denom
+        grads[grads.isnan()] = 0.0
+        prune_mask = torch.where(torch.norm(grads, dim=1) <= 1e-7, True, False)
+        # big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+        # prune_mask = torch.logical_or(prune_mask, big_points_ws)
+        prune_count = torch.sum(prune_mask).item()
+        self.prune_points(prune_mask)
+        grads = self.xyz_gradient_accum / self.denom
+        grads[grads.isnan()] = 0.0
+        clone_count = self.densify_and_clone_ct(grads, max_grad, extent)
+        split_count = self.densify_and_split_ct(grads, max_grad, extent)
+        torch.cuda.empty_cache()
+        print(f"Prune {prune_count} Gaussians, Clone {clone_count} Gaussians, Split {split_count} Gaussians")
+    
+
+    def add_densification_stats(self, viewspace_point_tensor, update_filter):
+        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
+        self.denom[update_filter] += 1
+```
+
+### cone_beam_svct.py
+```
+import os
+import time
+import torch
+import cv2
+import numpy as np
+import tigre
+from torch.autograd import Function
+from utils.loss_utils import l1_loss, ssim
+import sys
+from CT import CTGeometry, DGR
+from utils.general_utils import safe_state
+import uuid
+import torch.nn.functional as F
+from tqdm import tqdm
+from utils.image_utils import psnr
+from argparse import ArgumentParser, Namespace
+from params import ModelParams, PipelineParams, OptimizationParams
+from utils.utils import quick_evaluation, fast_volume_reconstruction, total_variation_loss, evaluation_3d
+
+
+class TigreAxFunction(Function):
+    @staticmethod
+    def forward(ctx, input_tensor, geometry, angles):
+        # Convert PyTorch tensor to numpy ndarray
+        input_np = input_tensor.detach().cpu().numpy()
+        
+        # Perform the tigre.Ax operation
+        result_np = tigre.Ax(input_np, geometry, angles)
+        
+        # Store context for backward pass
+        ctx.save_for_backward(input_tensor)
+        ctx.geometry = geometry
+        ctx.angles = angles
+        
+        # Convert the result back to a tensor
+        result_tensor = torch.tensor(result_np, device=input_tensor.device)
+        return result_tensor
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input_tensor, = ctx.saved_tensors
+        
+        # Get the geometry and angles for the backward operation
+        geometry = ctx.geometry
+        angles = ctx.angles
+        
+        # Convert grad_output to numpy for tigre.At
+        grad_output_np = grad_output.cpu().numpy()
+        
+        # Compute the backward operation using tigre.At
+        grad_input_np = tigre.Atb(grad_output_np, geometry, angles)
+        
+        # Convert the result back to a tensor
+        grad_input = torch.tensor(grad_input_np, device=input_tensor.device)
+        
+        return grad_input, None, None  # None for geometry and angles as they are not tensors
+
+
+# Define a function for ease of use
+def tigre_forward_projection(volume, geo, angles):
+    return TigreAxFunction.apply(volume, geo, angles)
+
+
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+    first_iter = 0
+    gaussians = DGR(dataset.sh_degree)
+    scene = CTGeometry(dataset, gaussians, mode='cbct')
+    gaussians.training_ct_setup(opt)
+    if checkpoint:
+        (model_params, first_iter) = torch.load(checkpoint)
+        gaussians.restore(model_params, opt)
+
+    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+
+    iter_start = torch.cuda.Event(enable_timing = True)
+    iter_end = torch.cuda.Event(enable_timing = True)
+
+    viewpoint_stack = None
+    ema_loss_for_log = 0.0
+    progress_bar = tqdm(range(first_iter, max_iter), desc="Training progress")
+    first_iter += 1
+    save_flag = False
+    for iteration in tqdm(range(first_iter, max_iter + 1)):        
+        iter_start.record()
+        gaussians.update_learning_rate(iteration)
+        # Every 1000 its we increase the levels of SH up to a maximum degree
+        if iteration % 1000 == 0:
+            gaussians.oneupSHdegree()
+        
+        reconstruct_volume, impact_shape, std = fast_volume_reconstruction(gaussians, gaussians.volume_shape)
+        st = time.time()
+        projs = tigre_forward_projection(reconstruct_volume, gaussians.geo, gaussians.angles)
+        # print(time.time() - st)
+        worldspace_points = gaussians.get_xyz
+        radii = gaussians.max_radii2D
+        # compute the l2_loss between projs and gaussians.projs
+        # l2_loss = torch.nn.MSELoss()
+        # loss = l2_loss(projs, gaussians.gt_projs.cuda())
+        Ll1 = l1_loss(projs, gaussians.gt_projs)
+        volume_tv_loss = total_variation_loss(reconstruct_volume)
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(projs, gaussians.gt_projs.cuda())) + volume_tv_loss
+        # loss = Ll1
+        # loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(projs, gaussians.gt_projs.cuda()))
+        loss.backward()
+        iter_end.record()
+        with torch.no_grad():
+            # Progress bar
+            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            if iteration % 1000 == 0:
+                if not save_flag:
+                    tb_writer = prepare_output_and_logger(dataset)
+                    scene.model_path = dataset.model_path
+                    save_flag = True
+                    # save reconstruct_volume with numpy
+                np.save(os.path.join(dataset.model_path, "reconstruct_volume_%s.npy"%iteration), reconstruct_volume.cpu().detach().numpy())
+            if iteration % 10 == 0 or iteration == 1:
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+                # progress_bar.set_postfix({"Loss": f"{loss:.{7}f}"})
+                progress_bar.update(10)
+                print('Iteration:', iteration, 'Gaussian count', gaussians.get_xyz.shape[0], 'Box Size', impact_shape.cpu().numpy().tolist(), 'loss', format(loss.item(), '.4f'),  end=', ')
+                quick_evaluation(reconstruct_volume.detach(), gaussians.gt_image)
+            if iteration % 100 == 0 or iteration == 1:
+                evaluation_3d(reconstruct_volume, gaussians.gt_image)
+            if iteration == max_iter:
+                progress_bar.close()
+
+            # # Log and save
+            # training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
+            if (iteration in saving_iterations):
+                if not save_flag:
+                    tb_writer = prepare_output_and_logger(dataset)
+                    scene.model_path = dataset.model_path
+                    save_flag = True
+                print("\n[ITER {}] Saving Gaussians".format(iteration))
+                scene.save(iteration)
+
+            # Densification
+            if True:
+                # Keep track of max radii in image-space for pruning
+                visibility_filter = torch.ones(gaussians.get_xyz.shape[0],dtype = torch.bool)
+                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                gaussians.add_densification_stats(worldspace_points, visibility_filter)
+                if iteration >= 100 and iteration % 100 == 0:
+                    gaussians.densify_and_prune_ct(opt.densify_grad_threshold, gaussians.scene_extent)
+                
+                if True:
+                    sample_img = reconstruct_volume[reconstruct_volume.shape[0]//2].cpu().numpy()
+                    # save sample_img as png to 'vis' directory
+                    if not os.path.exists(gaussians.vis_dir):
+                        os.makedirs(gaussians.vis_dir)
+                    resp = cv2.imwrite(os.path.join(gaussians.vis_dir, "sample_%s.png"%iteration), (sample_img*255).astype(np.uint8))
+                    
+                # if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                #     gaussians.reset_opacity_ct()
+            # Optimizer step
+            if iteration < max_iter:
+                gaussians.optimizer.step()
+                gaussians.optimizer.zero_grad(set_to_none = True)
+
+            if (iteration in checkpoint_iterations):
+                print("\n[ITER {}] Saving Checkpoint".format(iteration))
+                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+
+def prepare_output_and_logger(args):    
+    if not args.model_path:
+        if os.getenv('OAR_JOB_ID'):
+            unique_str=os.getenv('OAR_JOB_ID')
+        else:
+            unique_str = str(uuid.uuid4())
+        args.model_path = os.path.join("./output/", unique_str[0:10])
+        
+    # Set up output folder
+    print("Output folder: {}".format(args.model_path))
+    os.makedirs(args.model_path, exist_ok = True)
+    with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
+        cfg_log_f.write(str(Namespace(**vars(args))))
+
+    # # Create Tensorboard writer
+    # tb_writer = None
+    # if TENSORBOARD_FOUND:
+    #     tb_writer = SummaryWriter(args.model_path)
+    # else:
+    #     print("Tensorboard not available: not logging progress")
+    # return tb_writer
+
+def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : CTGeometry, renderFunc, renderArgs):
+    if tb_writer:
+        tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
+        tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
+        tb_writer.add_scalar('iter_time', elapsed, iteration)
+
+    # Report test and samples of training set
+    if iteration in testing_iterations:
+        torch.cuda.empty_cache()
+        validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
+                              {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
+
+        for config in validation_configs:
+            if config['cameras'] and len(config['cameras']) > 0:
+                l1_test = 0.0
+                psnr_test = 0.0
+                for idx, viewpoint in enumerate(config['cameras']):
+                    image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
+                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                    if tb_writer and (idx < 5):
+                        tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
+                        if iteration == testing_iterations[0]:
+                            tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
+                    l1_test += l1_loss(image, gt_image).mean().double()
+                    psnr_test += psnr(image, gt_image).mean().double()
+                psnr_test /= len(config['cameras'])
+                l1_test /= len(config['cameras'])          
+                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                if tb_writer:
+                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
+                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
+
+        if tb_writer:
+            tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
+            tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
+        torch.cuda.empty_cache()
+
+if __name__ == "__main__":
+    # Set up command line argument parser
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+    
+    
+    parser = ArgumentParser(description="Training script parameters")
+    lp = ModelParams(parser)
+    op = OptimizationParams(parser)
+    pp = PipelineParams(parser)
+    parser.add_argument('--ip', type=str, default="127.0.0.1")
+    parser.add_argument('--port', type=int, default=6009)
+    parser.add_argument('--debug_from', type=int, default=-1)
+    parser.add_argument('--detect_anomaly', action='store_true', default=False)
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[4_000, 10_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[4_000, 10_000])
+    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
+    parser.add_argument("--start_checkpoint", type=str, default = None)
+    args = parser.parse_args(sys.argv[1:])
+    args.save_iterations.append(args.iterations)
+    
+    print("Optimizing " + args.model_path)
+    max_iter = 1000
+    # Initialize system state (RNG)
+    safe_state(args.quiet)
+
+    # Start GUI server, configure and run training
+    # network_gui.init(args.ip, args.port)
+    torch.autograd.set_detect_anomaly(args.detect_anomaly)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+
+    # All done
+    print("\nTraining complete.")
+```
+
+### fan_beam_lact.py
+```
+import os
+import time
+import torch
+import cv2
+import numpy as np
+from random import randint
+from utils.loss_utils import l1_loss, ssim
+import sys
+from CT import CTGeometry, DGR
+from utils.general_utils import safe_state
+import uuid
+import torch.nn.functional as F
+from tqdm import tqdm
+from utils.image_utils import psnr
+from argparse import ArgumentParser, Namespace
+from params import ModelParams, PipelineParams, OptimizationParams
+from utils.utils import quick_evaluation, fast_volume_reconstruction, total_variation_loss, evaluation_3d
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_FOUND = True
+except ImportError:
+    TENSORBOARD_FOUND = False
+
+
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+    first_iter = 0
+    gaussians = DGR(dataset.sh_degree)
+    scene = CTGeometry(dataset, gaussians, mode='lact')
+    gaussians.training_ct_setup(opt)
+    if checkpoint:
+        (model_params, first_iter) = torch.load(checkpoint)
+        gaussians.restore(model_params, opt)
+
+    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+
+    iter_start = torch.cuda.Event(enable_timing = True)
+    iter_end = torch.cuda.Event(enable_timing = True)
+
+    viewpoint_stack = None
+    ema_loss_for_log = 0.0
+    progress_bar = tqdm(range(first_iter, max_iter), desc="Training progress")
+    first_iter += 1
+    save_flag = False
+    for iteration in tqdm(range(first_iter, max_iter + 1)):        
+        iter_start.record()
+        gaussians.update_learning_rate(iteration)
+        # Every 1000 its we increase the levels of SH up to a maximum degree
+        if iteration % 1000 == 0:
+            gaussians.oneupSHdegree()
+        
+        reconstruct_volume, impact_shape, std = fast_volume_reconstruction(gaussians, gaussians.volume_shape)
+        st = time.time()
+        projs = gaussians.Fan_ray_trafo(reconstruct_volume)
+        # print(time.time() - st)
+        worldspace_points = gaussians.get_xyz
+        radii = gaussians.max_radii2D
+        Ll1 = l1_loss(projs[:, :projs.shape[1]//2], gaussians.gt_projs[:, :projs.shape[1]//2])
+        volume_tv_loss = total_variation_loss(reconstruct_volume)
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(projs, gaussians.gt_projs.cuda())) + volume_tv_loss
+        # loss = Ll1
+        # loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(projs, gaussians.gt_projs.cuda()))
+        loss.backward()
+        iter_end.record()
+        with torch.no_grad():
+            # Progress bar
+            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            if iteration % 1000 == 0:
+                if not save_flag:
+                    tb_writer = prepare_output_and_logger(dataset)
+                    scene.model_path = dataset.model_path
+                    save_flag = True
+                    # save reconstruct_volume with numpy
+                np.save(os.path.join(dataset.model_path, "reconstruct_volume_%s.npy"%iteration), reconstruct_volume.cpu().detach().numpy())
+            if iteration % 10 == 0 or iteration == 1:
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+                # progress_bar.set_postfix({"Loss": f"{loss:.{7}f}"})
+                progress_bar.update(10)
+                print('Iteration:', iteration, 'Gaussian count', gaussians.get_xyz.shape[0], 'Box Size', impact_shape.cpu().numpy().tolist(), 'loss', format(loss.item(), '.2f'),  end=', ')
+                quick_evaluation(reconstruct_volume.detach(), gaussians.gt_image)
+            if iteration % 100 == 0 or iteration == 1:
+                evaluation_3d(reconstruct_volume, gaussians.gt_image)
+            if iteration == max_iter:
+                progress_bar.close()
+
+            # # Log and save
+            # training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
+            if (iteration in saving_iterations):
+                if not save_flag:
+                    tb_writer = prepare_output_and_logger(dataset)
+                    scene.model_path = dataset.model_path
+                    save_flag = True
+                print("\n[ITER {}] Saving Gaussians".format(iteration))
+                scene.save(iteration)
+
+            # Densification
+            if True:
+                # Keep track of max radii in image-space for pruning
+                visibility_filter = torch.ones(gaussians.get_xyz.shape[0],dtype = torch.bool)
+                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                gaussians.add_densification_stats(worldspace_points, visibility_filter)
+                if iteration >= 100 and iteration % 100 == 0:
+                    gaussians.densify_and_prune_ct(opt.densify_grad_threshold, gaussians.scene_extent)
+                
+                if True:
+                    sample_img = reconstruct_volume[8].cpu().numpy()
+                    # save sample_img as png to 'vis' directory
+                    if not os.path.exists(gaussians.vis_dir):
+                        os.makedirs(gaussians.vis_dir)
+                    resp = cv2.imwrite(os.path.join(gaussians.vis_dir, "sample_%s.png"%iteration), (sample_img*255).astype(np.uint8))
+                    
+                # if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                #     gaussians.reset_opacity_ct()
+            # Optimizer step
+            if iteration < max_iter:
+                gaussians.optimizer.step()
+                gaussians.optimizer.zero_grad(set_to_none = True)
+
+            if (iteration in checkpoint_iterations):
+                print("\n[ITER {}] Saving Checkpoint".format(iteration))
+                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+
+def prepare_output_and_logger(args):    
+    if not args.model_path:
+        if os.getenv('OAR_JOB_ID'):
+            unique_str=os.getenv('OAR_JOB_ID')
+        else:
+            unique_str = str(uuid.uuid4())
+        args.model_path = os.path.join("./output/", unique_str[0:10])
+        
+    # Set up output folder
+    print("Output folder: {}".format(args.model_path))
+    os.makedirs(args.model_path, exist_ok = True)
+    with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
+        cfg_log_f.write(str(Namespace(**vars(args))))
+
+    # # Create Tensorboard writer
+    # tb_writer = None
+    # if TENSORBOARD_FOUND:
+    #     tb_writer = SummaryWriter(args.model_path)
+    # else:
+    #     print("Tensorboard not available: not logging progress")
+    # return tb_writer
+
+def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : CTGeometry, renderFunc, renderArgs):
+    if tb_writer:
+        tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
+        tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
+        tb_writer.add_scalar('iter_time', elapsed, iteration)
+
+    # Report test and samples of training set
+    if iteration in testing_iterations:
+        torch.cuda.empty_cache()
+        validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
+                              {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
+
+        for config in validation_configs:
+            if config['cameras'] and len(config['cameras']) > 0:
+                l1_test = 0.0
+                psnr_test = 0.0
+                for idx, viewpoint in enumerate(config['cameras']):
+                    image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
+                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                    if tb_writer and (idx < 5):
+                        tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
+                        if iteration == testing_iterations[0]:
+                            tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
+                    l1_test += l1_loss(image, gt_image).mean().double()
+                    psnr_test += psnr(image, gt_image).mean().double()
+                psnr_test /= len(config['cameras'])
+                l1_test /= len(config['cameras'])          
+                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                if tb_writer:
+                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
+                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
+
+        if tb_writer:
+            tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
+            tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
+        torch.cuda.empty_cache()
+
+if __name__ == "__main__":
+    # Set up command line argument parser
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    torch.cuda.set_device(0)
+    parser = ArgumentParser(description="Training script parameters")
+    lp = ModelParams(parser)
+    op = OptimizationParams(parser)
+    pp = PipelineParams(parser)
+    parser.add_argument('--ip', type=str, default="127.0.0.1")
+    parser.add_argument('--port', type=int, default=6009)
+    parser.add_argument('--debug_from', type=int, default=-1)
+    parser.add_argument('--detect_anomaly', action='store_true', default=False)
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[4_000, 10_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[4_000, 10_000])
+    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
+    parser.add_argument("--start_checkpoint", type=str, default = None)
+    args = parser.parse_args(sys.argv[1:])
+    args.save_iterations.append(args.iterations)
+    
+    print("Optimizing " + args.model_path)
+    max_iter = 10000
+    # Initialize system state (RNG)
+    safe_state(args.quiet)
+
+    # Start GUI server, configure and run training
+    # network_gui.init(args.ip, args.port)
+    torch.autograd.set_detect_anomaly(args.detect_anomaly)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+
+    # All done
+    print("\nTraining complete.")
+```
+
+### fan_beam_svct.py
+```
+import os
+import time
+import torch
+import cv2
+import numpy as np
+from random import randint
+from utils.loss_utils import l1_loss, ssim
+import sys
+from CT import CTGeometry, DGR
+from utils.general_utils import safe_state
+import uuid
+import torch.nn.functional as F
+from tqdm import tqdm
+from utils.image_utils import psnr
+from argparse import ArgumentParser, Namespace
+from params import ModelParams, PipelineParams, OptimizationParams
+from utils.utils import quick_evaluation, fast_volume_reconstruction, total_variation_loss, evaluation_3d
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_FOUND = True
+except ImportError:
+    TENSORBOARD_FOUND = False
+
+
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+    first_iter = 0
+    gaussians = DGR(dataset.sh_degree)
+    scene = CTGeometry(dataset, gaussians)
+    gaussians.training_ct_setup(opt)
+    if checkpoint:
+        (model_params, first_iter) = torch.load(checkpoint)
+        gaussians.restore(model_params, opt)
+
+    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+
+    iter_start = torch.cuda.Event(enable_timing = True)
+    iter_end = torch.cuda.Event(enable_timing = True)
+
+    viewpoint_stack = None
+    ema_loss_for_log = 0.0
+    progress_bar = tqdm(range(first_iter, max_iter), desc="Training progress")
+    first_iter += 1
+    save_flag = False
+    for iteration in tqdm(range(first_iter, max_iter + 1)):        
+        iter_start.record()
+        gaussians.update_learning_rate(iteration)
+        # Every 1000 its we increase the levels of SH up to a maximum degree
+        if iteration % 1000 == 0:
+            gaussians.oneupSHdegree()
+        
+        reconstruct_volume, impact_shape, std = fast_volume_reconstruction(gaussians, gaussians.volume_shape)
+        st = time.time()
+        projs = gaussians.Fan_ray_trafo(reconstruct_volume)
+        # print(time.time() - st)
+        worldspace_points = gaussians.get_xyz
+        radii = gaussians.max_radii2D
+        # compute the l2_loss between projs and gaussians.projs
+        # l2_loss = torch.nn.MSELoss()
+        # loss = l2_loss(projs, gaussians.gt_projs.cuda())
+        Ll1 = l1_loss(projs, gaussians.gt_projs)
+        volume_tv_loss = total_variation_loss(reconstruct_volume)
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(projs, gaussians.gt_projs.cuda())) + volume_tv_loss
+        # loss = Ll1
+        # loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(projs, gaussians.gt_projs.cuda()))
+        loss.backward()
+        iter_end.record()
+        with torch.no_grad():
+            # Progress bar
+            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            if iteration % 1000 == 0:
+                if not save_flag:
+                    tb_writer = prepare_output_and_logger(dataset)
+                    scene.model_path = dataset.model_path
+                    save_flag = True
+                    # save reconstruct_volume with numpy
+                np.save(os.path.join(dataset.model_path, "reconstruct_volume_%s.npy"%iteration), reconstruct_volume.cpu().detach().numpy())
+            if iteration % 10 == 0 or iteration == 1:
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+                # progress_bar.set_postfix({"Loss": f"{loss:.{7}f}"})
+                progress_bar.update(10)
+                print('Iteration:', iteration, 'Gaussian count', gaussians.get_xyz.shape[0], 'Box Size', impact_shape.cpu().numpy().tolist(), 'loss', format(loss.item(), '.2f'),  end=', ')
+                quick_evaluation(reconstruct_volume.detach(), gaussians.gt_image)
+            if iteration % 100 == 0 or iteration == 1:
+                evaluation_3d(reconstruct_volume, gaussians.gt_image)
+            if iteration == max_iter:
+                progress_bar.close()
+
+            # # Log and save
+            # training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
+            if (iteration in saving_iterations):
+                if not save_flag:
+                    tb_writer = prepare_output_and_logger(dataset)
+                    scene.model_path = dataset.model_path
+                    save_flag = True
+                print("\n[ITER {}] Saving Gaussians".format(iteration))
+                scene.save(iteration)
+
+            # Densification
+            if True:
+                # Keep track of max radii in image-space for pruning
+                visibility_filter = torch.ones(gaussians.get_xyz.shape[0],dtype = torch.bool)
+                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                gaussians.add_densification_stats(worldspace_points, visibility_filter)
+                if iteration >= 100 and iteration % 100 == 0:
+                    gaussians.densify_and_prune_ct(opt.densify_grad_threshold, gaussians.scene_extent)
+                
+                if True:
+                    sample_img = reconstruct_volume[8].cpu().numpy()
+                    # save sample_img as png to 'vis' directory
+                    if not os.path.exists(gaussians.vis_dir):
+                        os.makedirs(gaussians.vis_dir)
+                    resp = cv2.imwrite(os.path.join(gaussians.vis_dir, "sample_%s.png"%iteration), (sample_img*255).astype(np.uint8))
+                    
+                # if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                #     gaussians.reset_opacity_ct()
+            # Optimizer step
+            if iteration < max_iter:
+                gaussians.optimizer.step()
+                gaussians.optimizer.zero_grad(set_to_none = True)
+
+            if (iteration in checkpoint_iterations):
+                print("\n[ITER {}] Saving Checkpoint".format(iteration))
+                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+
+def prepare_output_and_logger(args):    
+    if not args.model_path:
+        if os.getenv('OAR_JOB_ID'):
+            unique_str=os.getenv('OAR_JOB_ID')
+        else:
+            unique_str = str(uuid.uuid4())
+        args.model_path = os.path.join("./output/", unique_str[0:10])
+        
+    # Set up output folder
+    print("Output folder: {}".format(args.model_path))
+    os.makedirs(args.model_path, exist_ok = True)
+    with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
+        cfg_log_f.write(str(Namespace(**vars(args))))
+
+    # # Create Tensorboard writer
+    # tb_writer = None
+    # if TENSORBOARD_FOUND:
+    #     tb_writer = SummaryWriter(args.model_path)
+    # else:
+    #     print("Tensorboard not available: not logging progress")
+    # return tb_writer
+
+def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : CTGeometry, renderFunc, renderArgs):
+    if tb_writer:
+        tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
+        tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
+        tb_writer.add_scalar('iter_time', elapsed, iteration)
+
+    # Report test and samples of training set
+    if iteration in testing_iterations:
+        torch.cuda.empty_cache()
+        validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
+                              {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
+
+        for config in validation_configs:
+            if config['cameras'] and len(config['cameras']) > 0:
+                l1_test = 0.0
+                psnr_test = 0.0
+                for idx, viewpoint in enumerate(config['cameras']):
+                    image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
+                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                    if tb_writer and (idx < 5):
+                        tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
+                        if iteration == testing_iterations[0]:
+                            tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
+                    l1_test += l1_loss(image, gt_image).mean().double()
+                    psnr_test += psnr(image, gt_image).mean().double()
+                psnr_test /= len(config['cameras'])
+                l1_test /= len(config['cameras'])          
+                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                if tb_writer:
+                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
+                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
+
+        if tb_writer:
+            tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
+            tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
+        torch.cuda.empty_cache()
+
+if __name__ == "__main__":
+    # Set up command line argument parser
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+    torch.cuda.set_device(1)
+    parser = ArgumentParser(description="Training script parameters")
+    lp = ModelParams(parser)
+    op = OptimizationParams(parser)
+    pp = PipelineParams(parser)
+    parser.add_argument('--ip', type=str, default="127.0.0.1")
+    parser.add_argument('--port', type=int, default=6009)
+    parser.add_argument('--debug_from', type=int, default=-1)
+    parser.add_argument('--detect_anomaly', action='store_true', default=False)
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[4_000, 10_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[4_000, 10_000])
+    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
+    parser.add_argument("--start_checkpoint", type=str, default = None)
+    args = parser.parse_args(sys.argv[1:])
+    args.save_iterations.append(args.iterations)
+    
+    print("Optimizing " + args.model_path)
+    max_iter = 10000
+    # Initialize system state (RNG)
+    safe_state(args.quiet)
+
+    # Start GUI server, configure and run training
+    # network_gui.init(args.ip, args.port)
+    torch.autograd.set_detect_anomaly(args.detect_anomaly)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+
+    # All done
+    print("\nTraining complete.")
+```
+
+### CT/__init__.py
+```
+#
+# Copyright (C) 2023, Inria
+# GRAPHDECO research group, https://team.inria.fr/graphdeco
+# All rights reserved.
+#
+# This software is free for non-commercial, research and evaluation use 
+# under the terms of the LICENSE.md file.
+#
+# For inquiries contact  george.drettakis@inria.fr
+#
+
+import os
+import random
+import json
+from DGR import DGR
+from params import ModelParams
+
+
+class CTGeometry:
+
+    gaussians : DGR
+
+    def __init__(self, args : ModelParams, gaussians : DGR, load_iteration=None, shuffle=True, resolution_scales=[1.0], mode='svct'):
+        """b
+        :param path: Path to colmap scene main folder.
+        """
+        assert mode in ['svct', 'lact', 'cbct']
+        self.model_path = args.model_path
+        self.source_path = args.source_path
+        self.loaded_iter = None
+        self.gaussians = gaussians
+
+        if self.loaded_iter:
+            self.gaussians.load_ply(os.path.join(self.model_path,
+                                                           "point_cloud",
+                                                           "iteration_" + str(self.loaded_iter),
+                                                           "point_cloud.ply"))
+        else:
+            if mode == 'svct':
+                self.gaussians.create_from_svct(self.source_path, None)
+            elif mode == 'lact':
+                self.gaussians.create_from_lact(self.source_path, None)
+            elif mode == 'cbct':
+                self.gaussians.create_from_svct(self.source_path, process='tigre')
+
+    def save(self, iteration):
+        point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
+        self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
+
+    def getTrainCameras(self, scale=1.0):
+        return self.train_cameras[scale]
+
+    def getTestCameras(self, scale=1.0):
+        return self.test_cameras[scale]
+```
+
+### CT/dataset_readers.py
+```
+#
+# Copyright (C) 2023, Inria
+# GRAPHDECO research group, https://team.inria.fr/graphdeco
+# All rights reserved.
+#
+# This software is free for non-commercial, research and evaluation use 
+# under the terms of the LICENSE.md file.
+#
+# For inquiries contact  george.drettakis@inria.fr
+#
+
+import os
+import sys
+from PIL import Image
+from typing import NamedTuple
+from utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
+import numpy as np
+import json
+from pathlib import Path
+from plyfile import PlyData, PlyElement
+from utils.sh_utils import SH2RGB
+from DGR import BasicPointCloud
+
+class CameraInfo(NamedTuple):
+    uid: int
+    R: np.array
+    T: np.array
+    FovY: np.array
+    FovX: np.array
+    image: np.array
+    image_path: str
+    image_name: str
+    width: int
+    height: int
+
+class SceneInfo(NamedTuple):
+    point_cloud: BasicPointCloud
+    train_cameras: list
+    test_cameras: list
+    nerf_normalization: dict
+    ply_path: str
+
+def getNerfppNorm(cam_info):
+    def get_center_and_diag(cam_centers):
+        cam_centers = np.hstack(cam_centers)
+        avg_cam_center = np.mean(cam_centers, axis=1, keepdims=True)
+        center = avg_cam_center
+        dist = np.linalg.norm(cam_centers - center, axis=0, keepdims=True)
+        diagonal = np.max(dist)
+        return center.flatten(), diagonal
+
+    cam_centers = []
+
+    for cam in cam_info:
+        W2C = getWorld2View2(cam.R, cam.T)
+        C2W = np.linalg.inv(W2C)
+        cam_centers.append(C2W[:3, 3:4])
+
+    center, diagonal = get_center_and_diag(cam_centers)
+    radius = diagonal * 1.1
+
+    translate = -center
+
+    return {"translate": translate, "radius": radius}
+
+def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
+    cam_infos = []
+    for idx, key in enumerate(cam_extrinsics):
+        sys.stdout.write('\r')
+        # the exact output you're looking for:
+        sys.stdout.write("Reading camera {}/{}".format(idx+1, len(cam_extrinsics)))
+        sys.stdout.flush()
+
+        extr = cam_extrinsics[key]
+        intr = cam_intrinsics[extr.camera_id]
+        height = intr.height
+        width = intr.width
+
+        uid = intr.id
+        R = np.transpose(qvec2rotmat(extr.qvec))
+        T = np.array(extr.tvec)
+
+        if intr.model=="SIMPLE_PINHOLE":
+            focal_length_x = intr.params[0]
+            FovY = focal2fov(focal_length_x, height)
+            FovX = focal2fov(focal_length_x, width)
+        elif intr.model=="PINHOLE":
+            focal_length_x = intr.params[0]
+            focal_length_y = intr.params[1]
+            FovY = focal2fov(focal_length_y, height)
+            FovX = focal2fov(focal_length_x, width)
+        else:
+            assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
+
+        image_path = os.path.join(images_folder, os.path.basename(extr.name))
+        image_name = os.path.basename(image_path).split(".")[0]
+        image = Image.open(image_path)
+
+        cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
+                              image_path=image_path, image_name=image_name, width=width, height=height)
+        cam_infos.append(cam_info)
+    sys.stdout.write('\n')
+    return cam_infos
+
+def fetchPly(path):
+    plydata = PlyData.read(path)
+    vertices = plydata['vertex']
+    positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
+    colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
+    normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+    return BasicPointCloud(points=positions, colors=colors, normals=normals)
+
+def storePly(path, xyz, rgb):
+    # Define the dtype for the structured array
+    dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
+            ('nx', 'f4'), ('ny', 'f4'), ('nz', 'f4'),
+            ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')]
+    
+    normals = np.zeros_like(xyz)
+
+    elements = np.empty(xyz.shape[0], dtype=dtype)
+    attributes = np.concatenate((xyz, normals, rgb), axis=1)
+    elements[:] = list(map(tuple, attributes))
+
+    # Create the PlyData object and write to file
+    vertex_element = PlyElement.describe(elements, 'vertex')
+    ply_data = PlyData([vertex_element])
+    ply_data.write(path)
+
+def readColmapSceneInfo(path, images, eval, llffhold=8):
+    try:
+        cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
+        cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
+        cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)
+        cam_intrinsics = read_intrinsics_binary(cameras_intrinsic_file)
+    except:
+        cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.txt")
+        cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.txt")
+        cam_extrinsics = read_extrinsics_text(cameras_extrinsic_file)
+        cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
+
+    reading_dir = "images" if images == None else images
+    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir))
+    cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
+
+    if eval:
+        train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
+        test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
+    else:
+        train_cam_infos = cam_infos
+        test_cam_infos = []
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = os.path.join(path, "sparse/0/points3D.ply")
+    bin_path = os.path.join(path, "sparse/0/points3D.bin")
+    txt_path = os.path.join(path, "sparse/0/points3D.txt")
+    if not os.path.exists(ply_path):
+        print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
+        try:
+            xyz, rgb, _ = read_points3D_binary(bin_path)
+        except:
+            xyz, rgb, _ = read_points3D_text(txt_path)
+        storePly(ply_path, xyz, rgb)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path)
+    return scene_info
+
+def readCamerasFromTransforms(path, transformsfile, white_background, extension=".png"):
+    cam_infos = []
+
+    with open(os.path.join(path, transformsfile)) as json_file:
+        contents = json.load(json_file)
+        fovx = contents["camera_angle_x"]
+
+        frames = contents["frames"]
+        for idx, frame in enumerate(frames):
+            cam_name = os.path.join(path, frame["file_path"] + extension)
+
+            # NeRF 'transform_matrix' is a camera-to-world transform
+            c2w = np.array(frame["transform_matrix"])
+            # change from OpenGL/Blender camera axes (Y up, Z back) to COLMAP (Y down, Z forward)
+            c2w[:3, 1:3] *= -1
+
+            # get the world-to-camera transform and set R, T
+            w2c = np.linalg.inv(c2w)
+            R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
+            T = w2c[:3, 3]
+
+            image_path = os.path.join(path, cam_name)
+            image_name = Path(cam_name).stem
+            image = Image.open(image_path)
+
+            im_data = np.array(image.convert("RGBA"))
+
+            bg = np.array([1,1,1]) if white_background else np.array([0, 0, 0])
+
+            norm_data = im_data / 255.0
+            arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
+            image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
+
+            fovy = focal2fov(fov2focal(fovx, image.size[0]), image.size[1])
+            FovY = fovy 
+            FovX = fovx
+
+            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
+                            image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1]))
+            
+    return cam_infos
+
+def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
+    print("Reading Training Transforms")
+    train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", white_background, extension)
+    print("Reading Test Transforms")
+    test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json", white_background, extension)
+    
+    if not eval:
+        train_cam_infos.extend(test_cam_infos)
+        test_cam_infos = []
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = os.path.join(path, "points3d.ply")
+    if not os.path.exists(ply_path):
+        # Since this data set has no colmap data, we start with random points
+        num_pts = 100_000
+        print(f"Generating random point cloud ({num_pts})...")
+        
+        # We create random points inside the bounds of the synthetic Blender scenes
+        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path)
+    return scene_info
+
+sceneLoadTypeCallbacks = {
+    "Colmap": readColmapSceneInfo,
+    "Blender" : readNerfSyntheticInfo
+}
+```
+
+### params/__init__.py
+```
+#
+# Copyright (C) 2023, Inria
+# GRAPHDECO research group, https://team.inria.fr/graphdeco
+# All rights reserved.
+#
+# This software is free for non-commercial, research and evaluation use 
+# under the terms of the LICENSE.md file.
+#
+# For inquiries contact  george.drettakis@inria.fr
+#
+
+from argparse import ArgumentParser, Namespace
+import sys
+import os
+
+class GroupParams:
+    pass
+
+class ParamGroup:
+    def __init__(self, parser: ArgumentParser, name : str, fill_none = False):
+        group = parser.add_argument_group(name)
+        for key, value in vars(self).items():
+            shorthand = False
+            if key.startswith("_"):
+                shorthand = True
+                key = key[1:]
+            t = type(value)
+            value = value if not fill_none else None 
+            if shorthand:
+                if t == bool:
+                    group.add_argument("--" + key, ("-" + key[0:1]), default=value, action="store_true")
+                else:
+                    group.add_argument("--" + key, ("-" + key[0:1]), default=value, type=t)
+            else:
+                if t == bool:
+                    group.add_argument("--" + key, default=value, action="store_true")
+                else:
+                    group.add_argument("--" + key, default=value, type=t)
+
+    def extract(self, args):
+        group = GroupParams()
+        for arg in vars(args).items():
+            if arg[0] in vars(self) or ("_" + arg[0]) in vars(self):
+                setattr(group, arg[0], arg[1])
+        return group
+
+class ModelParams(ParamGroup): 
+    def __init__(self, parser, sentinel=False):
+        self.sh_degree = 3
+        self._source_path = ""
+        self._model_path = ""
+        self._images = "images"
+        self._resolution = -1
+        self._white_background = False
+        self.data_device = "cuda"
+        self.eval = False
+        super().__init__(parser, "Loading Parameters", sentinel)
+
+    def extract(self, args):
+        g = super().extract(args)
+        g.source_path = os.path.abspath(g.source_path)
+        return g
+
+class PipelineParams(ParamGroup):
+    def __init__(self, parser):
+        self.convert_SHs_python = False
+        self.compute_cov3D_python = False
+        self.debug = False
+        super().__init__(parser, "Pipeline Parameters")
+
+class OptimizationParams(ParamGroup):
+    def __init__(self, parser):
+        self.iterations = 30_000
+        self.position_lr_init = 0.00016
+        self.position_lr_final = 0.0000016
+        self.position_lr_delay_mult = 0.01
+        self.position_lr_max_steps = 30_000
+        self.feature_lr = 0.0025
+        self.opacity_lr = 0.05
+        self.scaling_lr = 0.005
+        self.rotation_lr = 0.001
+        self.percent_dense = 0.01
+        self.lambda_dssim = 0.2
+        self.densification_interval = 100
+        self.opacity_reset_interval = 3000
+        self.densify_from_iter = 500
+        self.densify_until_iter = 15_000
+        self.densify_grad_threshold = 0.0002
+        self.random_background = False
+        super().__init__(parser, "Optimization Parameters")
+
+def get_combined_args(parser : ArgumentParser):
+    cmdlne_string = sys.argv[1:]
+    cfgfile_string = "Namespace()"
+    args_cmdline = parser.parse_args(cmdlne_string)
+
+    try:
+        cfgfilepath = os.path.join(args_cmdline.model_path, "cfg_args")
+        print("Looking for config file in", cfgfilepath)
+        with open(cfgfilepath) as cfg_file:
+            print("Config file found: {}".format(cfgfilepath))
+            cfgfile_string = cfg_file.read()
+    except TypeError:
+        print("Config file not found at")
+        pass
+    args_cfgfile = eval(cfgfile_string)
+
+    merged_dict = vars(args_cfgfile).copy()
+    for k,v in vars(args_cmdline).items():
+        if v != None:
+            merged_dict[k] = v
+    return Namespace(**merged_dict)
+```
+
+### utils/cbct_utils.py
+```
+import os
+import numpy as np
+import cv2
+import tigre
+from tigre.utilities import sample_loader
+from tqdm import tqdm
+
+def get_geometry(cfg):
+    if cfg["mode"] == "parallel":
+        geo = tigre.geometry(mode="parallel", nVoxel=np.array(cfg["nVoxel"][::-1]))
+    elif cfg["mode"] == "cone":
+        geo = tigre.geometry(mode="cone")
+    else:
+        raise NotImplementedError("Unsupported scanner mode!")
+
+    geo.DSD = cfg["DSD"]  # Distance Source Detector
+    geo.DSO = cfg["DSO"]  # Distance Source Origin
+    # Detector parameters
+    geo.nDetector = np.array(cfg["nDetector"])  # number of pixels
+    geo.sDetector = np.array(cfg["sDetector"])  # size of each pixel
+    geo.dDetector = geo.sDetector / geo.nDetector  # total size of the detector
+    # Image parameters
+    geo.nVoxel = np.array(cfg["nVoxel"][::-1])  # number of voxels
+    geo.sVoxel = np.array(cfg["sVoxel"][::-1])  # size of each voxel
+    geo.dVoxel = geo.sVoxel / geo.nVoxel  # total size of the image
+    # Offsets
+    geo.offOrigin = np.array(cfg["offOrigin"][::-1])  # Offset of image from origin
+    geo.offDetector = np.array(
+        [cfg["offDetector"][1], cfg["offDetector"][0], 0]
+    )  # Offset of Detector
+    # Auxiliary
+    geo.accuracy = cfg["accuracy"]  # Accuracy of FWD proj
+    # Mode
+    geo.filter = cfg["filter"]
+    return geo
+
+def init_geometry(cfg_path='/sharedata/datasets/real/real_dataset/pine.txt', n_sample = 50):
+    object_scale = 50
+    proj_subsample = 4
+
+    with open(cfg_path, "r") as f:
+        for config_line in f.readlines():
+            if "NumberImages" in config_line:
+                n_proj = int(config_line.split("=")[-1])
+            elif "AngleInterval" in config_line:
+                angle_interval = float(config_line.split("=")[-1])
+            elif "AngleFirst" in config_line:
+                angle_start = float(config_line.split("=")[-1])
+            elif "AngleLast" in config_line:
+                angle_last = float(config_line.split("=")[-1])
+            elif "DistanceSourceDetector" in config_line:
+                DSD = float(config_line.split("=")[-1]) / 1000 * object_scale
+            elif "DistanceSourceOrigin" in config_line:
+                DSO = float(config_line.split("=")[-1]) / 1000 * object_scale
+            elif "PixelSize" in config_line and "PixelSizeUnit" not in config_line:
+                dDetector = (
+                    float(config_line.split("=")[-1])
+                    * proj_subsample
+                    / 1000
+                    * object_scale
+                )
+    angles = np.concatenate(
+        [np.arange(angle_start, angle_last, angle_interval), [angle_last]]
+    )
+    angles = angles / 180.0 * np.pi
+    # sample angles evenly
+    indices = np.linspace(0, len(angles) - 1, n_sample, dtype=int)
+    angles = angles[indices]
+
+
+    nDetector = [512, 512]
+    sDetector = np.array(nDetector) * np.array(dDetector)
+    nVoxel = [256, 256, 256]
+    sVoxel = [2.0, 2.0, 2.0]
+    offOrigin = [0.0, 0.0, 0.0]
+    scanner_cfg = {
+        "mode": "cone",
+        "DSD": DSD,
+        "DSO": DSO,
+        "nDetector": nDetector,
+        "sDetector": sDetector.tolist(),
+        "nVoxel": nVoxel,
+        "sVoxel": sVoxel,
+        "offOrigin": offOrigin,
+        "offDetector": [0.0, 0.0],
+        "accuracy": 0.5,
+        "totalAngle": angle_last - angle_start,
+        "startAngle": angle_start,
+        "noise": True,
+        "filter": None,
+    }
+        
+
+    geo = get_geometry(scanner_cfg)
+    return geo, angles
+
+if __name__ == '__main__':
+    img_path = '/sharedata/datasets/real/real_dataset/cone_ntrain_25_angle_360/pine/vol_gt.npy'
+    pine = np.load(img_path, allow_pickle=True)
+    geo, angles = init_geometry()
+
+    for i in tqdm(range(1000)):
+        projections = tigre.Ax(pine, geo, angles)
+
+    # 'projections' now contains the 2D projections for each angle
+    print("Projection data shape:", projections.shape)
+```
+
+### utils/general_utils.py
+```
+#
+# Copyright (C) 2023, Inria
+# GRAPHDECO research group, https://team.inria.fr/graphdeco
+# All rights reserved.
+#
+# This software is free for non-commercial, research and evaluation use 
+# under the terms of the LICENSE.md file.
+#
+# For inquiries contact  george.drettakis@inria.fr
+#
+
+import torch
+import sys
+from datetime import datetime
+import numpy as np
+import random
+
+def inverse_sigmoid(x):
+    return torch.log(x/(1-x))
+
+def PILtoTorch(pil_image, resolution):
+    resized_image_PIL = pil_image.resize(resolution)
+    resized_image = torch.from_numpy(np.array(resized_image_PIL)) / 255.0
+    if len(resized_image.shape) == 3:
+        return resized_image.permute(2, 0, 1)
+    else:
+        return resized_image.unsqueeze(dim=-1).permute(2, 0, 1)
+
+def get_expon_lr_func(
+    lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000
+):
+    """
+    Copied from Plenoxels
+
+    Continuous learning rate decay function. Adapted from JaxNeRF
+    The returned rate is lr_init when step=0 and lr_final when step=max_steps, and
+    is log-linearly interpolated elsewhere (equivalent to exponential decay).
+    If lr_delay_steps>0 then the learning rate will be scaled by some smooth
+    function of lr_delay_mult, such that the initial learning rate is
+    lr_init*lr_delay_mult at the beginning of optimization but will be eased back
+    to the normal learning rate when steps>lr_delay_steps.
+    :param conf: config subtree 'lr' or similar
+    :param max_steps: int, the number of steps during optimization.
+    :return HoF which takes step as input
+    """
+
+    def helper(step):
+        if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
+            # Disable this parameter
+            return 0.0
+        if lr_delay_steps > 0:
+            # A kind of reverse cosine decay.
+            delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(
+                0.5 * np.pi * np.clip(step / lr_delay_steps, 0, 1)
+            )
+        else:
+            delay_rate = 1.0
+        t = np.clip(step / max_steps, 0, 1)
+        log_lerp = np.exp(np.log(lr_init) * (1 - t) + np.log(lr_final) * t)
+        return delay_rate * log_lerp
+
+    return helper
+
+def strip_lowerdiag(L):
+    uncertainty = torch.zeros((L.shape[0], 6), dtype=torch.float, device="cuda")
+
+    uncertainty[:, 0] = L[:, 0, 0]
+    uncertainty[:, 1] = L[:, 0, 1]
+    uncertainty[:, 2] = L[:, 0, 2]
+    uncertainty[:, 3] = L[:, 1, 1]
+    uncertainty[:, 4] = L[:, 1, 2]
+    uncertainty[:, 5] = L[:, 2, 2]
+    return uncertainty
+
+def strip_symmetric(sym):
+    return strip_lowerdiag(sym)
+
+def build_rotation(r):
+    norm = torch.sqrt(r[:,0]*r[:,0] + r[:,1]*r[:,1] + r[:,2]*r[:,2] + r[:,3]*r[:,3])
+
+    q = r / norm[:, None]
+
+    R = torch.zeros((q.size(0), 3, 3), device='cuda')
+
+    r = q[:, 0]
+    x = q[:, 1]
+    y = q[:, 2]
+    z = q[:, 3]
+
+    R[:, 0, 0] = 1 - 2 * (y*y + z*z)
+    R[:, 0, 1] = 2 * (x*y - r*z)
+    R[:, 0, 2] = 2 * (x*z + r*y)
+    R[:, 1, 0] = 2 * (x*y + r*z)
+    R[:, 1, 1] = 1 - 2 * (x*x + z*z)
+    R[:, 1, 2] = 2 * (y*z - r*x)
+    R[:, 2, 0] = 2 * (x*z - r*y)
+    R[:, 2, 1] = 2 * (y*z + r*x)
+    R[:, 2, 2] = 1 - 2 * (x*x + y*y)
+    return R
+
+def build_scaling_rotation(s, r):
+    L = torch.zeros((s.shape[0], 3, 3), dtype=torch.float, device="cuda")
+    R = build_rotation(r)
+
+    L[:,0,0] = s[:,0]
+    L[:,1,1] = s[:,1]
+    L[:,2,2] = s[:,2]
+
+    L = R @ L
+    return L
+
+def safe_state(silent):
+    old_f = sys.stdout
+    class F:
+        def __init__(self, silent):
+            self.silent = silent
+
+        def write(self, x):
+            if not self.silent:
+                if x.endswith("\n"):
+                    old_f.write(x.replace("\n", " [{}]\n".format(str(datetime.now().strftime("%d/%m %H:%M:%S")))))
+                else:
+                    old_f.write(x)
+
+        def flush(self):
+            old_f.flush()
+
+    sys.stdout = F(silent)
+
+    seed = 0
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    # torch.cuda.set_device(torch.device("cuda:0"))
+```
+
+### utils/graphics_utils.py
+```
+#
+# Copyright (C) 2023, Inria
+# GRAPHDECO research group, https://team.inria.fr/graphdeco
+# All rights reserved.
+#
+# This software is free for non-commercial, research and evaluation use 
+# under the terms of the LICENSE.md file.
+#
+# For inquiries contact  george.drettakis@inria.fr
+#
+
+import torch
+import math
+import numpy as np
+from typing import NamedTuple
+
+class BasicPointCloud(NamedTuple):
+    points : np.array
+    colors : np.array
+    normals : np.array
+
+def geom_transform_points(points, transf_matrix):
+    P, _ = points.shape
+    ones = torch.ones(P, 1, dtype=points.dtype, device=points.device)
+    points_hom = torch.cat([points, ones], dim=1)
+    points_out = torch.matmul(points_hom, transf_matrix.unsqueeze(0))
+
+    denom = points_out[..., 3:] + 0.0000001
+    return (points_out[..., :3] / denom).squeeze(dim=0)
+
+def getWorld2View(R, t):
+    Rt = np.zeros((4, 4))
+    Rt[:3, :3] = R.transpose()
+    Rt[:3, 3] = t
+    Rt[3, 3] = 1.0
+    return np.float32(Rt)
+
+def getWorld2View2(R, t, translate=np.array([.0, .0, .0]), scale=1.0):
+    Rt = np.zeros((4, 4))
+    Rt[:3, :3] = R.transpose()
+    Rt[:3, 3] = t
+    Rt[3, 3] = 1.0
+
+    C2W = np.linalg.inv(Rt)
+    cam_center = C2W[:3, 3]
+    cam_center = (cam_center + translate) * scale
+    C2W[:3, 3] = cam_center
+    Rt = np.linalg.inv(C2W)
+    return np.float32(Rt)
+
+def getProjectionMatrix(znear, zfar, fovX, fovY):
+    tanHalfFovY = math.tan((fovY / 2))
+    tanHalfFovX = math.tan((fovX / 2))
+
+    top = tanHalfFovY * znear
+    bottom = -top
+    right = tanHalfFovX * znear
+    left = -right
+
+    P = torch.zeros(4, 4)
+
+    z_sign = 1.0
+
+    P[0, 0] = 2.0 * znear / (right - left)
+    P[1, 1] = 2.0 * znear / (top - bottom)
+    P[0, 2] = (right + left) / (right - left)
+    P[1, 2] = (top + bottom) / (top - bottom)
+    P[3, 2] = z_sign
+    P[2, 2] = z_sign * zfar / (zfar - znear)
+    P[2, 3] = -(zfar * znear) / (zfar - znear)
+    return P
+
+def fov2focal(fov, pixels):
+    return pixels / (2 * math.tan(fov / 2))
+
+def focal2fov(focal, pixels):
+    return 2*math.atan(pixels/(2*focal))
+```
+
+### utils/image_utils.py
+```
+#
+# Copyright (C) 2023, Inria
+# GRAPHDECO research group, https://team.inria.fr/graphdeco
+# All rights reserved.
+#
+# This software is free for non-commercial, research and evaluation use 
+# under the terms of the LICENSE.md file.
+#
+# For inquiries contact  george.drettakis@inria.fr
+#
+
+import torch
+
+def mse(img1, img2):
+    return (((img1 - img2)) ** 2).view(img1.shape[0], -1).mean(1, keepdim=True)
+
+def psnr(img1, img2):
+    mse = (((img1 - img2)) ** 2).view(img1.shape[0], -1).mean(1, keepdim=True)
+    return 20 * torch.log10(1.0 / torch.sqrt(mse))
+```
+
+### utils/loss_utils.py
+```
+#
+# Copyright (C) 2023, Inria
+# GRAPHDECO research group, https://team.inria.fr/graphdeco
+# All rights reserved.
+#
+# This software is free for non-commercial, research and evaluation use 
+# under the terms of the LICENSE.md file.
+#
+# For inquiries contact  george.drettakis@inria.fr
+#
+
+import torch
+import torch.nn.functional as F
+from torch.autograd import Variable
+from math import exp
+
+def l1_loss(network_output, gt):
+    return torch.abs((network_output - gt)).mean()
+
+def l2_loss(network_output, gt):
+    return ((network_output - gt) ** 2).mean()
+
+def gaussian(window_size, sigma):
+    gauss = torch.Tensor([exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])
+    return gauss / gauss.sum()
+
+def create_window(window_size, channel):
+    _1D_window = gaussian(window_size, 1.5).unsqueeze(1)
+    _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
+    window = Variable(_2D_window.expand(channel, 1, window_size, window_size).contiguous())
+    return window
+
+def ssim(img1, img2, window_size=11, size_average=True):
+    channel = img1.size(-3)
+    window = create_window(window_size, channel)
+
+    if img1.is_cuda:
+        window = window.cuda(img1.get_device())
+    window = window.type_as(img1)
+
+    return _ssim(img1, img2, window, window_size, channel, size_average)
+
+def _ssim(img1, img2, window, window_size, channel, size_average=True):
+    mu1 = F.conv2d(img1, window, padding=window_size // 2, groups=channel)
+    mu2 = F.conv2d(img2, window, padding=window_size // 2, groups=channel)
+
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+
+    sigma1_sq = F.conv2d(img1 * img1, window, padding=window_size // 2, groups=channel) - mu1_sq
+    sigma2_sq = F.conv2d(img2 * img2, window, padding=window_size // 2, groups=channel) - mu2_sq
+    sigma12 = F.conv2d(img1 * img2, window, padding=window_size // 2, groups=channel) - mu1_mu2
+
+    C1 = 0.01 ** 2
+    C2 = 0.03 ** 2
+
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+
+    if size_average:
+        return ssim_map.mean()
+    else:
+        return ssim_map.mean(1).mean(1).mean(1)
+```
+
+### utils/odl_utils.py
+```
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import odl
+from odl.contrib import torch as odl_torch
+import os
+
+class Initialization_ConeBeam:
+    def __init__(self, image_size, num_proj, start_angle, proj_size, raw_reso=0.7):
+        '''
+        image_size: [z, x, y], assume x = y for each slice image
+        proj_size: [h, w]
+        '''
+        self.param = {}
+        
+        self.image_size = image_size
+        self.num_proj = num_proj
+        self.proj_size = proj_size
+        self.raw_reso = raw_reso
+        
+        self.reso = 512. / image_size[1] * raw_reso
+
+        ## Imaging object (reconstruction objective) with object center as origin
+        self.param['nx'] = image_size[1]
+        self.param['ny'] = image_size[2]
+        self.param['nz'] = image_size[0]
+        self.param['sx'] = self.param['nx']*self.reso
+        self.param['sy'] = self.param['ny']*self.reso
+        self.param['sz'] = self.param['nz']*self.reso
+
+        ## Projection view angles (ray directions)
+        self.param['start_angle'] = start_angle
+        self.param['end_angle'] = start_angle + np.pi
+        self.param['nProj'] = num_proj
+
+        ## Detector
+        self.param['sh'] = self.param['sx']*(1500/1000)
+        self.param['sw'] = np.sqrt(self.param['sx']**2+self.param['sy']**2)*(1500/1000)
+        self.param['nh'] = proj_size[0] # shape of sinogram is proj_size*proj_size
+        self.param['nw'] = proj_size[1]
+        self.param['dde'] = 500*self.reso # distance between origin and detector center (assume in x axis)
+        self.param['dso'] = 1000*self.reso # distance between origin and source (assume in x axis)
+
+def build_conebeam_gemotry(param):
+    # Reconstruction space:
+    reco_space = odl.uniform_discr(min_pt=[-param.param['sx'] / 2.0, -param.param['sy'] / 2.0, -param.param['sz'] / 2.0],
+                                    max_pt=[param.param['sx'] / 2.0, param.param['sy'] / 2.0, param.param['sz'] / 2.0], 
+                                    shape=[param.param['nx'], param.param['ny'], param.param['nz']],
+                                    dtype='float32')
+    
+    angle_partition = odl.uniform_partition(min_pt=param.param['start_angle'], 
+                                            max_pt=param.param['end_angle'],
+                                            shape=param.param['nProj'])
+
+    detector_partition = odl.uniform_partition(min_pt=[-(param.param['sh'] / 2.0), -(param.param['sw'] / 2.0)], 
+                                                 max_pt=[(param.param['sh'] / 2.0), (param.param['sw'] / 2.0)],
+                                                 shape=[param.param['nh'], param.param['nw']])
+
+    # Cone-beam geometry for 3D-2D projection
+    geometry = odl.tomo.ConeBeamGeometry(apart=angle_partition, # partition of the angle interval
+                                          dpart=detector_partition, # partition of the detector parameter interval
+                                          src_radius=param.param['dso'], # radius of the source circle
+                                          det_radius=param.param['dde'], # radius of the detector circle 
+                                          axis=[0, 0, 1]) # rotation axis is z-axis: (0, 0, 1)
+    
+    ray_trafo = odl.tomo.RayTransform(vol_space=reco_space, # domain of forward projector
+                                     geometry=geometry, # geometry of the transform
+                                     impl='astra_cuda') # implementation back-end for the transform: ASTRA toolbox, using CUDA, 2D or 3D
+    
+    FBPOper = odl.tomo.fbp_op(ray_trafo=ray_trafo, 
+                             filter_type='Ram-Lak',
+                             frequency_scaling=1.0)
+    
+    # Reconstruction space for imaging object, RayTransform operator, Filtered back-projection operator
+    return reco_space, ray_trafo, FBPOper
+
+
+# Projector
+class Projection_ConeBeam(nn.Module):
+    def __init__(self, param):
+        super(Projection_ConeBeam, self).__init__()
+        self.param = param
+        self.reso = param.reso
+        
+        # RayTransform operator
+        reco_space, ray_trafo, FBPOper = build_conebeam_gemotry(self.param)
+        
+        # Wrap pytorch module
+        self.trafo = odl_torch.OperatorModule(ray_trafo)
+        
+        self.back_projector = odl_torch.OperatorModule(ray_trafo.adjoint)
+
+    def forward(self, x):
+        x = self.trafo(x)
+        x = x / self.reso
+        return x
+    
+    def back_projection(self, x):
+        x = self.back_projector(x)
+        return x
+
+
+# FBP reconstruction
+class FBP_ConeBeam(nn.Module):
+    def __init__(self, param):
+        super(FBP_ConeBeam, self).__init__()
+        self.param = param
+        self.reso = param.reso
+        
+        reco_space, ray_trafo, FBPOper = build_conebeam_gemotry(self.param)
+        
+        self.fbp = odl_torch.OperatorModule(FBPOper)
+
+    def forward(self, x):
+        x = self.fbp(x)
+        return x
+
+    def filter_function(self, x):
+        x_filter = self.filter(x)
+        return x_filter
+
+
+class ConeBeam3DProjector():
+    def __init__(self, image_size, proj_size, num_proj):
+
+        self.image_size = image_size
+        self.proj_size = proj_size
+        self.num_proj = num_proj
+        self.start_angle = np.pi / float(self.num_proj * 2.0) * (self.num_proj - 1.0)
+        self.raw_reso = 0.7
+
+        # Initialize required parameters for image, view, detector
+        geo_param = Initialization_ConeBeam(image_size=self.image_size, 
+                                            num_proj=self.num_proj, 
+                                            start_angle=self.start_angle,
+                                            proj_size=self.proj_size,
+                                            raw_reso=self.raw_reso)
+        # Forward projection function
+        self.forward_projector = Projection_ConeBeam(geo_param)
+
+        # Filtered back-projection
+        self.fbp = FBP_ConeBeam(geo_param)
+
+    def forward_project(self, volume):
+        '''
+        Arguments:
+            volume: torch tensor with input size (B, C, img_x, img_y, img_z)
+        '''
+
+        proj_data = self.forward_projector(volume)
+
+        return proj_data
+
+    def backward_project(self, projs):
+        '''
+        Arguments:
+            projs: torch tensor with input size (B, num_proj, proj_size_h, proj_size_w)
+        '''
+
+        volume = self.fbp(projs)
+
+        return volume
+```
+
+### utils/previous_utils.py
+```
+# Copyright 2014-2020 The ODL contributors
+#
+# This file is part of ODL.
+#
+# This Source Code Form is subject to the terms of the Mozilla Public License,
+# v. 2.0. If a copy of the MPL was not distributed with this file, You can
+# obtain one at https://mozilla.org/MPL/2.0/.
+
+"""Tomographic datasets from Mayo Clinic.
+
+In addition to the standard ODL requirements, this library also requires:
+
+    - tqdm
+    - dicom
+    - A copy of the Mayo dataset, see
+    https://www.aapm.org/GrandChallenge/LowDoseCT/#registration
+"""
+
+from __future__ import division
+import numpy as np
+import os
+import pydicom as dicom
+import odl
+import tqdm
+import math
+import cv2
+import SimpleITK as sitk
+import matplotlib.pyplot as plt
+from odl.discr import grid
+from shutil import rmtree
+
+from pydicom.datadict import DicomDictionary #, NameDict, CleanName
+from odl.discr.discr_utils import linear_interpolator
+from odl.contrib.datasets.ct.mayo_dicom_dict import new_dict_items
+from scipy.spatial.transform import Rotation
+# Update the DICOM dictionary with the extra Mayo tags
+DicomDictionary.update(new_dict_items)
+#NameDict.update((CleanName(tag), tag) for tag in new_dict_items)
+
+
+__all__ = ('load_projections', 'load_reconstruction')
+
+
+
+def convert_to_quaternion(image_orientation_patient):
+  """
+  Converts image_orientation_patient data (6 elements) to a quaternion.
+
+  Args:
+    image_orientation_patient: A list containing 6 direction cosines.
+
+  Returns:
+    A list representing the quaternion (w, x, y, z).
+  """
+
+  Rx, Ry, Rz, Cx, Cy, Cz = image_orientation_patient
+
+  a = (Rx + Cx) / 2
+  b = (Ry + Cy) / 2
+  c = (Rz + Cz) / 2
+  d = (Rx - Cx) / 2
+  e = (Ry - Cy) / 2
+  f = (Rz - Cz) / 2
+
+  largest = max(a, b, c, d, e, f)
+
+  if largest == a or largest == b or largest == c:
+    w = math.sqrt(1 + a - b - c)
+    x = d / (2 * w)
+    y = e / (2 * w)
+    z = f / (2 * w)
+  elif largest == d:
+    w = math.sqrt(1 + d - a - b)
+    x = 2 * w
+    y = e / (2 * w)
+    z = f / (2 * w)
+  elif largest == e:
+    w = math.sqrt(1 + e - a - b)
+    x = d / (2 * w)
+    y = 2 * w
+    z = f / (2 * w)
+  else:
+    w = math.sqrt(1 + f - a - b)
+    x = d / (2 * w)
+    y = e / (2 * w)
+    z = 2 * w
+
+  return [w, x, y, z]
+
+
+def transform(image_position_patient, image_orientation_patient, PixelSpacing):
+    transformation_matrix = np.zeros((4, 4))
+    transformation_matrix[0, 0:3] = image_orientation_patient[0:3] * PixelSpacing[0]
+    transformation_matrix[1, 0:3] = image_orientation_patient[3:6] * PixelSpacing[1]
+    transformation_matrix[0:3, 3] = image_position_patient
+    transformation_matrix[2, 2] = 1
+    transformation_matrix[3, 3] = 1
+    rotation_matrix = transformation_matrix[0:3, 0:3]
+    translation_vector = transformation_matrix[0:3, 3]
+
+    # Convert the rotation matrix to a quaternion
+    rotation = Rotation.from_matrix(rotation_matrix)
+    quaternion = rotation.as_quat()
+
+    # Invert the pose
+    quaternion = -quaternion
+    translation_vector = -translation_vector
+    print(image_position_patient, translation_vector)
+    return quaternion, translation_vector
+
+
+def _read_projections_alternative(folder, indices):
+    """Read mayo projections from a folder
+    following the DICOM-CT-PD User Manual Version 3""" 
+    datasets = []
+
+    # Get the relevant file names
+    file_names = sorted([f for f in os.listdir(folder) if f.endswith(".dcm")])
+
+    if len(file_names) == 0:
+        raise ValueError('No DICOM files found in {}'.format(folder))
+
+    if indices is not None:
+        file_names = file_names[indices]
+
+    data_array = None
+
+    for i, file_name in enumerate(tqdm.tqdm(file_names,
+                                            'Loading projection data')):
+        # read the file
+        dataset = dicom.read_file(folder + '/' + file_name)
+        dataset.NumberofDetectorRows = dataset[0x70291010].value
+        dataset.NumberofDetectorColumns = dataset[0x70291011].value
+        dataset.HUCalibrationFactor = float(dataset[0x70411001].value)
+        dataset.DetectorFocalCenterAngularPosition = dataset[0x70311001].value
+        dataset.DetectorElementTransverseSpacing = dataset[0x70291002].value
+        dataset.DetectorElementAxialSpacing = dataset[0x70291006].value
+        dataset.DetectorCentralElement = dataset[0x70311033].value
+        dataset.DetectorFocalCenterRadialDistance = dataset[0x70311003].value
+        dataset.ConstantRadialDistance = dataset[0x70311031].value
+        dataset.DetectorFocalCenterAxialPosition = dataset[0x70311002].value
+        dataset.SourceAxialPositionShift = dataset[0x7033100C].value # 0x7033100B?
+        dataset.SourceAngularPositionShift = dataset[0x7033100B].value
+        dataset.SourceRadialDistanceShift = dataset[0x7033100D].value
+
+        # Get some required data
+        rows = dataset.NumberofDetectorRows
+        cols = dataset.NumberofDetectorColumns
+        hu_factor = dataset.HUCalibrationFactor
+        rescale_intercept = dataset.RescaleIntercept
+        rescale_slope = dataset.RescaleSlope
+
+        # Load the array as bytes
+        proj_array = np.array(np.frombuffer(dataset.PixelData, 'H'),
+                              dtype='float32')
+        proj_array = proj_array.reshape([rows, cols], order='F').T
+
+        # Rescale array
+        proj_array *= rescale_slope
+        proj_array += rescale_intercept
+        proj_array /= hu_factor
+
+        # Store results
+        if data_array is None:
+            # We need to load the first dataset before we know the shape
+            data_array = np.empty((len(file_names), cols, rows),
+                                  dtype='float32')
+
+        data_array[i] = proj_array[:, ::-1]
+        datasets.append(dataset)
+
+    return datasets, data_array
+
+
+
+def load_projections(folder, indices=None):
+    """Load geometry and data stored in Mayo format from folder.
+
+    Parameters
+    ----------
+    folder : str
+        Path to the folder where the Mayo DICOM files are stored.
+    indices : optional
+        Indices of the projections to load.
+        Accepts advanced indexing such as slice or list of indices.
+
+    Returns
+    -------
+    geometry : ConeBeamGeometry
+        Geometry corresponding to the Mayo projector.
+    proj_data : `numpy.ndarray`
+        Projection data, given as the line integral of the linear attenuation
+        coefficient (g/cm^3). Its unit is thus g/cm^2.
+    """
+    datasets, data_array = _read_projections_alternative(folder, indices)
+
+    # Get the angles
+    angles = [d.DetectorFocalCenterAngularPosition for d in datasets]
+    angles = -np.unwrap(angles) - np.pi  # different definition of angles
+
+    # Set minimum and maximum corners
+    shape = np.array([datasets[0].NumberofDetectorColumns,
+                      datasets[0].NumberofDetectorRows])
+    pixel_size = np.array([datasets[0].DetectorElementTransverseSpacing,
+                           datasets[0].DetectorElementAxialSpacing])
+
+    # Correct from center of pixel to corner of pixel
+    minp = -(np.array(datasets[0].DetectorCentralElement) - 0.5) * pixel_size
+    maxp = minp + shape * pixel_size
+
+    # Select geometry parameters
+    src_radius = datasets[0].DetectorFocalCenterRadialDistance
+    det_radius = (datasets[0].ConstantRadialDistance -
+                  datasets[0].DetectorFocalCenterRadialDistance)
+
+    # For unknown reasons, mayo does not include the tag
+    # "TableFeedPerRotation", which is what we want.
+    # Instead we manually compute the pitch
+    pitch = ((datasets[-1].DetectorFocalCenterAxialPosition -
+              datasets[0].DetectorFocalCenterAxialPosition) /
+             ((np.max(angles) - np.min(angles)) / (2 * np.pi)))
+
+    # Get flying focal spot data
+    offset_axial = np.array([d.SourceAxialPositionShift for d in datasets])
+    offset_angular = np.array([d.SourceAngularPositionShift for d in datasets])
+    offset_radial = np.array([d.SourceRadialDistanceShift for d in datasets])
+
+    # TODO(adler-j): Implement proper handling of flying focal spot.
+    # Currently we do not fully account for it, merely making some "first
+    # order corrections" to the detector position and radial offset.
+
+    # Update angles with flying focal spot (in plane direction).
+    # This increases the resolution of the reconstructions.
+    angles = angles - offset_angular
+
+    # We correct for the mean offset due to the rotated angles, we need to
+    # shift the detector.
+    offset_detector_by_angles = det_radius * np.mean(offset_angular)
+    minp[0] -= offset_detector_by_angles
+    maxp[0] -= offset_detector_by_angles
+
+    # We currently apply only the mean of the offsets
+    src_radius = src_radius + np.mean(offset_radial)
+
+    # Partially compensate for a movement of the source by moving the object
+    # instead. We need to rescale by the magnification to get the correct
+    # change in the detector. This approximation is only exactly valid on the
+    # axis of rotation.
+    mean_offset_along_axis_for_ffz = np.mean(offset_axial) * (
+        src_radius / (src_radius + det_radius))
+
+    # Create partition for detector
+    detector_partition = odl.uniform_partition(minp, maxp, shape)
+
+    # Convert offset to odl definitions
+    offset_along_axis = (mean_offset_along_axis_for_ffz +
+                         datasets[0].DetectorFocalCenterAxialPosition -
+                         angles[0] / (2 * np.pi) * pitch)
+
+    # Assemble geometry
+    angle_partition = odl.nonuniform_partition(angles)
+    geometry = odl.tomo.ConeBeamGeometry(angle_partition,
+                                         detector_partition,
+                                         src_radius=src_radius,
+                                         det_radius=det_radius,
+                                         pitch=pitch,
+                                         offset_along_axis=offset_along_axis)
+
+    # Create a *temporary* ray transform (we need its range)
+    spc = odl.uniform_discr([-1] * 3, [1] * 3, [32] * 3)
+    ray_trafo = odl.tomo.RayTransform(spc, geometry, interp='linear')
+
+    # convert coordinates
+    theta, up, vp = ray_trafo.range.grid.meshgrid
+    d = src_radius + det_radius
+    u = d * np.arctan(up / d)
+    v = d / np.sqrt(d**2 + up**2) * vp
+
+    # Calculate projection data in rectangular coordinates since we have no
+    # backend that supports cylindrical
+    interpolator = linear_interpolator(
+        data_array, ray_trafo.range.grid.coord_vectors
+    )
+    proj_data = interpolator((theta, u, v))
+
+    return geometry, proj_data#.asarray()
+
+
+def save_ct_images(data,save_root):
+    # if not os.path.exists(save_root):
+    #     os.makedirs(save_root)
+    if os.path.exists(save_root):
+        rmtree(save_root)
+    os.makedirs(save_root)
+    for i in range(data.shape[2]):
+        img = data[:,:,i]
+        img = (img - img.min())/(img.max()-img.min()) # range 0-1
+        img = (img*255).astype('uint8')
+        img = np.rot90(img,1)
+        img = img.astype(np.uint8)
+        cv2.imwrite(save_root + '/z_%d.png'%i,img)
+    for i in range(data.shape[0]):
+        img = data[i,:,:]
+        img = (img - img.min())/(img.max()-img.min()) # range 0-1
+        img = (img*255).astype('uint8')
+        img = np.rot90(img,1)
+        img = img.astype(np.uint8)
+        cv2.imwrite(save_root + '/x_%d.png'%i,img)
+    for i in range(data.shape[1]):
+        img = data[:,i,:]
+        img = (img - img.min())/(img.max()-img.min()) # range 0-1
+        img = (img*255).astype('uint8')
+        img = np.rot90(img,1)
+        img = img.astype(np.uint8)
+        cv2.imwrite(save_root + '/y_%d.png'%i,img)
+        
+        
+def save_ct_images2(data,save_root):
+    if not os.path.exists(save_root):
+        os.makedirs(save_root)
+    # if os.path.exists(save_root):
+    #     rmtree(save_root)
+    # os.makedirs(save_root)
+    for i in range(data.shape[2]):
+        img = data[:,:,i]
+        img = (img - img.min())/(img.max()-img.min()) # range 0-1
+        img = (img*255).astype('uint8')
+        img = np.rot90(img,1)
+        img = img.astype(np.uint8)
+        cv2.imwrite(os.path.join(save_root,'%03d.png'%i),img)
+        np.save(os.path.join(save_root,'%03d.npy'%i),img)
+
+
+def load_reconstruction(folder, slice_start=0, slice_end=-1, suffix='.IMA'):
+    """Load a volume from folder, also returns the corresponding partition.
+
+    Parameters
+    ----------
+    folder : str
+        Path to the folder where the DICOM files are stored.
+    slice_start : int
+        Index of the first slice to use. Used for subsampling.
+    slice_end : int
+        Index of the final slice to use.
+
+    Returns
+    -------
+    partition : `odl.RectPartition`
+        Partition describing the geometric positioning of the voxels.
+    data : `numpy.ndarray`
+        Volumetric data. Scaled such that data = 1 for water (0 HU).
+
+    Notes
+    -----
+    DICOM data is highly non trivial. Typically, each slice has been computed
+    with a slice tickness (e.g. 3mm) but the slice spacing might be
+    different from that.
+
+    Further, the coordinates in DICOM is typically the *middle* of the pixel,
+    not the corners as in ODL.
+
+    This function should handle all of these peculiarities and give a volume
+    with the correct coordinate system attached.
+    """
+    file_names = sorted([f for f in os.listdir(folder) if f.endswith(suffix)])
+
+    if len(file_names) == 0:
+        raise ValueError('No DICOM files found in {}'.format(folder))
+
+    volumes = []
+    datasets = []
+
+    # file_names = file_names[slice_start:slice_end]
+
+    for file_name in tqdm.tqdm(file_names, 'loading volume data'):
+        # read the file
+        dataset = dicom.read_file(folder + '/' + file_name)
+
+        # Get parameters
+        pixel_size = np.array(dataset.PixelSpacing)
+        pixel_thickness = float(dataset.SliceThickness)
+        rows = dataset.Rows
+        cols = dataset.Columns
+
+        # Get data array and convert to correct coordinates
+        data_array = np.array(np.frombuffer(dataset.PixelData, 'H'),
+                              dtype='float32')
+        data_array = data_array.reshape([cols, rows], order='C')
+        data_array = np.rot90(data_array, -1)
+
+        # Convert from storage type to densities
+        # TODO: Optimize these computations
+        hu_values = (dataset.RescaleSlope * data_array +
+                     dataset.RescaleIntercept)
+        densities = (hu_values + 1000) / 1000
+
+        # Store results
+        volumes.append(densities)
+        datasets.append(dataset)
+        # pose = transform(np.array(dataset.ImagePositionPatient), np.array(dataset.ImageOrientationPatient),np.array(dataset.PixelSpacing))
+
+    voxel_size = np.array(list(pixel_size) + [pixel_thickness])
+    shape = np.array([rows, cols, len(volumes)])
+
+    # Compute geometry parameters
+    mid_pt = (np.array(dataset.ReconstructionTargetCenterPatient) -
+              np.array(dataset.DataCollectionCenterPatient))
+    reconstruction_size = (voxel_size * shape)
+    min_pt = mid_pt - reconstruction_size / 2
+    max_pt = mid_pt + reconstruction_size / 2
+
+    # axis 1 has reversed convention
+    min_pt[1], max_pt[1] = -max_pt[1], -min_pt[1] # !!!!!!!!!!!!!!!!!!!!!! check this line 2024.3.9
+
+    if len(datasets) > 1:
+        slice_distance = np.abs(
+            float(datasets[1].DataCollectionCenterPatient[2]) -
+            float(datasets[0].DataCollectionCenterPatient[2]))
+    else:
+        # If we only have one slice, we must approximate the distance.
+        slice_distance = pixel_thickness
+
+    # The middle of the minimum/maximum slice can be computed from the
+    # DICOM attribute "DataCollectionCenterPatient". Since ODL uses corner
+    # points (e.g. edge of volume) we need to add half a voxel thickness to
+    # both sides.
+    try:
+        min_pt[2] = -np.array(datasets[0].DataCollectionCenterPatient)[2]
+        min_pt[2] -= 0.5 * slice_distance
+        max_pt[2] = -np.array(datasets[-1].DataCollectionCenterPatient)[2]
+        max_pt[2] += 0.5 * slice_distance
+        partition = odl.uniform_partition(min_pt, max_pt, shape)
+    except:
+        print('!!!!!!!!Load data in the reverse order!!!!!!!!!!')
+        min_pt[2] = -np.array(datasets[-1].DataCollectionCenterPatient)[2]
+        min_pt[2] -= 0.5 * slice_distance
+        max_pt[2] = -np.array(datasets[0].DataCollectionCenterPatient)[2]
+        max_pt[2] += 0.5 * slice_distance
+        partition = odl.uniform_partition(min_pt, max_pt, shape)
+    
+
+    volume = np.transpose(np.array(volumes), (1, 2, 0))
+
+    return partition, volume
+
+
+def dcm2png_mri(dcm_path, save_path):
+    image = sitk.ReadImage(dcm_path, sitk.sitkFloat32)
+
+    # Convert the image to a numpy array
+    image_array = sitk.GetArrayFromImage(image)
+
+    resp = plt.imsave(save_path, image_array[0], cmap='gray')
+    return resp
+
+def dcm2png_ct(dcm_path, save_path):
+    image = sitk.ReadImage(dcm_path, sitk.sitkFloat32)
+    image_array = sitk.GetArrayFromImage(image)
+    image_array = normalise(image_array)
+    resp = plt.imsave(save_path, image_array[0], cmap='gray')
+    return resp
+
+# def read_image(dcm_path):
+#     image = sitk.ReadImage(dcm_path, sitk.sitkFloat32)
+#     image_array = sitk.GetArrayFromImage(image)
+#     # image_array = normalise(image_array)
+#     return image_array[0]
+
+
+def read_image(dcm_path):
+    dataset = dicom.read_file(dcm_path)
+    # Get parameters
+    pixel_size = np.array(dataset.PixelSpacing)
+    pixel_thickness = float(dataset.SliceThickness)
+    rows = dataset.Rows
+    cols = dataset.Columns
+
+    # Get data array and convert to correct coordinates
+    data_array = np.array(np.frombuffer(dataset.PixelData, 'H'),
+                            dtype='float32')
+    data_array = data_array.reshape([cols, rows], order='C')
+    # data_array = np.rot90(data_array, -1)
+
+    # Convert from storage type to densities
+    # TODO: Optimize these computations
+    hu_values = (dataset.RescaleSlope * data_array +
+                    dataset.RescaleIntercept)
+    densities = (hu_values + 1000) / 1000
+    return densities
+
+def normalise(image):
+    # normalise and clip images -1000 to 800
+    np_img = image
+    np_img = np.clip(np_img, -1000, None).astype(np.float32)
+    return np_img
+
+
+def whitening(image):
+    """Whitening. Normalises image to zero mean and unit variance."""
+
+    image = image.astype(np.float32)
+
+    mean = np.mean(image)
+    std = np.std(image)
+
+    if std > 0:
+        ret = (image - mean) / std
+    else:
+        ret = image * 0.
+    return ret
+
+
+def normalise_zero_one(image):
+    """Image normalisation. Normalises image to fit [0, 1] range."""
+
+    image = image.astype(np.float32)
+
+    minimum = np.min(image)
+    maximum = np.max(image)
+
+    if maximum > minimum:
+        ret = (image - minimum) / (maximum - minimum)
+    else:
+        ret = image * 0.
+    return ret
+
+
+def normalise_one_one(image):
+    """Image normalisation. Normalises image to fit [-1, 1] range."""
+
+    ret = normalise_zero_one(image)
+    ret *= 2.
+    ret -= 1.
+    return ret
+
+if __name__ == '__main__':
+    from odl.util.testutils import run_doctests
+    run_doctests()
+```
+
+### utils/sh_utils.py
+```
+#  Copyright 2021 The PlenOctree Authors.
+#  Redistribution and use in source and binary forms, with or without
+#  modification, are permitted provided that the following conditions are met:
+#
+#  1. Redistributions of source code must retain the above copyright notice,
+#  this list of conditions and the following disclaimer.
+#
+#  2. Redistributions in binary form must reproduce the above copyright notice,
+#  this list of conditions and the following disclaimer in the documentation
+#  and/or other materials provided with the distribution.
+#
+#  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+#  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+#  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+#  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+#  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+#  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+#  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+#  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+#  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+#  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+#  POSSIBILITY OF SUCH DAMAGE.
+
+import torch
+
+C0 = 0.28209479177387814
+C1 = 0.4886025119029199
+C2 = [
+    1.0925484305920792,
+    -1.0925484305920792,
+    0.31539156525252005,
+    -1.0925484305920792,
+    0.5462742152960396
+]
+C3 = [
+    -0.5900435899266435,
+    2.890611442640554,
+    -0.4570457994644658,
+    0.3731763325901154,
+    -0.4570457994644658,
+    1.445305721320277,
+    -0.5900435899266435
+]
+C4 = [
+    2.5033429417967046,
+    -1.7701307697799304,
+    0.9461746957575601,
+    -0.6690465435572892,
+    0.10578554691520431,
+    -0.6690465435572892,
+    0.47308734787878004,
+    -1.7701307697799304,
+    0.6258357354491761,
+]   
+
+
+def eval_sh(deg, sh, dirs):
+    """
+    Evaluate spherical harmonics at unit directions
+    using hardcoded SH polynomials.
+    Works with torch/np/jnp.
+    ... Can be 0 or more batch dimensions.
+    Args:
+        deg: int SH deg. Currently, 0-3 supported
+        sh: jnp.ndarray SH coeffs [..., C, (deg + 1) ** 2]
+        dirs: jnp.ndarray unit directions [..., 3]
+    Returns:
+        [..., C]
+    """
+    assert deg <= 4 and deg >= 0
+    coeff = (deg + 1) ** 2
+    assert sh.shape[-1] >= coeff
+
+    result = C0 * sh[..., 0]
+    if deg > 0:
+        x, y, z = dirs[..., 0:1], dirs[..., 1:2], dirs[..., 2:3]
+        result = (result -
+                C1 * y * sh[..., 1] +
+                C1 * z * sh[..., 2] -
+                C1 * x * sh[..., 3])
+
+        if deg > 1:
+            xx, yy, zz = x * x, y * y, z * z
+            xy, yz, xz = x * y, y * z, x * z
+            result = (result +
+                    C2[0] * xy * sh[..., 4] +
+                    C2[1] * yz * sh[..., 5] +
+                    C2[2] * (2.0 * zz - xx - yy) * sh[..., 6] +
+                    C2[3] * xz * sh[..., 7] +
+                    C2[4] * (xx - yy) * sh[..., 8])
+
+            if deg > 2:
+                result = (result +
+                C3[0] * y * (3 * xx - yy) * sh[..., 9] +
+                C3[1] * xy * z * sh[..., 10] +
+                C3[2] * y * (4 * zz - xx - yy)* sh[..., 11] +
+                C3[3] * z * (2 * zz - 3 * xx - 3 * yy) * sh[..., 12] +
+                C3[4] * x * (4 * zz - xx - yy) * sh[..., 13] +
+                C3[5] * z * (xx - yy) * sh[..., 14] +
+                C3[6] * x * (xx - 3 * yy) * sh[..., 15])
+
+                if deg > 3:
+                    result = (result + C4[0] * xy * (xx - yy) * sh[..., 16] +
+                            C4[1] * yz * (3 * xx - yy) * sh[..., 17] +
+                            C4[2] * xy * (7 * zz - 1) * sh[..., 18] +
+                            C4[3] * yz * (7 * zz - 3) * sh[..., 19] +
+                            C4[4] * (zz * (35 * zz - 30) + 3) * sh[..., 20] +
+                            C4[5] * xz * (7 * zz - 3) * sh[..., 21] +
+                            C4[6] * (xx - yy) * (7 * zz - 1) * sh[..., 22] +
+                            C4[7] * xz * (xx - 3 * yy) * sh[..., 23] +
+                            C4[8] * (xx * (xx - 3 * yy) - yy * (3 * xx - yy)) * sh[..., 24])
+    return result
+
+def RGB2SH(rgb):
+    return (rgb - 0.5) / C0
+
+def SH2RGB(sh):
+    return sh * C0 + 0.5
+```
+
+### utils/sitk.py
+```
+import argparse
+import csv
+import functools
+import itertools
+import multiprocessing
+import os
+import sys
+
+import SimpleITK as sitk
+
+
+def convert_image(input_file_name, output_file_name, new_width=None):
+    try:
+        image_file_reader = sitk.ImageFileReader()
+        # only read DICOM images
+        image_file_reader.SetImageIO("GDCMImageIO")
+        image_file_reader.SetFileName(input_file_name)
+        image_file_reader.ReadImageInformation()
+        image_size = list(image_file_reader.GetSize())
+        if len(image_size) == 3 and image_size[2] == 1:
+            image_size[2] = 0
+        image_file_reader.SetExtractSize(image_size)
+        image = image_file_reader.Execute()
+        if new_width:
+            original_size = image.GetSize()
+            original_spacing = image.GetSpacing()
+            new_spacing = [
+                (original_size[0] - 1) * original_spacing[0] / (new_width - 1)
+            ] * 2
+            new_size = [
+                new_width,
+                int((original_size[1] - 1) * original_spacing[1] / new_spacing[1]),
+            ]
+            image = sitk.Resample(
+                image1=image,
+                size=new_size,
+                transform=sitk.Transform(),
+                interpolator=sitk.sitkLinear,
+                outputOrigin=image.GetOrigin(),
+                outputSpacing=new_spacing,
+                outputDirection=image.GetDirection(),
+                defaultPixelValue=0,
+                outputPixelType=image.GetPixelID(),
+            )
+        # If a single channel image, rescale to [0,255]. Also modify the
+        # intensity values based on the photometric interpretation. If
+        # MONOCHROME2 (minimum should be displayed as black) we don't need to
+        # do anything, if image has MONOCRHOME1 (minimum should be displayed as
+        # white) we flip # the intensities. This is a constraint imposed by ITK
+        # which always assumes MONOCHROME2.
+        if image.GetNumberOfComponentsPerPixel() == 1:
+            image = sitk.RescaleIntensity(image, 0, 255)
+            if image_file_reader.GetMetaData("0028|0004").strip() == "MONOCHROME1":
+                image = sitk.InvertIntensity(image, maximum=255)
+            image = sitk.Cast(image, sitk.sitkUInt8)
+        sitk.WriteImage(image, output_file_name)
+        return True
+    except BaseException:
+        return False
+    
+
+def read_image(input_file_name, new_width=None):
+    try:
+        image_file_reader = sitk.ImageFileReader()
+        # only read DICOM images
+        image_file_reader.SetImageIO("GDCMImageIO")
+        image_file_reader.SetFileName(input_file_name)
+        image_file_reader.ReadImageInformation()
+        image_size = list(image_file_reader.GetSize())
+        if len(image_size) == 3 and image_size[2] == 1:
+            image_size[2] = 0
+        image_file_reader.SetExtractSize(image_size)
+        image = image_file_reader.Execute()
+        if new_width:
+            original_size = image.GetSize()
+            original_spacing = image.GetSpacing()
+            new_spacing = [
+                (original_size[0] - 1) * original_spacing[0] / (new_width - 1)
+            ] * 2
+            new_size = [
+                new_width,
+                int((original_size[1] - 1) * original_spacing[1] / new_spacing[1]),
+            ]
+            image = sitk.Resample(
+                image1=image,
+                size=new_size,
+                transform=sitk.Transform(),
+                interpolator=sitk.sitkLinear,
+                outputOrigin=image.GetOrigin(),
+                outputSpacing=new_spacing,
+                outputDirection=image.GetDirection(),
+                defaultPixelValue=0,
+                outputPixelType=image.GetPixelID(),
+            )
+        # If a single channel image, rescale to [0,255]. Also modify the
+        # intensity values based on the photometric interpretation. If
+        # MONOCHROME2 (minimum should be displayed as black) we don't need to
+        # do anything, if image has MONOCRHOME1 (minimum should be displayed as
+        # white) we flip # the intensities. This is a constraint imposed by ITK
+        # which always assumes MONOCHROME2.
+        if image.GetNumberOfComponentsPerPixel() == 1:
+            image = sitk.RescaleIntensity(image, 0, 255)
+            if image_file_reader.GetMetaData("0028|0004").strip() == "MONOCHROME1":
+                image = sitk.InvertIntensity(image, maximum=255)
+            image = sitk.Cast(image, sitk.sitkUInt8)
+        return image
+    except BaseException:
+        return None
+
+
+def convert_images(input_file_names, output_file_names, new_width):
+    MAX_PROCESSES = 15
+    with multiprocessing.Pool(processes=MAX_PROCESSES) as pool:
+        return pool.starmap(
+            functools.partial(convert_image, new_width=new_width),
+            zip(input_file_names, output_file_names),
+        )
+
+
+def positive_int(int_str):
+    value = int(int_str)
+    if value <= 0:
+        raise argparse.ArgumentTypeError(int_str + " is not a positive integer value")
+    return value
+
+
+def directory(dir_name):
+    if not os.path.isdir(dir_name):
+        raise argparse.ArgumentTypeError(dir_name + " is not a valid directory name")
+    return dir_name
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Convert and resize DICOM files to common image types."
+    )
+    parser.add_argument(
+        "root_of_data_directory",
+        type=directory,
+        help="Path to the topmost directory containing data.",
+    )
+    parser.add_argument(
+        "output_file_extension",
+        help="Image file extension, this determines output file type " "(e.g. png) .",
+    )
+    parser.add_argument("--w", type=positive_int, help="Width of converted images.")
+    parser.add_argument("--od", type=directory, help="Output directory.")
+    args = parser.parse_args(argv)
+
+    input_file_names = []
+    for dir_name, subdir_names, file_names in os.walk(args.root_of_data_directory):
+        input_file_names += [
+            os.path.join(os.path.abspath(dir_name), fname) for fname in file_names
+        ]
+    if args.od:
+        # if all output files are written to the same directory we need them
+        # to have a unique name, so use an index.
+        file_names = [
+            os.path.join(os.path.abspath(args.od), str(i))
+            for i in range(len(input_file_names))
+        ]
+    else:
+        file_names = input_file_names
+    output_file_names = [
+        file_name + "." + args.output_file_extension for file_name in file_names
+    ]
+
+    res = convert_images(input_file_names, output_file_names, args.w)
+    input_file_names = list(itertools.compress(input_file_names, res))
+    output_file_names = list(itertools.compress(output_file_names, res))
+
+    # save csv file mapping input and output file names.
+    # using csv module and not pandas so as not to create more dependencies
+    # for the examples. pandas based code is more elegant/shorter.
+    dir_name = args.od if args.od else os.getcwd()
+    with open(os.path.join(dir_name, "file_names.csv"), mode="w") as fp:
+        fp_writer = csv.writer(
+            fp, delimiter=",", quotechar='"', quoting=csv.QUOTE_MINIMAL
+        )
+        fp_writer.writerow(["input file name", "output file name"])
+        for data in zip(input_file_names, output_file_names):
+            fp_writer.writerow(data)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+### utils/system_utils.py
+```
+#
+# Copyright (C) 2023, Inria
+# GRAPHDECO research group, https://team.inria.fr/graphdeco
+# All rights reserved.
+#
+# This software is free for non-commercial, research and evaluation use 
+# under the terms of the LICENSE.md file.
+#
+# For inquiries contact  george.drettakis@inria.fr
+#
+
+from errno import EEXIST
+from os import makedirs, path
+import os
+
+def mkdir_p(folder_path):
+    # Creates a directory. equivalent to using mkdir -p on the command line
+    try:
+        makedirs(folder_path)
+    except OSError as exc: # Python >2.5
+        if exc.errno == EEXIST and path.isdir(folder_path):
+            pass
+        else:
+            raise
+
+def searchForMaxIteration(folder):
+    saved_iters = [int(fname.split("_")[-1]) for fname in os.listdir(folder)]
+    return max(saved_iters)
+```
+
+### utils/utils.py
+```
+# Copyright 2014-2020 The ODL contributors
+#
+# This file is part of ODL.
+#
+# This Source Code Form is subject to the terms of the Mozilla Public License,
+# v. 2.0. If a copy of the MPL was not distributed with this file, You can
+# obtain one at https://mozilla.org/MPL/2.0/.
+
+"""Tomographic datasets from Mayo Clinic.
+
+In addition to the standard ODL requirements, this library also requires:
+
+    - tqdm
+    - dicom
+    - A copy of the Mayo dataset, see
+    https://www.aapm.org/GrandChallenge/LowDoseCT/#registration
+"""
+
+from __future__ import division
+import numpy as np
+import os
+import sys
+import pydicom as dicom
+import odl
+import tqdm
+import math
+import cv2
+from torch_scatter import scatter_max, scatter_add
+from odl.discr import grid
+from sklearn.neighbors import KDTree
+from skimage.metrics import peak_signal_noise_ratio, structural_similarity
+from pydicom.datadict import DicomDictionary #, NameDict, CleanName
+from odl.discr.discr_utils import linear_interpolator
+from odl.contrib.datasets.ct.mayo_dicom_dict import new_dict_items
+from scipy.spatial.transform import Rotation
+import torch
+import torch.nn.functional as F
+# from skimage.metrics import structural_similarity as structural_similarity
+# Update the DICOM dictionary with the extra Mayo tags
+DicomDictionary.update(new_dict_items)
+#NameDict.update((CleanName(tag), tag) for tag in new_dict_items)
+
+
+__all__ = ('load_projections', 'load_reconstruction')
+
+
+
+def convert_to_quaternion(image_orientation_patient):
+  """
+  Converts image_orientation_patient data (6 elements) to a quaternion.
+
+  Args:
+    image_orientation_patient: A list containing 6 direction cosines.
+
+  Returns:
+    A list representing the quaternion (w, x, y, z).
+  """
+
+  Rx, Ry, Rz, Cx, Cy, Cz = image_orientation_patient
+
+  a = (Rx + Cx) / 2
+  b = (Ry + Cy) / 2
+  c = (Rz + Cz) / 2
+  d = (Rx - Cx) / 2
+  e = (Ry - Cy) / 2
+  f = (Rz - Cz) / 2
+
+  largest = max(a, b, c, d, e, f)
+
+  if largest == a or largest == b or largest == c:
+    w = math.sqrt(1 + a - b - c)
+    x = d / (2 * w)
+    y = e / (2 * w)
+    z = f / (2 * w)
+  elif largest == d:
+    w = math.sqrt(1 + d - a - b)
+    x = 2 * w
+    y = e / (2 * w)
+    z = f / (2 * w)
+  elif largest == e:
+    w = math.sqrt(1 + e - a - b)
+    x = d / (2 * w)
+    y = 2 * w
+    z = f / (2 * w)
+  else:
+    w = math.sqrt(1 + f - a - b)
+    x = d / (2 * w)
+    y = e / (2 * w)
+    z = 2 * w
+
+  return [w, x, y, z]
+
+
+def transform(image_position_patient, image_orientation_patient, PixelSpacing):
+    transformation_matrix = np.zeros((4, 4))
+    transformation_matrix[0, 0:3] = image_orientation_patient[0:3] * PixelSpacing[0]
+    transformation_matrix[1, 0:3] = image_orientation_patient[3:6] * PixelSpacing[1]
+    transformation_matrix[0:3, 3] = image_position_patient
+    transformation_matrix[2, 2] = 1
+    transformation_matrix[3, 3] = 1
+    rotation_matrix = transformation_matrix[0:3, 0:3]
+    translation_vector = transformation_matrix[0:3, 3]
+
+    # Convert the rotation matrix to a quaternion
+    rotation = Rotation.from_matrix(rotation_matrix)
+    quaternion = rotation.as_quat()
+
+    # Invert the pose
+    quaternion = -quaternion
+    translation_vector = -translation_vector
+    print(image_position_patient, translation_vector)
+    return quaternion, translation_vector
+
+
+def _read_projections_alternative(folder, indices):
+    """Read mayo projections from a folder
+    following the DICOM-CT-PD User Manual Version 3""" 
+    datasets = []
+
+    # Get the relevant file names
+    file_names = sorted([f for f in os.listdir(folder) if f.endswith(".dcm")])
+
+    if len(file_names) == 0:
+        raise ValueError('No DICOM files found in {}'.format(folder))
+
+    if indices is not None:
+        file_names = file_names[indices]
+
+    data_array = None
+
+    for i, file_name in enumerate(tqdm.tqdm(file_names,
+                                            'Loading projection data')):
+        # read the file
+        dataset = dicom.read_file(folder + '/' + file_name)
+        dataset.NumberofDetectorRows = dataset[0x70291010].value
+        dataset.NumberofDetectorColumns = dataset[0x70291011].value
+        dataset.HUCalibrationFactor = float(dataset[0x70411001].value)
+        dataset.DetectorFocalCenterAngularPosition = dataset[0x70311001].value
+        dataset.DetectorElementTransverseSpacing = dataset[0x70291002].value
+        dataset.DetectorElementAxialSpacing = dataset[0x70291006].value
+        dataset.DetectorCentralElement = dataset[0x70311033].value
+        dataset.DetectorFocalCenterRadialDistance = dataset[0x70311003].value
+        dataset.ConstantRadialDistance = dataset[0x70311031].value
+        dataset.DetectorFocalCenterAxialPosition = dataset[0x70311002].value
+        dataset.SourceAxialPositionShift = dataset[0x7033100C].value # 0x7033100B?
+        dataset.SourceAngularPositionShift = dataset[0x7033100B].value
+        dataset.SourceRadialDistanceShift = dataset[0x7033100D].value
+
+        # Get some required data
+        rows = dataset.NumberofDetectorRows
+        cols = dataset.NumberofDetectorColumns
+        hu_factor = dataset.HUCalibrationFactor
+        rescale_intercept = dataset.RescaleIntercept
+        rescale_slope = dataset.RescaleSlope
+
+        # Load the array as bytes
+        proj_array = np.array(np.frombuffer(dataset.PixelData, 'H'),
+                              dtype='float32')
+        proj_array = proj_array.reshape([rows, cols], order='F').T
+
+        # Rescale array
+        proj_array *= rescale_slope
+        proj_array += rescale_intercept
+        proj_array /= hu_factor
+
+        # Store results
+        if data_array is None:
+            # We need to load the first dataset before we know the shape
+            data_array = np.empty((len(file_names), cols, rows),
+                                  dtype='float32')
+
+        data_array[i] = proj_array[:, ::-1]
+        datasets.append(dataset)
+
+    return datasets, data_array
+
+
+
+def load_projections(folder, indices=None):
+    """Load geometry and data stored in Mayo format from folder.
+
+    Parameters
+    ----------
+    folder : str
+        Path to the folder where the Mayo DICOM files are stored.
+    indices : optional
+        Indices of the projections to load.
+        Accepts advanced indexing such as slice or list of indices.
+
+    Returns
+    -------
+    geometry : ConeBeamGeometry
+        Geometry corresponding to the Mayo projector.
+    proj_data : `numpy.ndarray`
+        Projection data, given as the line integral of the linear attenuation
+        coefficient (g/cm^3). Its unit is thus g/cm^2.
+    """
+    datasets, data_array = _read_projections_alternative(folder, indices)
+
+    # Get the angles
+    angles = [d.DetectorFocalCenterAngularPosition for d in datasets]
+    angles = -np.unwrap(angles) - np.pi  # different definition of angles
+
+    # Set minimum and maximum corners
+    shape = np.array([datasets[0].NumberofDetectorColumns,
+                      datasets[0].NumberofDetectorRows])
+    pixel_size = np.array([datasets[0].DetectorElementTransverseSpacing,
+                           datasets[0].DetectorElementAxialSpacing])
+
+    # Correct from center of pixel to corner of pixel
+    minp = -(np.array(datasets[0].DetectorCentralElement) - 0.5) * pixel_size
+    maxp = minp + shape * pixel_size
+
+    # Select geometry parameters
+    src_radius = datasets[0].DetectorFocalCenterRadialDistance
+    det_radius = (datasets[0].ConstantRadialDistance -
+                  datasets[0].DetectorFocalCenterRadialDistance)
+
+    # For unknown reasons, mayo does not include the tag
+    # "TableFeedPerRotation", which is what we want.
+    # Instead we manually compute the pitch
+    pitch = ((datasets[-1].DetectorFocalCenterAxialPosition -
+              datasets[0].DetectorFocalCenterAxialPosition) /
+             ((np.max(angles) - np.min(angles)) / (2 * np.pi)))
+
+    # Get flying focal spot data
+    offset_axial = np.array([d.SourceAxialPositionShift for d in datasets])
+    offset_angular = np.array([d.SourceAngularPositionShift for d in datasets])
+    offset_radial = np.array([d.SourceRadialDistanceShift for d in datasets])
+
+    # TODO(adler-j): Implement proper handling of flying focal spot.
+    # Currently we do not fully account for it, merely making some "first
+    # order corrections" to the detector position and radial offset.
+
+    # Update angles with flying focal spot (in plane direction).
+    # This increases the resolution of the reconstructions.
+    angles = angles - offset_angular
+
+    # We correct for the mean offset due to the rotated angles, we need to
+    # shift the detector.
+    offset_detector_by_angles = det_radius * np.mean(offset_angular)
+    minp[0] -= offset_detector_by_angles
+    maxp[0] -= offset_detector_by_angles
+
+    # We currently apply only the mean of the offsets
+    src_radius = src_radius + np.mean(offset_radial)
+
+    # Partially compensate for a movement of the source by moving the object
+    # instead. We need to rescale by the magnification to get the correct
+    # change in the detector. This approximation is only exactly valid on the
+    # axis of rotation.
+    mean_offset_along_axis_for_ffz = np.mean(offset_axial) * (
+        src_radius / (src_radius + det_radius))
+
+    # Create partition for detector
+    detector_partition = odl.uniform_partition(minp, maxp, shape)
+
+    # Convert offset to odl definitions
+    offset_along_axis = (mean_offset_along_axis_for_ffz +
+                         datasets[0].DetectorFocalCenterAxialPosition -
+                         angles[0] / (2 * np.pi) * pitch)
+
+    # Assemble geometry
+    angle_partition = odl.nonuniform_partition(angles)
+    geometry = odl.tomo.ConeBeamGeometry(angle_partition,
+                                         detector_partition,
+                                         src_radius=src_radius,
+                                         det_radius=det_radius,
+                                         pitch=pitch,
+                                         offset_along_axis=offset_along_axis)
+
+    # Create a *temporary* ray transform (we need its range)
+    spc = odl.uniform_discr([-1] * 3, [1] * 3, [32] * 3)
+    ray_trafo = odl.tomo.RayTransform(spc, geometry, interp='linear')
+
+    # convert coordinates
+    theta, up, vp = ray_trafo.range.grid.meshgrid
+    d = src_radius + det_radius
+    u = d * np.arctan(up / d)
+    v = d / np.sqrt(d**2 + up**2) * vp
+
+    # Calculate projection data in rectangular coordinates since we have no
+    # backend that supports cylindrical
+    interpolator = linear_interpolator(
+        data_array, ray_trafo.range.grid.coord_vectors
+    )
+    proj_data = interpolator((theta, u, v))
+
+    return geometry, proj_data#.asarray()
+
+
+def save_ct_images(data,save_root):
+    if not os.path.exists(save_root):
+        os.makedirs(save_root)
+    for i in range(data.shape[2]):
+        img = data[:,:,i]
+        img = (img - img.min())/(img.max()-img.min()) # range 0-1
+        img = (img*255).astype('uint8')
+        img = np.rot90(img,1)
+        img = img.astype(np.uint8)
+        cv2.imwrite(save_root + '/%d.png'%i,img)
+
+
+def load_npy(root):
+    fname_list = os.listdir(root)
+    fname_list = sorted(fname_list, key=lambda x: float(x.split(".")[0]))
+    print(fname_list)
+    all_img = []
+
+    print("Loading all data")
+    for fname in tqdm.tqdm(fname_list):
+        just_name = fname.split('.')[0]
+        img = torch.from_numpy(np.load(os.path.join(root, fname), allow_pickle=True))
+        h, w = img.shape
+        # img = img.view(1, 1, h, w)
+        img = img.view(1, h, w)
+        all_img.append(img)
+    all_img = torch.cat(all_img, dim=0)
+    print(f"Data loaded shape : {all_img.shape}")
+    img = all_img.cuda()
+    return img
+
+
+def load_reconstruction(folder, slice_start=0, slice_end=-1, suffix='.IMA'):
+    """Load a volume from folder, also returns the corresponding partition.
+
+    Parameters
+    ----------
+    folder : str
+        Path to the folder where the DICOM files are stored.
+    slice_start : int
+        Index of the first slice to use. Used for subsampling.
+    slice_end : int
+        Index of the final slice to use.
+
+    Returns
+    -------
+    partition : `odl.RectPartition`
+        Partition describing the geometric positioning of the voxels.
+    data : `numpy.ndarray`
+        Volumetric data. Scaled such that data = 1 for water (0 HU).
+
+    Notes
+    -----
+    DICOM data is highly non trivial. Typically, each slice has been computed
+    with a slice tickness (e.g. 3mm) but the slice spacing might be
+    different from that.
+
+    Further, the coordinates in DICOM is typically the *middle* of the pixel,
+    not the corners as in ODL.
+
+    This function should handle all of these peculiarities and give a volume
+    with the correct coordinate system attached.
+    """
+    file_names = sorted([f for f in os.listdir(folder) if f.endswith(suffix)])
+
+    if len(file_names) == 0:
+        raise ValueError('No DICOM files found in {}'.format(folder))
+
+    volumes = []
+    datasets = []
+
+    # file_names = file_names[slice_start:slice_end]
+
+    for file_name in tqdm.tqdm(file_names, 'loading volume data'):
+        # read the file
+        dataset = dicom.read_file(folder + '/' + file_name)
+
+        # Get parameters
+        pixel_size = np.array(dataset.PixelSpacing)
+        pixel_thickness = float(dataset.SliceThickness)
+        rows = dataset.Rows
+        cols = dataset.Columns
+
+        # Get data array and convert to correct coordinates
+        data_array = np.array(np.frombuffer(dataset.PixelData, 'H'),
+                              dtype='float32')
+        data_array = data_array.reshape([cols, rows], order='C')
+        data_array = np.rot90(data_array, -1)
+
+        # Convert from storage type to densities
+        # TODO: Optimize these computations
+        hu_values = (dataset.RescaleSlope * data_array +
+                     dataset.RescaleIntercept)
+        densities = (hu_values + 1000) / 1000
+
+        # Store results
+        volumes.append(densities)
+        datasets.append(dataset)
+        # pose = transform(np.array(dataset.ImagePositionPatient), np.array(dataset.ImageOrientationPatient),np.array(dataset.PixelSpacing))
+
+    voxel_size = np.array(list(pixel_size) + [pixel_thickness])
+    shape = np.array([rows, cols, len(volumes)])
+
+    # Compute geometry parameters
+    mid_pt = (np.array(dataset.ReconstructionTargetCenterPatient) -
+              np.array(dataset.DataCollectionCenterPatient))
+    reconstruction_size = (voxel_size * shape)
+    min_pt = mid_pt - reconstruction_size / 2
+    max_pt = mid_pt + reconstruction_size / 2
+
+    # axis 1 has reversed convention
+    min_pt[1], max_pt[1] = -max_pt[1], -min_pt[1] # !!!!!!!!!!!!!!!!!!!!!! check this line 2024.3.9
+
+    if len(datasets) > 1:
+        slice_distance = np.abs(
+            float(datasets[1].DataCollectionCenterPatient[2]) -
+            float(datasets[0].DataCollectionCenterPatient[2]))
+    else:
+        # If we only have one slice, we must approximate the distance.
+        slice_distance = pixel_thickness
+
+    # The middle of the minimum/maximum slice can be computed from the
+    # DICOM attribute "DataCollectionCenterPatient". Since ODL uses corner
+    # points (e.g. edge of volume) we need to add half a voxel thickness to
+    # both sides.
+    try:
+        min_pt[2] = -np.array(datasets[0].DataCollectionCenterPatient)[2]
+        min_pt[2] -= 0.5 * slice_distance
+        max_pt[2] = -np.array(datasets[-1].DataCollectionCenterPatient)[2]
+        max_pt[2] += 0.5 * slice_distance
+        partition = odl.uniform_partition(min_pt, max_pt, shape)
+    except:
+        print('!!!!!!!!Load data in the reverse order!!!!!!!!!!')
+        min_pt[2] = -np.array(datasets[-1].DataCollectionCenterPatient)[2]
+        min_pt[2] -= 0.5 * slice_distance
+        max_pt[2] = -np.array(datasets[0].DataCollectionCenterPatient)[2]
+        max_pt[2] += 0.5 * slice_distance
+        partition = odl.uniform_partition(min_pt, max_pt, shape)
+    
+
+    # volume = np.transpose(np.array(volumes), (1, 2, 0))
+    volume = np.array(volumes)
+    return partition, volume
+
+
+def resize_and_crop(image, image_size):
+        # Crop slices in z dim
+    center_idx = int(image.shape[0] / 2)
+    num_slice = int(image_size[0] / 2)
+    image = image[center_idx-num_slice:center_idx+num_slice, :, :]
+    im_size = image.shape
+    print(image.shape, center_idx, num_slice)
+
+    # Complete 3D input image as a squared x-y image
+    if not(im_size[1] == im_size[2]):
+        length = np.max([im_size[1], im_size[2]])
+        zerp_padding = np.zeros([im_size[0], length, length])
+        if im_size[1] > im_size[2]:
+            zerp_padding[:, :, np.int64((im_size[1]-im_size[2])/2):np.int64((im_size[1]-im_size[2])/2)+im_size[2]] = image
+        else:
+            zerp_padding[:, np.int64((im_size[2]-im_size[1])/2):np.int64((im_size[2]-im_size[1])/2)+im_size[1], :] = image
+        image = zerp_padding
+    # Resize image in x-y plane
+    image = torch.tensor(image, dtype=torch.float32)[None, ...]  # [B, C, H, W]
+    image = F.interpolate(image, size=(image_size[1], image_size[2]), mode='bilinear', align_corners=False)
+
+    # Scaling normalization
+    image = image / torch.max(image)  # [B, C, H, W], [0, 1]
+    # image = (image-image.min())/(image.max()-image.min())
+    image = image.permute(1, 2, 3, 0)  # [C, H, W, 1]
+    return image
+
+
+def resize_and_crop_sr(image, image_size):
+        # Crop slices in z dim
+    center_idx = int(image.shape[0] / 2)
+    num_slice = int(image_size[0] / 2)
+    image = image[center_idx-num_slice:center_idx+num_slice, :, :]
+    im_size = image.shape
+    print(image.shape, center_idx, num_slice)
+
+    # Complete 3D input image as a squared x-y image
+    if not(im_size[1] == im_size[2]):
+        length = np.max([im_size[1], im_size[2]])
+        zerp_padding = np.zeros([im_size[0], length, length])
+        if im_size[1] > im_size[2]:
+            zerp_padding[:, :, np.int64((im_size[1]-im_size[2])/2):np.int64((im_size[1]-im_size[2])/2)+im_size[2]] = image
+        else:
+            zerp_padding[:, np.int64((im_size[2]-im_size[1])/2):np.int64((im_size[2]-im_size[1])/2)+im_size[1], :] = image
+        image = zerp_padding
+    # Resize image in x-y plane
+    image = torch.tensor(image, dtype=torch.float32)[None, ...]  # [B, C, H, W]
+    image_lr = F.interpolate(image, size=(image_size[1], image_size[2]), mode='bilinear', align_corners=False)
+
+    # Scaling normalization
+    image = image / torch.max(image)  # [B, C, H, W], [0, 1]
+    # image = (image-image.min())/(image.max()-image.min())
+    image = image.permute(1, 2, 3, 0)  # [C, H, W, 1]
+    image_lr = image_lr / torch.max(image_lr)  # [B, C, H, W], [0, 1]
+    image_lr = image_lr.permute(1, 2, 3, 0)  # [C, H, W, 1]
+    return image, image_lr
+
+def fast_volume_reconstruction(gaussians, target_volume_shape, size=[11, 11, 11]):
+    gaussian_features = gaussians.get_features.transpose(1, 2).view(-1, 1, (gaussians.max_sh_degree+1)**2)
+    colors = gaussian_features[:, :1, 0] # * gaussians.get_opacity
+    colors = torch.clamp_min(colors, 0.0)
+    coords = gaussians.get_xyz
+    symm, actual_covariances, covariances, std = gaussians.get_covariance(1.0)
+    n_gaussians = coords.shape[0]
+    # extent = 0.05
+    target_volume = torch.zeros(target_volume_shape).cuda().reshape(-1)
+    impact_shape = torch.tensor(size).int().cuda()
+    ranges = (impact_shape / torch.tensor(target_volume_shape).cuda()) / 2
+    grid_i, grid_j, grid_k = torch.meshgrid(
+        torch.linspace(-ranges[0], ranges[0], impact_shape[0]),
+        torch.linspace(-ranges[1], ranges[1], impact_shape[1]),
+        torch.linspace(-ranges[2], ranges[2], impact_shape[2]),
+    )
+    impact_coords = torch.stack([grid_i, grid_j, grid_k], dim=-1).cuda() # 13, 13, 5, 3
+    coords = coords * torch.tensor(target_volume_shape).cuda()
+    delta_impact_coords = (coords - coords.floor()) / torch.tensor(target_volume_shape).cuda()
+    coords = coords.floor().long()
+    contributions = colors.reshape(-1,1,1,1) * torch.exp(-0.5 * decomposed_gaussian_computation(impact_coords, delta_impact_coords, torch.inverse(covariances)))
+    shifts = torch.meshgrid(
+        torch.arange(-(impact_shape[0]//2), impact_shape[0]//2 + 1),
+        torch.arange(-(impact_shape[1]//2), impact_shape[1]//2 + 1),
+        torch.arange(-(impact_shape[2]//2), impact_shape[2]//2 + 1),
+    )
+    shifts = torch.stack(shifts, dim=-1).cuda()
+    coords = coords[:, None, None, None, :] + shifts
+    invalid_indices = (coords[..., 0] < 0) | (coords[..., 0] >= target_volume_shape[0]) | (coords[..., 1] < 0) | (coords[..., 1] >= target_volume_shape[1]) | (coords[..., 2] < 0) | (coords[..., 2] >= target_volume_shape[2])
+    positions = coords[..., 0] * target_volume_shape[1] *target_volume_shape[2] + coords[..., 1] * target_volume_shape[2] + coords[..., 2]
+    contributions = contributions.reshape(-1)
+    positions = positions.reshape(-1)
+    valid_indices = (~invalid_indices).reshape(-1)
+    target_volume.scatter_add_(0, positions[valid_indices], contributions[valid_indices])
+    # volume, _ = scatter_max(contributions[valid_indices], positions[valid_indices], dim=0)
+    # target_volume = torch.zeros(target_volume_shape).reshape(-1).cuda()
+    # target_volume[:volume.shape[0]] = volume
+    target_volume = target_volume.reshape(target_volume_shape)
+    return target_volume, impact_shape, std
+
+def resize_volume(volume, size=(256, 256), save_root=None):
+    volume = F.interpolate(torch.tensor(volume, dtype=torch.float32)[None, ...], size=size, mode='bilinear', align_corners=False)[0]
+    volume = (volume - volume.min()) / (volume.max() - volume.min())
+    volume = np.rot90(volume.numpy(), k=1, axes=(1, 2))
+    if save_root is not None:
+        if not os.path.exists(save_root):
+            os.makedirs(save_root)
+        for i in range(volume.shape[0]):
+            image = volume[i]
+            cv2.imwrite(os.path.join(save_root, f'{i:04d}.png'), (image*255).astype(np.uint8))
+    return volume
+
+def resize_volume2(volume, size=(256, 256), save_root=None):
+    volume = torch.tensor(volume, dtype=torch.float32)[None, ...].cuda()
+    volume = F.interpolate(volume, size=size, mode='bilinear', align_corners=False)[0]
+    if not os.path.exists(save_root):
+        os.makedirs(save_root)
+    for i in range(volume.shape[0]):
+        cv2.imwrite(os.path.join(save_root, f'{i:04d}.png'), (volume[i]).cpu().numpy().astype(np.uint8))
+    return volume
+
+
+def evaluation_3d(recon_volume,gt_volume):
+    recon_volume = recon_volume.squeeze().cpu().numpy()
+    gt_volume = gt_volume.squeeze().cpu().numpy()
+    psnr, ssim = [], []
+    for i in range(recon_volume.shape[2]):
+        recon_axial = recon_volume[:,:,i]
+        gt_axial = gt_volume[:,:,i]
+        psnr_axial, ssim_axial = peak_signal_noise_ratio(recon_axial, gt_axial, data_range=1), structural_similarity(recon_axial, gt_axial, multichannel=False, data_range=1)
+        psnr.append(psnr_axial)
+        ssim.append(ssim_axial)
+    print('axial PSNR:', np.mean(psnr))
+    print('axial SSIM:', np.mean(ssim))
+
+    # compute coronal view
+    psnr, ssim = [], []
+    for i in range(recon_volume.shape[0]):
+        recon_coronal = recon_volume[i,:,:]
+        gt_coronal = gt_volume[i,:,:]
+        psnr_coronal, ssim_coronal = peak_signal_noise_ratio(recon_coronal, gt_coronal, data_range=1), structural_similarity(recon_coronal, gt_coronal, multichannel=False, data_range=1)
+        psnr.append(psnr_coronal)
+        ssim.append(ssim_coronal)
+    print('coronal PSNR:', np.mean(psnr))
+    print('coronal SSIM:', np.mean(ssim))
+
+    # compute sagittal view
+    psnr, ssim = [], []
+    for i in range(recon_volume.shape[1]):
+        recon_sagittal = recon_volume[:,i,:]
+        gt_sagittal = gt_volume[:,i,:]
+        psnr_sagittal, ssim_sagittal = peak_signal_noise_ratio(recon_sagittal, gt_sagittal, data_range=1), structural_similarity(recon_sagittal, gt_sagittal, multichannel=False, data_range=1)
+        psnr.append(psnr_sagittal)
+        ssim.append(ssim_sagittal)
+    print('sagittal PSNR:', np.mean(psnr))
+    print('sagittal SSIM:', np.mean(ssim))
+
+    sys.stdout.flush()
+
+def quick_evaluation(test_output,test_data):
+    mse = torch.mean((test_output - test_data)**2)
+    # max_pixel_value = torch.max(test_data)
+    # if max_pixel_value != 1:
+    #     print('max_pixel_value:', max_pixel_value)
+    test_psnr = 10 * torch.log10(1 / mse)
+    test_ssim = structural_similarity(test_output.squeeze().cpu().numpy(), test_data.squeeze().cpu().numpy(), multichannel=True, data_range=1)
+    print('MSE:{:.4f}, PSNR: {:.4f}, SSIM: {:.4f}'.format(mse*255*255/1000, test_psnr, test_ssim))
+    sys.stdout.flush()
+
+# def quick_evaluation(test_output,test_data):
+#     loss_fn = torch.nn.MSELoss()
+#     test_loss = 0.5 * loss_fn(test_output, test_data)
+#     test_psnr = - 10 * torch.log10(2 * test_loss).item()
+#     test_loss = test_loss.item()
+#     test_ssim = structural_similarity(test_output.squeeze().cpu().numpy(), test_data.squeeze().cpu().numpy(), multichannel=True, data_range=2)
+#     print('Test Loss: {:.4f}, PSNR: {:.4f}, SSIM: {:.4f}'.format(test_loss, test_psnr, test_ssim))
+
+def count_neighbors(points, distance_threshold):
+    tree = KDTree(points)
+    neighbor_count = np.zeros(points.shape[0])
+    for i in tqdm.tqdm(range(len(points))):
+        num_neighbors = tree.query_radius(points[i].reshape(1,-1), distance_threshold, count_only=True)[0]
+        neighbor_count[i] = num_neighbors - 1
+    return neighbor_count
+
+
+def compute_mean_distance(points):
+    points_np = points.detach().cpu().float().numpy()
+    dists, inds = KDTree(points_np).query(points_np, k=4)
+    meanDists = (dists[:, 1:] ** 2).mean(1)
+
+    return torch.tensor(meanDists, dtype=points.dtype, device=points.device)
+
+def count_neighbors_gpu(points, distance_threshold, batch_size=4096):
+    points = torch.tensor(points).cuda()  # Move data to GPU
+    distance_threshold = torch.tensor(distance_threshold).cuda()
+
+    num_points = points.shape[0]
+    neighbor_count = torch.zeros(num_points, device='cuda')
+
+    # Process each batch separately
+    for i in tqdm.tqdm(range(0, num_points, batch_size)):
+        batch_points = points[i:i+batch_size]
+        dist_matrix = torch.cdist(batch_points, points)  # Compute distances to all points
+        neighbor_count[i:i+batch_size] = torch.sum(dist_matrix < distance_threshold, dim=1) - 1  # Count neighbors for each point in batch
+
+    return neighbor_count.cpu().numpy()  # Move data back to CPU
+
+
+def patched_fast_gaussian_computation(A, B, C, patch_size = 10000):
+    _B = B[:,None,None,:]
+    ATCA = []
+    ATCB = []
+    BTCA = []
+    for i in range(0, B.shape[0], patch_size):
+        ATCA.append(torch.einsum('ijkl,bll,ijkl->bijk',A,C[i: i+patch_size],A))
+    ATCA = torch.cat(ATCA, dim=0)
+    # del ATCA
+    for i in range(0, B.shape[0], patch_size):
+        ATCB.append(torch.einsum('ijkl,bll,bxxl->bijk',A,C[i: i+patch_size],_B[i:i+patch_size]))
+    ATCB = torch.cat(ATCB, dim=0)
+    # del ATCB
+    for i in range(0, B.shape[0], patch_size):
+        BTCA.append(torch.einsum('bxxl,bll,ijkl->bijk',_B[i: i+patch_size],C[i: i+patch_size],A))
+    BTCA = torch.cat(BTCA, dim=0)
+    # del BTCA
+    BTCB =  torch.einsum('bxxl,bll,bxxl->b',_B,C,_B)[:,None,None,None]
+    return ATCA - ATCB - BTCA + BTCB
+
+
+def decomposed_gaussian_computation(A, B, C):
+    _B = B[:,None,None,:]
+    ATCA = torch.einsum('ijkl,bll,ijkl->bijk',A,C,A)
+    ATCB = torch.einsum('ijkl,bll,bxxl->bijk',A,C,_B)
+    BTCA = torch.einsum('bxxl,bll,ijkl->bijk',_B,C,A)
+    BTCB = torch.einsum('bxxl,bll,bxxl->b',_B,C,_B)
+    return ATCA - ATCB - BTCA + BTCB[:,None,None,None]
+
+
+
+def get_mask(img, size, batch_size, type='gaussian2d', acc_factor=8, center_fraction=0.04, fix=False):
+  mux_in = size ** 2
+  if type.endswith('2d'):
+    Nsamp = mux_in // acc_factor
+  elif type.endswith('1d'):
+    Nsamp = size // acc_factor
+  if type == 'gaussian2d':
+    mask = torch.zeros_like(img)
+    cov_factor = size * (1.5 / 128)
+    mean = [size // 2, size // 2]
+    cov = [[size * cov_factor, 0], [0, size * cov_factor]]
+    if fix:
+      samples = np.random.multivariate_normal(mean, cov, int(Nsamp))
+      int_samples = samples.astype(int)
+      int_samples = np.clip(int_samples, 0, size - 1)
+      mask[..., int_samples[:, 0], int_samples[:, 1]] = 1
+    else:
+      for i in range(batch_size):
+        # sample different masks for batch
+        samples = np.random.multivariate_normal(mean, cov, int(Nsamp))
+        int_samples = samples.astype(int)
+        int_samples = np.clip(int_samples, 0, size - 1)
+        mask[i, :, int_samples[:, 0], int_samples[:, 1]] = 1
+  elif type == 'uniformrandom2d':
+    mask = torch.zeros_like(img)
+    if fix:
+      mask_vec = torch.zeros([1, size * size])
+      samples = np.random.choice(size * size, int(Nsamp))
+      mask_vec[:, samples] = 1
+      mask_b = mask_vec.view(size, size)
+      mask[:, ...] = mask_b
+    else:
+      for i in range(batch_size):
+        # sample different masks for batch
+        mask_vec = torch.zeros([1, size * size])
+        samples = np.random.choice(size * size, int(Nsamp))
+        mask_vec[:, samples] = 1
+        mask_b = mask_vec.view(size, size)
+        mask[i, ...] = mask_b
+  elif type == 'gaussian1d':
+    mask = torch.zeros_like(img)
+    mean = size // 2
+    std = size * (15.0 / 128)
+    Nsamp_center = int(size * center_fraction)
+    if fix:
+      samples = np.random.normal(loc=mean, scale=std, size=int(Nsamp * 1.2))
+      int_samples = samples.astype(int)
+      int_samples = np.clip(int_samples, 0, size - 1)
+      mask[... , int_samples] = 1
+      c_from = size // 2 - Nsamp_center // 2
+      mask[... , c_from:c_from + Nsamp_center] = 1
+    else:
+      for i in range(batch_size):
+        samples = np.random.normal(loc=mean, scale=std, size=int(Nsamp*1.2))
+        int_samples = samples.astype(int)
+        int_samples = np.clip(int_samples, 0, size - 1)
+        mask[i, :, :, int_samples] = 1
+        c_from = size // 2 - Nsamp_center // 2
+        mask[i, :, :, c_from:c_from + Nsamp_center] = 1
+  elif type == 'uniform1d':
+    mask = torch.zeros_like(img)
+    if fix:
+      Nsamp_center = int(size * center_fraction)
+      samples = np.random.choice(size, int(Nsamp - Nsamp_center))
+      mask[..., samples] = 1
+      # ACS region
+      c_from = size // 2 - Nsamp_center // 2
+      mask[..., c_from:c_from + Nsamp_center] = 1
+    else:
+      for i in range(batch_size):
+        Nsamp_center = int(size * center_fraction)
+        samples = np.random.choice(size, int(Nsamp - Nsamp_center))
+        mask[i, :, :, samples] = 1
+        # ACS region
+        c_from = size // 2 - Nsamp_center // 2
+        mask[i, :, :, c_from:c_from+Nsamp_center] = 1
+  else:
+    NotImplementedError(f'Mask type {type} is currently not supported.')
+
+  return mask
+
+
+def total_variation_loss(t):
+    loss = torch.mean(torch.abs(t[:, :, :-1] - t[:, :, 1:])) + torch.mean(torch.abs(t[:, :-1, :] - t[:, 1:, :])) + torch.mean(torch.abs(t[:-1, :, :] - t[1:, :, :]))
+    return loss
+
+
+def init_ct_op(img,r, Fan_ray_trafo, Fan_FBP):
+    img = img.cpu().numpy()
+    batch = img.shape[0]
+    sinogram = np.zeros([batch,720,720])
+
+    sparse_sinogram = np.zeros([batch,720,720])
+    ori_img = np.zeros_like(img)
+    sinogram_max = np.zeros([batch,1])
+    for i in range(batch):
+        sinogram[i,...] = Fan_ray_trafo(img[i,...]).data
+        ori_img[i,...] = Fan_FBP(sinogram[i,...]).data
+        sinogram_max[i,0] = sinogram[i,...].max()
+        t = np.copy(sinogram[i,::r,:])
+        sparse_sinogram[i,...] = cv2.resize(t,[720,720])
+    
+    return ori_img, sparse_sinogram.astype(np.float32), sinogram.astype(np.float32),sinogram_max
+
+
+
+
+
+if __name__ == '__main__':
+    from odl.util.testutils import run_doctests
+    run_doctests()
+```
